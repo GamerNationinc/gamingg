@@ -179,7 +179,12 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // the wire changed, but a log recorded under 26 replays its movement through
 // a different integrator and may land a block off where it did — so it is a
 // different version, and the loader stays as tolerant as it has always been.
-const VERSION: u32 = 28;
+// 28: a town founded, and a town taken (stage 43).
+// 29: every body runs in `f64` (stage 45), and the one float on the wire —
+// the muzzle of a shot — is written at that width. A log recorded under 28
+// carries `f32` muzzles four bytes shorter and cannot be read; it restarts
+// the oracle like every older log.
+const VERSION: u32 = 29;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -288,9 +293,9 @@ pub enum Command {
     /// rebuilds stands a few subticks from where the live body stood when the
     /// trigger was pulled. A shot breaks blocks, blocks are in the hash, and
     /// a hash must not depend on which clock you asked. The floats cross the
-    /// wire as raw bits, like `SetTuning`.
+    /// wire as raw bits, like `SetTuning`, at the width the body runs at.
     Fire {
-        muzzle: [f32; 3],
+        muzzle: [f64; 3],
         yaw_q: i16,
         pitch_q: i16,
     },
@@ -907,7 +912,7 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
             crate::arsenal::launch(
                 &mut state.shots,
                 &mut state.movement,
-                glam::Vec3::from(*muzzle),
+                glam::DVec3::from(*muzzle),
                 *yaw_q,
                 *pitch_q,
             );
@@ -954,7 +959,7 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                 // recorded: the weather is a pure function of the tick and
                 // the strike is hashed off the same, so both sides get the
                 // same storm over the same ground.
-                let standing = state.player.position.as_vec3();
+                let standing = state.player.position;
                 burn_and_grow(
                     &mut state.fires,
                     &mut state.stands,
@@ -1010,7 +1015,7 @@ pub fn burn_and_grow(
     stands: &mut crate::succession::Ledger,
     world: &mut World,
     tick: u64,
-    standing: glam::Vec3,
+    standing: glam::DVec3,
 ) -> crate::frost::Report {
     let seed = world.seed();
     let at = BlockPos::new(
@@ -1435,9 +1440,9 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
             value: f32::from_bits(read_u32(file)?),
         }),
         12 => {
-            let mut muzzle = [0f32; 3];
+            let mut muzzle = [0f64; 3];
             for part in &mut muzzle {
-                *part = f32::from_bits(read_u32(file)?);
+                *part = f64::from_bits(read_u64(file)?);
             }
             let mut yaw = [0u8; 2];
             file.read_exact(&mut yaw)?;
@@ -2351,7 +2356,7 @@ mod fire_tests {
             let mut journal = CommandLog::default();
             let mut rebuilt = Rebuilt::default();
 
-            let ground = world.generator().height_at(10, 10) as f32;
+            let ground = f64::from(world.generator().height_at(10, 10));
             // Stand above open ground and fire down at an angle, twice, with
             // ticks between: each shot arcs into the dirt and craters it.
             let muzzle = [10.5, ground + 8.0, 10.5];
@@ -2442,6 +2447,59 @@ mod fire_tests {
             })
             .count();
         assert!(cold > 0, "the hash moved but nothing near the origin is snow or ice");
+    }
+
+    /// **A shot lands the same crater three thousand kilometres out.** The
+    /// same two rounds from the same muzzle over the same floor, at the
+    /// origin and far out; the wounds they leave, read relative to the
+    /// floor's corner, are identical block for block and mask for mask.
+    /// The muzzle crosses the wire at `f64`, so it starts where the eye is.
+    #[test]
+    fn a_shot_lands_the_same_crater_three_thousand_kilometres_out() {
+        let floor = |world: &mut World, ox: i32, oz: i32| {
+            world.load_around(vx_core::BlockPos::new(ox, 0, oz).chunk(), 2);
+            let stone = world.registry().id_of("engine:stone").unwrap();
+            for x in -24..40 {
+                for z in -24..24 {
+                    for y in 60..90 {
+                        world.set_block(vx_core::BlockPos::new(ox + x, y, oz + z), vx_core::BlockId::AIR);
+                    }
+                    world.set_block(vx_core::BlockPos::new(ox + x, 64, oz + z), stone);
+                }
+            }
+        };
+        let fight = |ox: i32, oz: i32| {
+            let mut world = World::new(2024);
+            floor(&mut world, ox, oz);
+            let mut journal = CommandLog::default();
+            let muzzle = [f64::from(ox) + 10.5, 65.0 + 8.0, f64::from(oz) + 10.5];
+            for (yaw_q, pitch_q, wait) in [(0i16, -700i16, 6u32), (1024, -650, 8)] {
+                journal.record(Command::Fire { muzzle, yaw_q, pitch_q });
+                journal.record(Command::Advance { ticks: wait });
+            }
+            let start = glam::DVec3::new(f64::from(ox) + 10.5, 65.0, f64::from(oz) + 10.5);
+            replay_from(&journal, &mut world, &EventBus::new(), start);
+            // Every block that is no longer plain floor, relative to the corner.
+            let mut wounds = Vec::new();
+            for x in -24..40 {
+                for z in -24..24 {
+                    for y in 60..90 {
+                        let at = vx_core::BlockPos::new(ox + x, y, oz + z);
+                        let block = world.block(at);
+                        let mask = world.mask(at);
+                        let plain = if y == 64 { block != vx_core::BlockId::AIR && mask.is_none() } else { block == vx_core::BlockId::AIR };
+                        if !plain {
+                            wounds.push((x, y, z, block, mask));
+                        }
+                    }
+                }
+            }
+            wounds
+        };
+        let here = fight(0, 0);
+        let there = fight(3_000_000, 3_000_000);
+        assert!(!here.is_empty(), "the rounds left no mark on the floor");
+        assert_eq!(here, there, "the craters differ far out");
     }
 
     /// A pump switched on replays to the same water it lifted.

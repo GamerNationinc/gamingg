@@ -10,7 +10,7 @@
 //! Marks are live-side intelligence, like the town books: journal replay
 //! never sees them, because they never touch the ground the hash covers.
 
-use glam::Vec3;
+use glam::DVec3;
 use vx_world::World;
 
 /// Ticks a mark survives unsighted (30 s at the 8 Hz journal clock).
@@ -32,7 +32,7 @@ pub enum MarkKind {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Mark {
     pub kind: MarkKind,
-    pub position: Vec3,
+    pub position: DVec3,
     /// The journal tick it was (last) seen at.
     pub seen: u64,
 }
@@ -63,21 +63,21 @@ impl Marks {
     pub fn scan(
         &mut self,
         world: &World,
-        eye: Vec3,
+        eye: DVec3,
         radius: f32,
-        contacts: &[(MarkKind, Vec3)],
+        contacts: &[(MarkKind, DVec3)],
         now: u64,
     ) {
         for &(kind, at) in contacts {
-            let target = at + Vec3::Y * 1.0;
-            if (target - eye).length() > radius {
+            let target = at + DVec3::Y * 1.0;
+            if (target - eye).length() > f64::from(radius) {
                 continue;
             }
             if !vx_world::sight::sees(
                 world,
                 world.registry(),
-                eye.as_dvec3(),
-                target.as_dvec3(),
+                eye,
+                target,
                 radius + 2.0,
             ) {
                 continue;
@@ -85,7 +85,7 @@ impl Marks {
             match self
                 .marks
                 .iter_mut()
-                .find(|mark| mark.kind == kind && (mark.position - at).length() < SAME_CONTACT)
+                .find(|mark| mark.kind == kind && (mark.position - at).length() < f64::from(SAME_CONTACT))
             {
                 Some(mark) => {
                     mark.position = at;
@@ -136,13 +136,13 @@ mod tests {
     fn a_mark_decays_exactly_on_schedule() {
         let world = open_world();
         let mut marks = Marks::default();
-        let eye = Vec3::new(0.5, SKY + 8.0, 0.5);
+        let eye = DVec3::new(0.5, f64::from(SKY) + 8.0, 0.5);
         let seen_at = 100;
         marks.scan(
             &world,
             eye,
             24.0,
-            &[(MarkKind::Person, Vec3::new(4.5, SKY, 4.5))],
+            &[(MarkKind::Person, DVec3::new(4.5, f64::from(SKY), 4.5))],
             seen_at,
         );
         assert_eq!(marks.live(seen_at).count(), 1, "the contact was not marked");
@@ -163,8 +163,8 @@ mod tests {
     fn resighting_refreshes_instead_of_duplicating() {
         let world = open_world();
         let mut marks = Marks::default();
-        let eye = Vec3::new(0.5, SKY + 8.0, 0.5);
-        let walker = |t: f32| Vec3::new(4.5 + t, SKY, 4.5);
+        let eye = DVec3::new(0.5, f64::from(SKY) + 8.0, 0.5);
+        let walker = |t: f64| DVec3::new(4.5 + t, f64::from(SKY), 4.5);
         marks.scan(&world, eye, 24.0, &[(MarkKind::Person, walker(0.0))], 100);
         marks.scan(&world, eye, 24.0, &[(MarkKind::Person, walker(1.0))], 110);
         assert_eq!(
@@ -186,9 +186,9 @@ mod tests {
             }
         }
         let mut marks = Marks::default();
-        let eye = Vec3::new(4.5, SKY + 8.0, 4.5);
-        let sheltered = Vec3::new(4.5, SKY, 4.5);
-        let exposed = Vec3::new(20.5, SKY, 4.5);
+        let eye = DVec3::new(4.5, f64::from(SKY) + 8.0, 4.5);
+        let sheltered = DVec3::new(4.5, f64::from(SKY), 4.5);
+        let exposed = DVec3::new(20.5, f64::from(SKY), 4.5);
         marks.scan(
             &world,
             eye,
@@ -199,7 +199,7 @@ mod tests {
             ],
             50,
         );
-        let seen: Vec<Vec3> = marks.live(50).map(|mark| mark.position).collect();
+        let seen: Vec<DVec3> = marks.live(50).map(|mark| mark.position).collect();
         assert_eq!(seen, vec![exposed], "cover from above did not count: {seen:?}");
     }
 
@@ -207,12 +207,12 @@ mod tests {
     fn out_of_radius_is_out_of_the_report() {
         let world = open_world();
         let mut marks = Marks::default();
-        let eye = Vec3::new(0.5, SKY, 0.5);
+        let eye = DVec3::new(0.5, f64::from(SKY), 0.5);
         marks.scan(
             &world,
             eye,
             24.0,
-            &[(MarkKind::Machine, Vec3::new(60.5, SKY, 0.5))],
+            &[(MarkKind::Machine, DVec3::new(60.5, f64::from(SKY), 0.5))],
             10,
         );
         assert!(marks.is_empty(), "marked something beyond the scanner");

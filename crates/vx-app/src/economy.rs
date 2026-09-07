@@ -477,13 +477,13 @@ impl Shipment {
 
     /// Where the load is at `now`, as a column. Pure in the clock: same tick,
     /// same place, however often it is asked.
-    pub fn position_at(&self, now: u64) -> (f32, f32) {
-        let span = self.arrive.saturating_sub(self.depart).max(1) as f32;
-        let travelled = now.saturating_sub(self.depart) as f32;
+    pub fn position_at(&self, now: u64) -> (f64, f64) {
+        let span = self.arrive.saturating_sub(self.depart).max(1) as f64;
+        let travelled = now.saturating_sub(self.depart) as f64;
         let t = (travelled / span).clamp(0.0, 1.0);
         (
-            self.from.0 as f32 + (self.to.0 - self.from.0) as f32 * t,
-            self.from.1 as f32 + (self.to.1 - self.from.1) as f32 * t,
+            f64::from(self.from.0) + f64::from(self.to.0 - self.from.0) * t,
+            f64::from(self.from.1) + f64::from(self.to.1 - self.from.1) * t,
         )
     }
 }

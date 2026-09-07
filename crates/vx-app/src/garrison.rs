@@ -35,7 +35,7 @@
 //! and a cleared shelter is session state. Nothing here reaches the replay
 //! oracle, and the journal never learns a bunker was held.
 
-use glam::Vec3;
+use glam::DVec3;
 
 use vx_world::bunker::Tier;
 use vx_world::World;
@@ -83,9 +83,9 @@ pub fn strength(tier: Tier) -> usize {
 
 /// Quantise a heard position to its zone centre. The director's whole
 /// vocabulary: it may say "that cell", never "right there".
-pub fn zone_of(at: Vec3) -> Vec3 {
-    let grade = HINT_GRADE as f32;
-    Vec3::new(
+pub fn zone_of(at: DVec3) -> DVec3 {
+    let grade = HINT_GRADE as f64;
+    DVec3::new(
         (at.x / grade).floor() * grade + grade * 0.5,
         at.y,
         (at.z / grade).floor() * grade + grade * 0.5,
@@ -100,7 +100,7 @@ pub struct Garrison {
     pub centre: (i32, i32),
     pub tier: Tier,
     /// Where the hatch is: home, and the anchor of the leash.
-    hatch: Vec3,
+    hatch: DVec3,
     pub holders: Vec<Deputy>,
     belief: Belief,
     pathing: Pathing,
@@ -121,15 +121,15 @@ impl Garrison {
     /// Raise a shelter's squad from its own seed: same bunker, same
     /// holders, every session.
     pub fn muster(site: &vx_world::bunker::BunkerSite) -> Self {
-        let hatch = Vec3::new(
-            site.hatch.0 as f32 + 0.5,
-            (site.hatch_ground + 1) as f32,
-            site.hatch.1 as f32 + 0.5,
+        let hatch = DVec3::new(
+            site.hatch.0 as f64 + 0.5,
+            (site.hatch_ground + 1) as f64,
+            site.hatch.1 as f64 + 0.5,
         );
         let holders = (0..strength(site.tier))
             .map(|index| {
-                let angle = index as f32 * std::f32::consts::TAU / strength(site.tier) as f32;
-                let at = hatch + Vec3::new(angle.cos() * 4.0, 0.0, angle.sin() * 4.0);
+                let angle = index as f64 * std::f64::consts::TAU / strength(site.tier) as f64;
+                let at = hatch + DVec3::new(angle.cos() * 4.0, 0.0, angle.sin() * 4.0);
                 Deputy::new(
                     at,
                     crate::people::temperament_from(site.seed ^ (index as u64) << 3),
@@ -164,14 +164,14 @@ impl Garrison {
 
     /// A noise reached this garrison. The director's one sentence: the
     /// zone, never the spot, and only when it does not already know better.
-    pub fn hear(&mut self, at: Vec3) {
+    pub fn hear(&mut self, at: DVec3) {
         let gap = (at - self.hatch).length();
-        if gap > LEASH + HINT_GRADE as f32 {
+        if gap > f64::from(LEASH) + f64::from(HINT_GRADE) {
             return;
         }
         // Noise *on* their ground is a provocation, truce or none: a drill
         // chewing rock inside the leash is not a stranger passing through.
-        if gap <= LEASH {
+        if gap <= f64::from(LEASH) {
             self.grudge = true;
         }
         // Fresh eyes beat a rumour: a hint never overwrites a confident
@@ -183,7 +183,7 @@ impl Garrison {
     }
 
     /// A round of the player's crossed this squad.
-    pub fn under_fire(&mut self, from: Vec3, to: Vec3) -> Report {
+    pub fn under_fire(&mut self, from: DVec3, to: DVec3) -> Report {
         // A round is the end of any conversation.
         self.grudge = true;
         // Being shot from anywhere near tells them roughly where from.
@@ -197,7 +197,7 @@ impl Garrison {
         &mut self,
         dt: f32,
         world: &World,
-        player: Vec3,
+        player: DVec3,
         player_down: bool,
         truce: bool,
     ) -> Report {
@@ -212,8 +212,8 @@ impl Garrison {
         }
 
         let registry = world.registry();
-        let eye_of_player = player + Vec3::Y * crate::awareness::PLAYER_EYE;
-        let near = (player - self.hatch).length() <= LEASH;
+        let eye_of_player = player + DVec3::Y * f64::from(crate::awareness::PLAYER_EYE);
+        let near = (player - self.hatch).length() <= f64::from(LEASH);
 
         let seen_by: Vec<bool> = self
             .holders
@@ -221,12 +221,12 @@ impl Garrison {
             .map(|holder| {
                 holder.active()
                     && near
-                    && (player - holder.position).length() <= crate::awareness::SIGHT_RANGE * 1.5
+                    && (player - holder.position).length() <= f64::from(crate::awareness::SIGHT_RANGE * 1.5)
                     && vx_world::sight::sees(
                         world,
                         registry,
-                        holder.eye().as_dvec3(),
-                        eye_of_player.as_dvec3(),
+                        holder.eye(),
+                        eye_of_player,
                         crate::awareness::SIGHT_RANGE * 1.5,
                     )
             })
@@ -249,7 +249,7 @@ impl Garrison {
                         .push("HOLDER: WALK ON - THIS GROUND IS HELD".into());
                 }
                 self.grace = (self.grace - dt).max(0.0);
-                if gap <= LEASH * INNER_RING || (self.grace == 0.0 && gap <= LEASH * 0.75) {
+                if gap <= f64::from(LEASH * INNER_RING) || (self.grace == 0.0 && gap <= f64::from(LEASH * 0.75)) {
                     self.grudge = true;
                     report.barks.push("HOLDER: YOU WERE TOLD".into());
                 }
@@ -275,7 +275,7 @@ impl Garrison {
                     .surface_y(x, z)
                     .is_some_and(|top| (top - self.hatch.y as i32).abs() < 12)
             });
-            let eyes: Vec<Vec3> = self
+            let eyes: Vec<DVec3> = self
                 .holders
                 .iter()
                 .filter(|holder| holder.active())
@@ -283,13 +283,13 @@ impl Garrison {
                 .collect();
             self.belief.clear_seen(|x, z| {
                 eyes.iter().any(|eye| {
-                    let at = Vec3::new(x as f32 + 0.5, eye.y, z as f32 + 0.5);
-                    (at - *eye).length() <= crate::awareness::SIGHT_RANGE
+                    let at = DVec3::new(x as f64 + 0.5, eye.y, z as f64 + 0.5);
+                    (at - *eye).length() <= f64::from(crate::awareness::SIGHT_RANGE)
                         && vx_world::sight::sees(
                             world,
                             registry,
-                            eye.as_dvec3(),
-                            at.as_dvec3(),
+                            *eye,
+                            at,
                             crate::awareness::SIGHT_RANGE,
                         )
                 })
@@ -300,17 +300,17 @@ impl Garrison {
         let goal = if exposed {
             player
         } else if let Some((x, z)) = self.belief.search_target(self.hatch) {
-            Vec3::new(x as f32 + 0.5, self.hatch.y, z as f32 + 0.5)
+            DVec3::new(x as f64 + 0.5, self.hatch.y, z as f64 + 0.5)
         } else {
             self.hatch
         };
         self.pathing.steer(dt, world, goal);
 
-        let positions: Vec<Vec3> = self.holders.iter().map(|holder| holder.position).collect();
+        let positions: Vec<DVec3> = self.holders.iter().map(|holder| holder.position).collect();
         let search = self.belief.search_target(self.hatch);
 
         for (index, sees) in seen_by.iter().copied().enumerate() {
-            let allies: Vec<Vec3> = positions
+            let allies: Vec<DVec3> = positions
                 .iter()
                 .enumerate()
                 .filter(|(other, _)| *other != index)
@@ -353,13 +353,13 @@ impl Garrison {
         holder: &mut Deputy,
         dt: f32,
         world: &World,
-        player: Vec3,
+        player: DVec3,
         player_down: bool,
         sees: bool,
         may_move: bool,
-        allies: &[Vec3],
+        allies: &[DVec3],
         search: Option<(i32, i32)>,
-        hatch: Vec3,
+        hatch: DVec3,
         route: &Pathing,
         report: &mut Report,
     ) -> bool {
@@ -399,12 +399,12 @@ impl Garrison {
             Mode::Engage => {
                 let gap = (player - holder.position).length();
                 holder.face(player);
-                let leashed = (player - hatch).length() > LEASH;
-                if gap > hostile::ENGAGE_RANGE && !leashed && may_move {
+                let leashed = (player - hatch).length() > f64::from(LEASH);
+                if gap > f64::from(hostile::ENGAGE_RANGE) && !leashed && may_move {
                     hostile::Posse::walk(holder, dt, player, 3.0, world, Some(route));
                     return false;
                 }
-                if gap > hostile::ENGAGE_RANGE {
+                if gap > f64::from(hostile::ENGAGE_RANGE) {
                     return false;
                 }
                 if holder.reload > 0.0
@@ -433,7 +433,7 @@ impl Garrison {
             Mode::Investigate => {
                 if may_move {
                     if let Some((x, z)) = search {
-                        let to = Vec3::new(x as f32 + 0.5, holder.position.y, z as f32 + 0.5);
+                        let to = DVec3::new(x as f64 + 0.5, holder.position.y, z as f64 + 0.5);
                         hostile::Posse::walk(holder, dt, to, 2.4, world, Some(route));
                         holder.face(to);
                     }
@@ -452,13 +452,13 @@ impl Garrison {
     }
 
     /// The surrendered holder nearest `at`, within `reach`.
-    pub fn surrendered_near(&self, at: Vec3, reach: f32) -> Option<usize> {
+    pub fn surrendered_near(&self, at: DVec3, reach: f32) -> Option<usize> {
         self.holders
             .iter()
             .enumerate()
             .filter(|(_, holder)| holder.mode == Mode::Surrender)
             .map(|(index, holder)| (index, (holder.position - at).length()))
-            .filter(|(_, gap)| *gap <= reach)
+            .filter(|(_, gap)| *gap <= f64::from(reach))
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|(index, _)| index)
     }
@@ -487,18 +487,18 @@ pub struct Garrisons {
 
 impl Garrisons {
     /// Muster the garrison of any bunker the player has come near.
-    pub fn muster_near(&mut self, world: &World, player: Vec3) {
+    pub fn muster_near(&mut self, world: &World, player: DVec3) {
         let sites = world
             .generator()
             .bunkers_near((player.x.floor() as i32, player.z.floor() as i32), 160);
         for site in sites {
-            let hatch = Vec3::new(
-                site.hatch.0 as f32,
-                (site.hatch_ground + 1) as f32,
-                site.hatch.1 as f32,
+            let hatch = DVec3::new(
+                site.hatch.0 as f64,
+                (site.hatch_ground + 1) as f64,
+                site.hatch.1 as f64,
             );
-            let margin = site.reach() as f32 + MUSTER_MARGIN;
-            if (Vec3::new(player.x, hatch.y, player.z) - hatch).length() > margin {
+            let margin = f64::from(site.reach()) + f64::from(MUSTER_MARGIN);
+            if (DVec3::new(player.x, hatch.y, player.z) - hatch).length() > margin {
                 continue;
             }
             if self.cleared.contains(&site.centre)
@@ -515,7 +515,7 @@ impl Garrisons {
         &mut self,
         dt: f32,
         world: &World,
-        player: Vec3,
+        player: DVec3,
         player_down: bool,
         truce: bool,
     ) -> Report {
@@ -541,14 +541,14 @@ impl Garrisons {
     }
 
     /// A noise for every squad in earshot.
-    pub fn hear(&mut self, at: Vec3) {
+    pub fn hear(&mut self, at: DVec3) {
         for squad in &mut self.squads {
             squad.hear(at);
         }
     }
 
     /// A player round, past every squad.
-    pub fn under_fire(&mut self, from: Vec3, to: Vec3) -> Report {
+    pub fn under_fire(&mut self, from: DVec3, to: DVec3) -> Report {
         let mut report = Report::default();
         for squad in &mut self.squads {
             let one = squad.under_fire(from, to);
@@ -566,11 +566,11 @@ impl Garrisons {
     /// inside its leash the kestrel's contact marks simply do not take.
     /// Only grudged shelters jam — running a jammer is itself a declaration,
     /// and a truce-holding squad would not tip its hand.
-    pub fn jamming_at(&self, eye: Vec3) -> bool {
+    pub fn jamming_at(&self, eye: DVec3) -> bool {
         self.squads.iter().any(|squad| {
             squad.grudge
                 && !squad.broken()
-                && (eye - squad.hatch).length() <= LEASH
+                && (eye - squad.hatch).length() <= f64::from(LEASH)
         })
     }
 
@@ -586,7 +586,7 @@ impl Garrisons {
     }
 
     /// Try to take in a surrendered holder near `at`. Returns the pay.
-    pub fn arrest_near(&mut self, at: Vec3, reach: f32) -> Option<u64> {
+    pub fn arrest_near(&mut self, at: DVec3, reach: f32) -> Option<u64> {
         for squad in &mut self.squads {
             if let Some(index) = squad.surrendered_near(at, reach) {
                 return squad.arrest(index);
@@ -625,9 +625,9 @@ mod tests {
         // The note's interface assertion: what a garrison learns from noise
         // is a zone centre, never a position. Sampled everywhere.
         for step in 0..200 {
-            let at = Vec3::new(step as f32 * 17.3 - 1000.0, 80.0, step as f32 * 11.7 - 700.0);
+            let at = DVec3::new(step as f64 * 17.3 - 1000.0, 80.0, step as f64 * 11.7 - 700.0);
             let zone = zone_of(at);
-            let grade = HINT_GRADE as f32;
+            let grade = HINT_GRADE as f64;
             assert_eq!((zone.x - grade * 0.5) % grade, 0.0, "x is not a cell centre");
             assert_eq!((zone.z - grade * 0.5) % grade, 0.0, "z is not a cell centre");
             assert!((zone.x - at.x).abs() <= grade, "the zone lost the noise");
@@ -635,12 +635,12 @@ mod tests {
 
         let site = a_site();
         let mut squad = Garrison::muster(&site);
-        let noise = squad.hatch + Vec3::new(7.3, 0.0, -3.1);
+        let noise = squad.hatch + DVec3::new(7.3, 0.0, -3.1);
         squad.hear(noise);
         let believed = squad.belief.last_known().expect("the hint was dropped");
         assert_eq!(
-            Vec3::new(believed.x, 0.0, believed.z),
-            Vec3::new(zone_of(noise).x, 0.0, zone_of(noise).z),
+            DVec3::new(believed.x, 0.0, believed.z),
+            DVec3::new(zone_of(noise).x, 0.0, zone_of(noise).z),
             "the belief was handed something finer than the zone"
         );
         assert_ne!(
@@ -654,9 +654,9 @@ mod tests {
     fn a_hint_never_overwrites_fresh_eyes() {
         let site = a_site();
         let mut squad = Garrison::muster(&site);
-        let seen = squad.hatch + Vec3::new(2.0, 0.0, 2.0);
+        let seen = squad.hatch + DVec3::new(2.0, 0.0, 2.0);
         squad.belief.seen(seen);
-        squad.hear(squad.hatch + Vec3::new(30.0, 0.0, 30.0));
+        squad.hear(squad.hatch + DVec3::new(30.0, 0.0, 30.0));
         assert_eq!(
             squad.belief.last_known(),
             Some(seen),
@@ -669,7 +669,7 @@ mod tests {
     {
         let site = a_site();
         let mut squad = Garrison::muster(&site);
-        squad.hear(squad.hatch + Vec3::new(LEASH + HINT_GRADE as f32 + 20.0, 0.0, 0.0));
+        squad.hear(squad.hatch + DVec3::new(f64::from(LEASH) + f64::from(HINT_GRADE) + 20.0, 0.0, 0.0));
         assert!(squad.belief.last_known().is_none(), "they heard across the county");
     }
 
@@ -701,7 +701,7 @@ mod tests {
             holder.mode = Mode::Down;
         }
         let world = World::new(2024);
-        let report = garrisons.update(0.1, &world, Vec3::ZERO, false, false);
+        let report = garrisons.update(0.1, &world, DVec3::ZERO, false, false);
         assert!(report.barks.iter().any(|line| line.contains("YOURS")));
         assert!(garrisons.squads.is_empty());
         // And it stays cleared: mustering again finds nothing to raise.
@@ -715,7 +715,7 @@ mod tests {
         let world = World::new(2024);
         // Standing far out under a truce: watched, not hunted — the update
         // returns before the engage machinery ever runs.
-        let stranger = squad.hatch + Vec3::new(LEASH * 0.9, 0.0, 0.0);
+        let stranger = squad.hatch + DVec3::new(f64::from(LEASH * 0.9), 0.0, 0.0);
         let report = squad.update(0.1, &world, stranger, false, true);
         assert!(!squad.grudge, "a distant stranger already has a grudge");
         let _ = report;
@@ -726,11 +726,11 @@ mod tests {
 
         // And noise on their ground is a provocation on its own.
         let mut quiet = Garrison::muster(&site);
-        quiet.hear(quiet.hatch + Vec3::new(10.0, 0.0, 0.0));
+        quiet.hear(quiet.hatch + DVec3::new(10.0, 0.0, 0.0));
         assert!(quiet.grudge, "a drill on their doorstep kept the truce");
         // While noise past the leash is a rumour, not an offence.
         let mut far = Garrison::muster(&site);
-        far.hear(far.hatch + Vec3::new(LEASH + 10.0, 0.0, 0.0));
+        far.hear(far.hatch + DVec3::new(f64::from(LEASH + 10.0), 0.0, 0.0));
         assert!(!far.grudge, "a distant shot ended a truce it should not");
     }
 
@@ -743,7 +743,7 @@ mod tests {
         let before = squad.movers_even;
         // A full window flips the turn.
         let world = World::new(2024);
-        squad.update(OVERWATCH_SECONDS + 0.01, &world, Vec3::ZERO, false, false);
+        squad.update(OVERWATCH_SECONDS + 0.01, &world, DVec3::ZERO, false, false);
         assert_ne!(squad.movers_even, before, "the overwatch clock never turned");
     }
 }

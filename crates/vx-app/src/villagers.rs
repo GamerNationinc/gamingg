@@ -11,7 +11,7 @@
 //! [`GREET_RANGE`] and cannot fire again until they have stepped back out
 //! past [`REARM_RANGE`] — once per approach, not once per frame.
 
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 use vx_render::Object;
 use vx_world::town::{self, TownSite};
 use vx_world::World;
@@ -121,7 +121,7 @@ fn heading(yaw: f32) -> Vec3 {
 /// the machines trundling past.
 fn sightings_around(
     around: &Surroundings,
-    from: Vec3,
+    from: DVec3,
     skip_villager: Option<usize>,
 ) -> Vec<Sighting> {
     let mut targets = Vec::new();
@@ -130,14 +130,14 @@ fn sightings_around(
             TargetKind::Player,
             0,
             player,
-            (player - from).length(),
+            (player - from).length() as f32,
         );
         // The player's stance decides how tall they are to look at.
         seen.eye = around.eye();
         targets.push(seen);
     }
     for (machine, (kind, at)) in around.machines.iter().enumerate() {
-        targets.push(Sighting::new(*kind, machine, *at, (*at - from).length()));
+        targets.push(Sighting::new(*kind, machine, *at, (*at - from).length() as f32));
     }
     let _ = skip_villager;
     targets
@@ -157,8 +157,8 @@ enum Phase {
 }
 
 /// The feet-level height a town's villagers walk at: on top of its plaza.
-fn walk_height(site: &TownSite) -> f32 {
-    (site.ground + 1) as f32
+fn walk_height(site: &TownSite) -> f64 {
+    f64::from(site.ground + 1)
 }
 
 /// Hash a villager's stroll leg into `0..1`. Same construction as the tile
@@ -176,9 +176,9 @@ fn hash01(index: usize, leg: u32, salt: u64) -> f32 {
 }
 
 struct Villager {
-    position: Vec3,
+    position: DVec3,
     /// Where the last frame left them, for deriving facing.
-    previous: Vec3,
+    previous: DVec3,
     yaw: f32,
     /// The rectangle they are wandering *right now* — swapped by the
     /// schedule as the day moves them between work, market and leisure.
@@ -191,7 +191,7 @@ struct Villager {
     variant: usize,
     /// Which leg of the stroll they are on; the hash streams key off it.
     leg: u32,
-    waypoint: Vec3,
+    waypoint: DVec3,
     /// Seconds left standing around before the next leg.
     pause: f32,
     /// Whether the current player approach has been greeted.
@@ -201,7 +201,7 @@ struct Villager {
     grunted: bool,
     /// What their eyes are on, if anything. Set from the same sighting
     /// `react` turns their body toward — one perception, two uses.
-    gaze: Option<Vec3>,
+    gaze: Option<DVec3>,
     /// What this villager can see and remembers.
     perception: Perception,
     /// Seconds left standing and watching rather than strolling.
@@ -245,12 +245,12 @@ impl Villager {
         }
     }
     /// A world position from a route node, which is authored town-relative.
-    fn route_node(&self, leg: usize, site: &TownSite) -> Vec3 {
+    fn route_node(&self, leg: usize, site: &TownSite) -> DVec3 {
         let (x, z) = self.route[leg.min(self.route.len() - 1)];
-        Vec3::new(
-            site.centre.0 as f32 + x,
+        DVec3::new(
+            f64::from(site.centre.0) + f64::from(x),
             walk_height(site),
-            site.centre.1 as f32 + z,
+            f64::from(site.centre.1) + f64::from(z),
         )
     }
 
@@ -342,7 +342,7 @@ impl Villager {
 
     /// One frame of running scared. Returns 1 on the frame this villager
     /// reaches the office and reports the player, else 0.
-    fn run_for_it(&mut self, dt: f32, site: &TownSite, office: Option<Vec3>) -> u32 {
+    fn run_for_it(&mut self, dt: f32, site: &TownSite, office: Option<DVec3>) -> u32 {
         self.panic_timer = (self.panic_timer - dt).max(0.0);
         if self.panic_timer <= 0.0 {
             // Composure returns; the ordinary state machine picks them back
@@ -358,11 +358,11 @@ impl Villager {
         };
         let to = target - self.position;
         let distance = to.length();
-        let step = RUN_SPEED * dt;
-        if let Some(yaw) = rig::yaw_towards(to.x, to.z) {
+        let step = f64::from(RUN_SPEED * dt);
+        if let Some(yaw) = rig::yaw_towards(to.x as f32, to.z as f32) {
             self.yaw = yaw;
         }
-        if distance <= reach.max(step) {
+        if distance <= f64::from(reach).max(step) {
             if matches!(self.panic, Some(Panic::Alarming)) && office.is_some() {
                 // Reported. Now get out of the way like everybody else.
                 self.panic = Some(Panic::Fleeing);
@@ -399,12 +399,12 @@ impl Villager {
 ///
 /// Patches are authored as offsets from the town centre, so one roster serves
 /// every town on the lattice.
-fn waypoint_in(index: usize, leg: u32, patch: Patch, site: &TownSite) -> Vec3 {
+fn waypoint_in(index: usize, leg: u32, patch: Patch, site: &TownSite) -> DVec3 {
     let (x0, z0, x1, z1) = patch;
-    Vec3::new(
-        site.centre.0 as f32 + x0 + hash01(index, leg, 0xa1) * (x1 - x0),
+    DVec3::new(
+        f64::from(site.centre.0) + f64::from(x0 + hash01(index, leg, 0xa1) * (x1 - x0)),
         walk_height(site),
-        site.centre.1 as f32 + z0 + hash01(index, leg, 0xa2) * (z1 - z0),
+        f64::from(site.centre.1) + f64::from(z0 + hash01(index, leg, 0xa2) * (z1 - z0)),
     )
 }
 
@@ -418,7 +418,7 @@ pub struct Villagers {
     tick: u64,
     /// Where an alarmed runner heads: the security office, if the town has
     /// one.
-    office: Option<Vec3>,
+    office: Option<DVec3>,
     /// Alarms that reached the office since the last collection.
     reports: u32,
     /// Which calendar day it is, set by the caller from the journal clock.
@@ -444,10 +444,10 @@ impl Villagers {
             .into_iter()
             .find(|building| building.role == town::plan::Role::Security)
             .map(|building| {
-                Vec3::new(
-                    (building.min.x + building.max.x) as f32 * 0.5,
+                DVec3::new(
+                    (building.min.x + building.max.x) as f64 * 0.5,
                     walk_height(site),
-                    (building.min.z + building.max.z) as f32 * 0.5,
+                    (building.min.z + building.max.z) as f64 * 0.5,
                 )
             });
         Villagers {
@@ -532,7 +532,7 @@ impl Villagers {
             } else if villager.phase != Phase::Home {
                 let to = villager.waypoint - villager.position;
                 let distance = to.length();
-                let step = WALK_SPEED * dt;
+                let step = f64::from(WALK_SPEED * dt);
                 if distance <= step {
                     villager.position = villager.waypoint;
                     villager.arrive(index, &site);
@@ -540,7 +540,7 @@ impl Villagers {
                     villager.position += to / distance * step;
                 }
                 let moved = villager.position - villager.previous;
-                if let Some(yaw) = rig::yaw_towards(moved.x, moved.z) {
+                if let Some(yaw) = rig::yaw_towards(moved.x as f32, moved.z as f32) {
                     villager.yaw = yaw;
                 }
             }
@@ -558,10 +558,10 @@ impl Villagers {
         if self.folk.is_empty() {
             return;
         }
-        let positions: Vec<Vec3> = self.folk.iter().map(|villager| villager.position).collect();
+        let positions: Vec<DVec3> = self.folk.iter().map(|villager| villager.position).collect();
 
         for index in awareness::due(self.tick, self.folk.len()) {
-            let eye = positions[index] + Vec3::Y * TargetKind::Villager.eye_height();
+            let eye = positions[index] + DVec3::Y * f64::from(TargetKind::Villager.eye_height());
 
             // Everyone worth looking at: the player, the other townsfolk, and
             // the machines trundling past.
@@ -574,7 +574,7 @@ impl Villagers {
                     TargetKind::Villager,
                     other,
                     *at,
-                    (*at - positions[index]).length(),
+                    (*at - positions[index]).length() as f32,
                 ));
             }
 
@@ -608,13 +608,13 @@ impl Villagers {
             return 0;
         };
         let registry = around.world.map(|world| world.registry());
-        let eye_of_player = player + Vec3::Y * around.eye();
+        let eye_of_player = player + DVec3::Y * f64::from(around.eye());
 
         self.folk
             .iter()
             .filter(|villager| {
-                let eye = villager.position + Vec3::Y * TargetKind::Villager.eye_height();
-                let distance = (player - villager.position).length();
+                let eye = villager.position + DVec3::Y * f64::from(TargetKind::Villager.eye_height());
+                let distance = (player - villager.position).length() as f32;
                 if distance > awareness::SIGHT_RANGE {
                     return false;
                 }
@@ -625,8 +625,8 @@ impl Villagers {
                     (Some(world), Some(registry)) => vx_world::sight::sees(
                         world,
                         registry,
-                        eye.as_dvec3(),
-                        eye_of_player.as_dvec3(),
+                        eye,
+                        eye_of_player,
                         awareness::SIGHT_RANGE,
                     ),
                     _ => true,
@@ -641,13 +641,13 @@ impl Villagers {
     /// lock needs the same question asked about *it*, because that is the
     /// whole trade remote intrusion offers — your body is elsewhere, your
     /// property is not.
-    pub fn watchers_of(&self, world: &World, at: Vec3) -> usize {
+    pub fn watchers_of(&self, world: &World, at: DVec3) -> usize {
         let registry = world.registry();
         self.folk
             .iter()
             .filter(|villager| {
-                let eye = villager.position + Vec3::Y * TargetKind::Villager.eye_height();
-                let distance = (at - villager.position).length();
+                let eye = villager.position + DVec3::Y * f64::from(TargetKind::Villager.eye_height());
+                let distance = (at - villager.position).length() as f32;
                 if distance > awareness::SIGHT_RANGE {
                     return false;
                 }
@@ -657,8 +657,8 @@ impl Villagers {
                 vx_world::sight::sees(
                     world,
                     registry,
-                    eye.as_dvec3(),
-                    at.as_dvec3(),
+                    eye,
+                    at,
                     awareness::SIGHT_RANGE,
                 )
             })
@@ -671,35 +671,36 @@ impl Villagers {
     ///
     /// Live-only, like [`Villagers::witnesses`]: fear is a reaction to the
     /// player, and the replay oracle only ever re-checks the ground.
-    pub fn menaced(&mut self, muzzle: Vec3, aim: Vec3, around: &Surroundings) -> usize {
+    pub fn menaced(&mut self, muzzle: DVec3, aim: Vec3, around: &Surroundings) -> usize {
         let Some(player) = around.player else {
             return 0;
         };
         let registry = around.world.map(|world| world.registry());
-        let eye_of_player = player + Vec3::Y * around.eye();
+        let eye_of_player = player + DVec3::Y * f64::from(around.eye());
         let mut frightened = 0;
         for (index, villager) in self.folk.iter_mut().enumerate() {
             if villager.panic.is_some() {
                 continue;
             }
-            let chest = villager.position + Vec3::Y;
+            let chest = villager.position + DVec3::Y;
             let to = chest - muzzle;
-            let distance = to.length();
+            let distance = to.length() as f32;
             if !(1.0e-3..=MENACE_RANGE).contains(&distance) {
                 continue;
             }
-            if aim.dot(to / distance) < MENACE_COS {
+            // The aim is a direction; the offset is narrowed to meet it.
+            if aim.dot((to / f64::from(distance)).as_vec3()) < MENACE_COS {
                 continue;
             }
             // You cannot be menaced by a gun you cannot see: same occlusion
             // rule as witnessing, cast fresh at the moment it matters.
-            let eye = villager.position + Vec3::Y * TargetKind::Villager.eye_height();
+            let eye = villager.position + DVec3::Y * f64::from(TargetKind::Villager.eye_height());
             let seen = match (around.world, registry) {
                 (Some(world), Some(registry)) => vx_world::sight::sees(
                     world,
                     registry,
-                    eye.as_dvec3(),
-                    eye_of_player.as_dvec3(),
+                    eye,
+                    eye_of_player,
                     awareness::SIGHT_RANGE,
                 ),
                 _ => true,
@@ -716,13 +717,16 @@ impl Villagers {
     /// A blast or an impact happened at `at`. Close bystanders panic whether
     /// or not they saw it — hearing needs no line of sight — and everybody
     /// else in earshot at least turns to look.
-    pub fn startled(&mut self, at: Vec3) {
+    pub fn startled(&mut self, at: DVec3) {
         for (index, villager) in self.folk.iter_mut().enumerate() {
-            let distance = (at - villager.position).length();
+            let distance = (at - villager.position).length() as f32;
             if distance <= STARTLE_RANGE {
                 villager.take_fright(index);
             } else if distance <= ALARM_RANGE {
-                if let Some(yaw) = rig::yaw_towards(at.x - villager.position.x, at.z - villager.position.z) {
+                if let Some(yaw) = rig::yaw_towards(
+                    (at.x - villager.position.x) as f32,
+                    (at.z - villager.position.z) as f32,
+                ) {
                     villager.yaw = yaw;
                 }
                 villager.attention = villager.attention.max(1.5);
@@ -760,12 +764,12 @@ impl Villagers {
             }
             // The eyes go to the same sighting the body turns toward, at
             // head height rather than at their feet.
-            villager.gaze = Some(watched.position + Vec3::new(0.0, 1.4, 0.0));
+            villager.gaze = Some(watched.position + DVec3::new(0.0, 1.4, 0.0));
             // Face whatever has their attention — including the remembered
             // spot, which is what stops the head snapping away the instant
             // somebody steps behind a tree.
             let to = watched.position - villager.position;
-            if let Some(yaw) = rig::yaw_towards(to.x, to.z) {
+            if let Some(yaw) = rig::yaw_towards(to.x as f32, to.z as f32) {
                 villager.yaw = yaw;
             }
             // And stop to look, if it is close, actually in view, and worth
@@ -823,7 +827,7 @@ impl Villagers {
     /// Deliberately not gated on line of sight, unlike [`Villagers::greeting_for`]:
     /// a greeting is somebody choosing to speak to you and a grunt is
     /// somebody discovering you are already too close.
-    pub fn grunt_for(&mut self, player: Vec3) -> Option<usize> {
+    pub fn grunt_for(&mut self, player: DVec3) -> Option<usize> {
         let mut grunted = None;
         for villager in &mut self.folk {
             // Somebody running for their life is making a different noise.
@@ -831,7 +835,7 @@ impl Villagers {
                 villager.grunted = true;
                 continue;
             }
-            let gap = (player - villager.position).length();
+            let gap = (player - villager.position).length() as f32;
             if gap < GRUNT_RANGE && !villager.grunted {
                 villager.grunted = true;
                 if grunted.is_none() {
@@ -844,8 +848,10 @@ impl Villagers {
         grunted
     }
 
-    /// This frame's drawn bodies. `rigs` comes from [`Villagers::rigs`].
-    pub fn objects(&self, rigs: &[Rig]) -> Vec<Object> {
+    /// This frame's drawn bodies. `rigs` comes from [`Villagers::rigs`];
+    /// `relative` measures a place from the render origin, so every body is
+    /// built in the camera's frame and marked so.
+    pub fn objects(&self, rigs: &[Rig], relative: impl Fn(DVec3) -> Vec3) -> Vec<Object> {
         self.folk
             .iter()
             .flat_map(|villager| {
@@ -853,18 +859,20 @@ impl Villagers {
                 // Head height matches the rig's own: the gaze is measured
                 // from the eyes, not from the boots, or everybody spends the
                 // day looking at the ground in front of them.
-                let eye = villager.position + Vec3::new(0.0, 1.4, 0.0);
+                let eye = villager.position + DVec3::new(0.0, 1.4, 0.0);
                 let gaze = villager
                     .gaze
                     .map_or(rig::Gaze::AHEAD, |at| rig::Gaze::towards(eye, villager.yaw, at));
-                rig.objects_looking(villager.position, villager.yaw, 0.0, gaze)
+                rig.objects_looking(relative(villager.position), villager.yaw, 0.0, gaze)
+                    .into_iter()
+                    .map(Object::already_relative)
             })
             .collect()
     }
 
     /// Everyone's feet, for the tests and for anything scanning the street
     /// from above.
-    pub fn positions(&self) -> Vec<Vec3> {
+    pub fn positions(&self) -> Vec<DVec3> {
         self.folk.iter().map(|villager| villager.position).collect()
     }
 }
@@ -883,7 +891,10 @@ mod tests {
             let (x0, z0, x1, z1) = villager.patch;
             let at = villager.position;
             assert!(
-                at.x >= x0 - 0.01 && at.x <= x1 + 0.01 && at.z >= z0 - 0.01 && at.z <= z1 + 0.01,
+                at.x >= f64::from(x0) - 0.01
+                    && at.x <= f64::from(x1) + 0.01
+                    && at.z >= f64::from(z0) - 0.01
+                    && at.z <= f64::from(z1) + 0.01,
                 "villager {index} wandered off their patch {:?}: at {at:?} phase {:?} waypoint {:?} pause {} attention {}",
                 villager.patch, villager.phase, villager.waypoint, villager.pause, villager.attention
             );
@@ -902,16 +913,16 @@ mod tests {
         let mut b = Villagers::new();
         for step in 0..2000 {
             // Uneven frame times, same sequence for both.
-            let dt = 1.0 / 60.0 + (step % 7) as f32 * 0.001;
-            a.update(dt, TimeOfDay::NOON, &Surroundings::empty());
-            b.update(dt, TimeOfDay::NOON, &Surroundings::empty());
+            let dt = 1.0 / 60.0 + (step % 7) as f64 * 0.001;
+            a.update(dt as f32, TimeOfDay::NOON, &Surroundings::empty());
+            b.update(dt as f32, TimeOfDay::NOON, &Surroundings::empty());
         }
         assert_eq!(a.positions(), b.positions());
     }
 
     /// Drive the town for one update with the player standing at `player`,
     /// long enough for the round-robin to have looked at everybody.
-    fn look_around(town: &mut Villagers, player: Vec3) {
+    fn look_around(town: &mut Villagers, player: DVec3) {
         let around = Surroundings {
             player_eye: awareness::PLAYER_EYE,
             world: None,
@@ -930,8 +941,8 @@ mod tests {
         town.folk[1].position.x += 1000.0;
         town.folk[2].position.x -= 1000.0;
         let villager = town.folk[0].position;
-        let near = Vec3::new(villager.x + 1.0, walk_height(&town::home_site()), villager.z);
-        let far = Vec3::new(villager.x + REARM_RANGE + 2.0, walk_height(&town::home_site()), villager.z);
+        let near = DVec3::new(villager.x + 1.0, walk_height(&town::home_site()), villager.z);
+        let far = DVec3::new(villager.x + f64::from(REARM_RANGE) + 2.0, walk_height(&town::home_site()), villager.z);
 
         look_around(&mut town, near);
         assert!(town.greeting_for().is_some(), "no greeting on approach");
@@ -939,7 +950,7 @@ mod tests {
         assert!(town.greeting_for().is_none(), "greeted every frame");
 
         // Just outside greeting range but inside re-arm range must NOT re-arm.
-        let lurking = Vec3::new(villager.x + GREET_RANGE + 0.5, walk_height(&town::home_site()), villager.z);
+        let lurking = DVec3::new(villager.x + f64::from(GREET_RANGE) + 0.5, walk_height(&town::home_site()), villager.z);
         look_around(&mut town, lurking);
         assert!(town.greeting_for().is_none());
         look_around(&mut town, near);
@@ -957,7 +968,7 @@ mod tests {
         let mut town = Villagers::new();
         let at = town.folk[0].position;
         // Stand due +x of them.
-        let player = Vec3::new(at.x + 2.0, walk_height(&town::home_site()), at.z);
+        let player = DVec3::new(at.x + 2.0, walk_height(&town::home_site()), at.z);
         look_around(&mut town, player);
 
         let facing = town.folk[0].yaw;
@@ -980,7 +991,7 @@ mod tests {
         town.folk[2].position.x -= 1000.0;
         let at = town.folk[0].position;
         town.folk[0].yaw = 0.0;
-        let player = Vec3::new(at.x + 2.5, at.y, at.z);
+        let player = DVec3::new(at.x + 2.5, at.y, at.z);
 
         let ground = at.y as i32;
         for dy in 0..4 {
@@ -1014,7 +1025,7 @@ mod tests {
         // Clear any starting pause so movement is the only variable.
         town.folk[0].pause = 0.0;
         let at = town.folk[0].position;
-        let player = Vec3::new(at.x + 1.5, walk_height(&town::home_site()), at.z);
+        let player = DVec3::new(at.x + 1.5, walk_height(&town::home_site()), at.z);
 
         let around = Surroundings {
             player_eye: awareness::PLAYER_EYE,
@@ -1049,7 +1060,7 @@ mod tests {
     fn a_villager_notices_a_passing_drone() {
         let mut town = Villagers::new();
         let at = town.folk[0].position;
-        let drone = Vec3::new(at.x + 3.0, at.y, at.z);
+        let drone = DVec3::new(at.x + 3.0, at.y, at.z);
         let machines = [(TargetKind::Digger, drone)];
         let around = Surroundings {
             player_eye: awareness::PLAYER_EYE,
@@ -1075,11 +1086,11 @@ mod tests {
         let run = || {
             let mut town = Villagers::new();
             for step in 0..600 {
-                let dt = 1.0 / 60.0 + (step % 7) as f32 * 0.001;
-                let player = Vec3::new(
-                    (step as f32 * 0.02).sin() * 6.0,
+                let dt = 1.0 / 60.0 + (step % 7) as f64 * 0.001;
+                let player = DVec3::new(
+                    (step as f64 * 0.02).sin() * 6.0,
                     walk_height(&town::home_site()),
-                    (step as f32 * 0.017).cos() * 6.0,
+                    (step as f64 * 0.017).cos() * 6.0,
                 );
                 let around = Surroundings {
                     player_eye: awareness::PLAYER_EYE,
@@ -1087,7 +1098,7 @@ mod tests {
                     player: Some(player),
                     machines: &[],
                 };
-                town.update(dt, TimeOfDay::NOON, &around);
+                town.update(dt as f32, TimeOfDay::NOON, &around);
             }
             town.positions()
         };
@@ -1123,10 +1134,10 @@ mod tests {
             let at = villager.position;
             let centre = town.site.centre;
             assert!(
-                at.x >= centre.0 as f32 + x0 - 0.01
-                    && at.x <= centre.0 as f32 + x1 + 0.01
-                    && at.z >= centre.1 as f32 + z0 - 0.01
-                    && at.z <= centre.1 as f32 + z1 + 0.01,
+                at.x >= f64::from(centre.0) + f64::from(x0) - 0.01
+                    && at.x <= f64::from(centre.0) + f64::from(x1) + 0.01
+                    && at.z >= f64::from(centre.1) + f64::from(z0) - 0.01
+                    && at.z <= f64::from(centre.1) + f64::from(z1) + 0.01,
                 "villager {index} came out somewhere odd: {at:?}"
             );
         }
@@ -1145,7 +1156,7 @@ mod tests {
             }
             for pair in nodes.windows(2) {
                 for step in 0..=20 {
-                    let t = step as f32 / 20.0;
+                    let t = step as f64 / 20.0;
                     let at = pair[0] + (pair[1] - pair[0]) * t;
                     let (x, z) = (at.x.round() as i32, at.z.round() as i32);
                     // Head height: a wall blocks, a doorway does not.
@@ -1213,7 +1224,7 @@ mod tests {
     fn the_town_draws_one_body_per_villager() {
         let town = Villagers::new();
         let rigs = Villagers::rigs();
-        let objects = town.objects(&rigs);
+        let objects = town.objects(&rigs, |at| at.as_vec3());
         let parts: usize = town
             .folk
             .iter()
@@ -1246,16 +1257,16 @@ mod witness_tests {
     }
 
     /// One villager, planted, facing the player.
-    fn watcher(at: Vec3, facing_towards: Vec3) -> Villagers {
+    fn watcher(at: DVec3, facing_towards: DVec3) -> Villagers {
         let mut town = Villagers::new();
         town.folk.truncate(1);
         town.folk[0].position = at;
         let to = facing_towards - at;
-        town.folk[0].yaw = crate::rig::yaw_towards(to.x, to.z).unwrap_or(0.0);
+        town.folk[0].yaw = crate::rig::yaw_towards(to.x as f32, to.z as f32).unwrap_or(0.0);
         town
     }
 
-    fn seen_by(town: &Villagers, world: &World, player: Vec3, eye: f32) -> usize {
+    fn seen_by(town: &Villagers, world: &World, player: DVec3, eye: f32) -> usize {
         town.witnesses(&Surroundings {
             player_eye: eye,
             world: Some(world),
@@ -1267,8 +1278,8 @@ mod witness_tests {
     #[test]
     fn a_villager_looking_at_you_is_a_witness() {
         let world = walled_world();
-        let player = Vec3::new(6.0, 41.0, 0.0);
-        let town = watcher(Vec3::new(0.0, 41.0, 0.0), player);
+        let player = DVec3::new(6.0, 41.0, 0.0);
+        let town = watcher(DVec3::new(0.0, 41.0, 0.0), player);
         assert_eq!(seen_by(&town, &world, player, awareness::PLAYER_EYE), 1);
     }
 
@@ -1277,9 +1288,9 @@ mod witness_tests {
         // There is a behind now. Before this round sight was a full circle and
         // hiding was impossible to reason about.
         let world = walled_world();
-        let player = Vec3::new(6.0, 41.0, 0.0);
-        let away = Vec3::new(-30.0, 41.0, 0.0);
-        let town = watcher(Vec3::new(0.0, 41.0, 0.0), away);
+        let player = DVec3::new(6.0, 41.0, 0.0);
+        let away = DVec3::new(-30.0, 41.0, 0.0);
+        let town = watcher(DVec3::new(0.0, 41.0, 0.0), away);
         assert_eq!(seen_by(&town, &world, player, awareness::PLAYER_EYE), 0);
     }
 
@@ -1288,9 +1299,9 @@ mod witness_tests {
         // A cone with no close-range exception lets you stand nose to nose
         // with a villager unnoticed, which reads as a bug, not as stealth.
         let world = walled_world();
-        let player = Vec3::new(1.5, 41.0, 0.0);
-        let away = Vec3::new(-30.0, 41.0, 0.0);
-        let town = watcher(Vec3::new(0.0, 41.0, 0.0), away);
+        let player = DVec3::new(1.5, 41.0, 0.0);
+        let away = DVec3::new(-30.0, 41.0, 0.0);
+        let town = watcher(DVec3::new(0.0, 41.0, 0.0), away);
         assert_eq!(seen_by(&town, &world, player, awareness::PLAYER_EYE), 1);
     }
 
@@ -1303,8 +1314,8 @@ mod witness_tests {
                 world.set_block(BlockPos::new(3, y, z), stone);
             }
         }
-        let player = Vec3::new(6.0, 41.0, 0.0);
-        let town = watcher(Vec3::new(0.0, 41.0, 0.0), player);
+        let player = DVec3::new(6.0, 41.0, 0.0);
+        let town = watcher(DVec3::new(0.0, 41.0, 0.0), player);
         assert_eq!(seen_by(&town, &world, player, awareness::PLAYER_EYE), 0);
     }
 
@@ -1320,14 +1331,14 @@ mod witness_tests {
             world.set_block(BlockPos::new(3, 41, z), stone);
         }
 
-        let player = Vec3::new(6.0, 41.0, 0.0);
-        let town = watcher(Vec3::new(0.0, 41.0, 0.0), player);
+        let player = DVec3::new(6.0, 41.0, 0.0);
+        let town = watcher(DVec3::new(0.0, 41.0, 0.0), player);
 
-        let standing = crate::movement::Stance::Grounded.eye_cm() as f32 / 100.0;
-        let prone = crate::movement::Stance::Prone.eye_cm() as f32 / 100.0;
+        let standing = crate::movement::Stance::Grounded.eye_cm() as f64 / 100.0;
+        let prone = crate::movement::Stance::Prone.eye_cm() as f64 / 100.0;
 
-        assert_eq!(seen_by(&town, &world, player, standing), 1, "standing was hidden");
-        assert_eq!(seen_by(&town, &world, player, prone), 0, "prone was still seen");
+        assert_eq!(seen_by(&town, &world, player, standing as f32), 1, "standing was hidden");
+        assert_eq!(seen_by(&town, &world, player, prone as f32), 0, "prone was still seen");
     }
 
     #[test]
@@ -1345,8 +1356,8 @@ mod witness_tests {
     #[test]
     fn distance_still_hides_you() {
         let world = walled_world();
-        let player = Vec3::new(awareness::SIGHT_RANGE + 4.0, 41.0, 0.0);
-        let town = watcher(Vec3::new(0.0, 41.0, 0.0), player);
+        let player = DVec3::new(f64::from(awareness::SIGHT_RANGE) + 4.0, 41.0, 0.0);
+        let town = watcher(DVec3::new(0.0, 41.0, 0.0), player);
         assert_eq!(seen_by(&town, &world, player, awareness::PLAYER_EYE), 0);
     }
 
@@ -1355,7 +1366,7 @@ mod witness_tests {
         let world = walled_world();
         let mut town = Villagers::new();
         town.folk.clear();
-        assert_eq!(seen_by(&town, &world, Vec3::new(0.0, 41.0, 0.0), 1.62), 0);
+        assert_eq!(seen_by(&town, &world, DVec3::new(0.0, 41.0, 0.0), 1.62), 0);
     }
 
     #[test]
@@ -1367,10 +1378,10 @@ mod witness_tests {
         let mut town = Villagers::new();
         town.folk[1].position.x += 1000.0;
         town.folk[2].position.x -= 1000.0;
-        town.folk[0].position = Vec3::new(0.0, 41.0, 0.0);
+        town.folk[0].position = DVec3::new(0.0, 41.0, 0.0);
 
-        let in_the_open = Vec3::new(6.0, 41.5, 0.0);
-        town.folk[0].yaw = rig::yaw_towards(in_the_open.x, in_the_open.z).unwrap_or(0.0);
+        let in_the_open = DVec3::new(6.0, 41.5, 0.0);
+        town.folk[0].yaw = rig::yaw_towards(in_the_open.x as f32, in_the_open.z as f32).unwrap_or(0.0);
         assert_eq!(
             town.watchers_of(&world, in_the_open),
             1,
@@ -1399,16 +1410,16 @@ mod witness_tests {
         town.folk[1].position.x += 1000.0;
         town.folk[2].position.x -= 1000.0;
         let victim = town.folk[0].position;
-        let muzzle = victim + Vec3::new(-5.0, 1.62, 0.0);
-        let aim = (victim + Vec3::Y - muzzle).normalize();
+        let muzzle = victim + DVec3::new(-5.0, 1.62, 0.0);
+        let aim = (victim + DVec3::Y - muzzle).normalize();
         let around = Surroundings {
             world: None,
-            player: Some(muzzle - Vec3::Y * awareness::PLAYER_EYE),
+            player: Some(muzzle - DVec3::Y * f64::from(awareness::PLAYER_EYE)),
             player_eye: awareness::PLAYER_EYE,
             machines: &[],
         };
-        assert_eq!(town.menaced(muzzle, aim, &around), 1, "nobody panicked");
-        assert_eq!(town.menaced(muzzle, aim, &around), 0, "panicked twice");
+        assert_eq!(town.menaced(muzzle, aim.as_vec3(), &around), 1, "nobody panicked");
+        assert_eq!(town.menaced(muzzle, aim.as_vec3(), &around), 0, "panicked twice");
         assert_eq!(town.panicking(), 1);
 
         // Fear has a half-life: after the timer, composure returns.
@@ -1425,15 +1436,15 @@ mod witness_tests {
         town.folk[1].position.x += 1000.0;
         town.folk[2].position.x -= 1000.0;
         let victim = town.folk[0].position;
-        let muzzle = victim + Vec3::new(-5.0, 1.62, 0.0);
-        let wide = Vec3::new(0.0, 0.0, 1.0);
+        let muzzle = victim + DVec3::new(-5.0, 1.62, 0.0);
+        let wide = DVec3::new(0.0, 0.0, 1.0);
         let around = Surroundings {
             world: None,
-            player: Some(muzzle - Vec3::Y * awareness::PLAYER_EYE),
+            player: Some(muzzle - DVec3::Y * f64::from(awareness::PLAYER_EYE)),
             player_eye: awareness::PLAYER_EYE,
             machines: &[],
         };
-        assert_eq!(town.menaced(muzzle, wide, &around), 0, "a wide aim read as a threat");
+        assert_eq!(town.menaced(muzzle, wide.as_vec3(), &around), 0, "a wide aim read as a threat");
 
         // Real terrain with a wall dropped between the two: villager 0
         // relocated behind it, shooter aiming dead at them — but the muzzle
@@ -1445,18 +1456,18 @@ mod witness_tests {
                 world.set_block(BlockPos::new(3, y, z), stone);
             }
         }
-        town.folk[0].position = Vec3::new(0.0, 41.0, 0.0);
-        let shooter = Vec3::new(6.0, 41.0, 0.0);
+        town.folk[0].position = DVec3::new(0.0, 41.0, 0.0);
+        let shooter = DVec3::new(6.0, 41.0, 0.0);
         let hidden = Surroundings {
             world: Some(&world),
             player: Some(shooter),
             player_eye: 0.35,
             machines: &[],
         };
-        let muzzle = shooter + Vec3::Y * 0.35;
-        let target = town.folk[0].position + Vec3::Y - muzzle;
+        let muzzle = shooter + DVec3::Y * 0.35;
+        let target = town.folk[0].position + DVec3::Y - muzzle;
         assert_eq!(
-            town.menaced(muzzle, target.normalize(), &hidden),
+            town.menaced(muzzle, target.normalize().as_vec3(), &hidden),
             0,
             "a muzzle nobody can see still frightened somebody"
         );
@@ -1487,7 +1498,7 @@ mod witness_tests {
         let mut town = Villagers::new();
         town.folk[1].position.x += 1000.0;
         town.folk[2].position.x -= 1000.0;
-        let at = town.folk[0].position + Vec3::new(3.0, 0.0, 0.0);
+        let at = town.folk[0].position + DVec3::new(3.0, 0.0, 0.0);
         town.startled(at);
         assert_eq!(town.panicking(), 1, "a blast three metres away went unremarked");
     }
@@ -1506,7 +1517,7 @@ mod witness_tests {
         // Far enough out to be clear of *everybody*: the town stands about
         // eight blocks apart, so a step of one re-arm range lands on the
         // next person's toes instead.
-        let away = standing + Vec3::new(0.0, 0.0, 40.0);
+        let away = standing + DVec3::new(0.0, 0.0, 40.0);
         assert_eq!(town.grunt_for(away), None);
         assert!(town.grunt_for(standing).is_some(), "the grunt never re-armed");
     }
@@ -1531,7 +1542,7 @@ mod witness_tests {
         // stuck where somebody used to be.
         let mut town = Villagers::new();
         let watcher = town.folk[0].position;
-        let player = watcher + Vec3::new(2.0, 0.0, 1.0);
+        let player = watcher + DVec3::new(2.0, 0.0, 1.0);
         let seen = Surroundings {
             player: Some(player),
             ..Surroundings::empty()
@@ -1559,4 +1570,32 @@ mod witness_tests {
             "somebody is still staring at where the player used to be"
         );
     }
+    /// **The townsfolk stroll the same stroll three thousand kilometres
+    /// out.** The home town's plan moved to a far centre, the same four
+    /// thousand frames: every villager's position relative to the town
+    /// centre agrees to a micrometre.
+    #[test]
+    fn the_townsfolk_stroll_the_same_stroll_three_thousand_kilometres_out() {
+        let stroll = |centre: (i32, i32)| {
+            let mut site = town::home_site();
+            site.centre = centre;
+            let mut town = Villagers::for_site(&site);
+            for _ in 0..4000 {
+                town.update(1.0 / 60.0, TimeOfDay::NOON, &Surroundings::empty());
+            }
+            let origin = DVec3::new(f64::from(centre.0), 0.0, f64::from(centre.1));
+            town.positions().into_iter().map(|at| at - origin).collect::<Vec<_>>()
+        };
+        let here = stroll((0, 0));
+        let there = stroll((3_000_000, 3_000_000));
+        assert_eq!(here.len(), there.len());
+        assert!(!here.is_empty());
+        for (index, (a, b)) in here.iter().zip(&there).enumerate() {
+            assert!(
+                (*a - *b).length() < 1.0e-6,
+                "villager {index} stood at {a} at home and {b} far out"
+            );
+        }
+    }
+
 }

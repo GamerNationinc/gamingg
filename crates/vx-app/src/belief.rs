@@ -31,7 +31,7 @@
 //! is live-only: nothing here touches a block, so the replay oracle never
 //! learns that anybody went looking.
 
-use glam::Vec3;
+use glam::DVec3;
 
 /// Cells to a side of the board a squad searches. At one metre a cell this
 /// is a forty-metre square centred on the last-known position — big enough
@@ -63,7 +63,7 @@ pub struct Belief {
     /// The centre of the board, in block coordinates.
     origin: (i32, i32),
     /// Where the player was last actually seen.
-    last_known: Option<Vec3>,
+    last_known: Option<DVec3>,
     /// How sure that still is, 1 at the moment of sighting down to 0.
     confidence: f32,
     /// Probability per cell, row-major, `SIDE * SIDE`.
@@ -83,7 +83,7 @@ impl Default for Belief {
 
 /// Board coordinates for a world position, if it is on this board.
 #[cfg(test)]
-fn cell_of(origin: (i32, i32), at: Vec3) -> Option<(usize, usize)> {
+fn cell_of(origin: (i32, i32), at: DVec3) -> Option<(usize, usize)> {
     let half = (SIDE / 2) as i32;
     let x = at.x.floor() as i32 - origin.0 + half;
     let z = at.z.floor() as i32 - origin.1 + half;
@@ -96,7 +96,7 @@ impl Belief {
     ///
     /// Re-centres the board on the sighting and collapses the whole belief
     /// onto that one cell: seeing somebody replaces guessing about them.
-    pub fn seen(&mut self, at: Vec3) {
+    pub fn seen(&mut self, at: DVec3) {
         self.origin = (at.x.floor() as i32, at.z.floor() as i32);
         self.last_known = Some(at);
         self.confidence = 1.0;
@@ -106,7 +106,7 @@ impl Belief {
     }
 
     /// Where the squad last actually saw the player.
-    pub fn last_known(&self) -> Option<Vec3> {
+    pub fn last_known(&self) -> Option<DVec3> {
         self.last_known
     }
 
@@ -128,7 +128,7 @@ impl Belief {
     /// The mass in one cell. A window for the tests to check the board
     /// through — the game reads the board only via `search_target`.
     #[cfg(test)]
-    pub fn mass_at(&self, at: Vec3) -> f32 {
+    pub fn mass_at(&self, at: DVec3) -> f32 {
         cell_of(self.origin, at).map_or(0.0, |(x, z)| self.mass[z * SIDE + x])
     }
 
@@ -218,9 +218,9 @@ impl Belief {
     ///
     /// Ties break by distance and then by cell order, so two searchers given
     /// the same board make the same choice and a replay makes it again.
-    pub fn search_target(&self, from: Vec3) -> Option<(i32, i32)> {
+    pub fn search_target(&self, from: DVec3) -> Option<(i32, i32)> {
         let half = (SIDE / 2) as i32;
-        let mut best: Option<((i32, i32), f32, f32)> = None;
+        let mut best: Option<((i32, i32), f32, f64)> = None;
         for z in 0..SIDE {
             for x in 0..SIDE {
                 let mass = self.mass[z * SIDE + x];
@@ -229,7 +229,7 @@ impl Belief {
                 }
                 let wx = self.origin.0 + x as i32 - half;
                 let wz = self.origin.1 + z as i32 - half;
-                let away = (wx as f32 - from.x).hypot(wz as f32 - from.z);
+                let away = (wx as f64 - from.x).hypot(wz as f64 - from.z);
                 let better = match &best {
                     None => true,
                     Some((_, top, closest)) => {
@@ -258,10 +258,10 @@ mod tests {
     #[test]
     fn a_sighting_collapses_the_belief_onto_one_cell() {
         let mut belief = Belief::default();
-        belief.seen(Vec3::new(12.4, 70.0, -3.2));
+        belief.seen(DVec3::new(12.4, 70.0, -3.2));
         assert_eq!(belief.confidence(), 1.0);
         assert!((belief.total() - 1.0).abs() < 1.0e-6);
-        assert!((belief.mass_at(Vec3::new(12.4, 70.0, -3.2)) - 1.0).abs() < 1.0e-6);
+        assert!((belief.mass_at(DVec3::new(12.4, 70.0, -3.2)) - 1.0).abs() < 1.0e-6);
         assert!(belief.searching());
     }
 
@@ -269,7 +269,7 @@ mod tests {
     fn the_map_cannot_send_a_searcher_into_rock() {
         // The note's headline guarantee. Wall the sighting into a one-cell
         // cell and no amount of diffusion puts mass outside it.
-        let at = Vec3::new(0.0, 70.0, 0.0);
+        let at = DVec3::new(0.0, 70.0, 0.0);
         let mut belief = Belief::default();
         belief.seen(at);
         let only_here = |x: i32, z: i32| (x, z) == (0, 0);
@@ -285,7 +285,7 @@ mod tests {
         // Nothing is created and nothing leaks: a search that quietly gained
         // mass would never give up, and one that lost it would give up early.
         let mut belief = Belief::default();
-        belief.seen(Vec3::new(0.0, 70.0, 0.0));
+        belief.seen(DVec3::new(0.0, 70.0, 0.0));
         for _ in 0..200 {
             belief.diffuse(0.1, anywhere);
             assert!(
@@ -298,7 +298,7 @@ mod tests {
 
     #[test]
     fn the_belief_spreads_away_from_where_it_started() {
-        let at = Vec3::new(0.0, 70.0, 0.0);
+        let at = DVec3::new(0.0, 70.0, 0.0);
         let mut belief = Belief::default();
         belief.seen(at);
         for _ in 0..100 {
@@ -306,7 +306,7 @@ mod tests {
         }
         assert!(belief.mass_at(at) < 1.0, "the belief never spread at all");
         assert!(
-            belief.mass_at(Vec3::new(3.0, 70.0, 0.0)) > 0.0,
+            belief.mass_at(DVec3::new(3.0, 70.0, 0.0)) > 0.0,
             "the belief did not reach ground the player could have walked to"
         );
         // Confidence in the *sighting* has decayed even though the search
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn looking_somewhere_is_what_takes_it_off_the_board() {
-        let at = Vec3::new(0.0, 70.0, 0.0);
+        let at = DVec3::new(0.0, 70.0, 0.0);
         let mut belief = Belief::default();
         belief.seen(at);
         for _ in 0..50 {
@@ -337,7 +337,7 @@ mod tests {
     fn a_search_ends_once_everywhere_has_been_looked_at() {
         // Sweeping the whole board must end the search rather than leaving
         // a squad hunting an empty map forever.
-        let at = Vec3::new(0.0, 70.0, 0.0);
+        let at = DVec3::new(0.0, 70.0, 0.0);
         let mut belief = Belief::default();
         belief.seen(at);
         for _ in 0..20 {
@@ -350,8 +350,8 @@ mod tests {
 
     /// Run a searcher off the map until it gives up. Returns whether the
     /// hiding place was ever looked at, and how much ground was swept.
-    fn hunt(hiding: Vec3) -> (bool, usize) {
-        let start = Vec3::new(0.0, 70.0, 0.0);
+    fn hunt(hiding: DVec3) -> (bool, usize) {
+        let start = DVec3::new(0.0, 70.0, 0.0);
         let mut belief = Belief::default();
         belief.seen(start);
         // The trail goes cold while they close in: diffusion runs for the
@@ -381,7 +381,7 @@ mod tests {
             let Some((tx, tz)) = belief.search_target(searcher) else {
                 break;
             };
-            let to = Vec3::new(tx as f32 - searcher.x, 0.0, tz as f32 - searcher.z);
+            let to = DVec3::new(tx as f64 - searcher.x, 0.0, tz as f64 - searcher.z);
             if to.length() > 0.01 {
                 // A jog, not a teleport.
                 searcher += to.normalize() * 0.15;
@@ -395,7 +395,7 @@ mod tests {
         // The property that makes hiding a *decision*: duck behind the
         // nearest rock and the sweep finds you, because the belief is
         // thickest exactly where you still are.
-        let (found, _) = hunt(Vec3::new(2.0, 70.0, 1.0));
+        let (found, _) = hunt(DVec3::new(2.0, 70.0, 1.0));
         assert!(found, "a player hiding three metres away was never looked at");
     }
 
@@ -405,7 +405,7 @@ mod tests {
         // searcher genuinely sweeps an area first rather than shrugging.
         // A search that gave up after a handful of cells would make every
         // escape meaningless.
-        let (_, swept) = hunt(Vec3::new(18.0, 70.0, -14.0));
+        let (_, swept) = hunt(DVec3::new(18.0, 70.0, -14.0));
         assert!(
             swept > 60,
             "the search gave up after sweeping only {swept} cells"
@@ -423,8 +423,8 @@ mod tests {
         // and hiding a real option. Kept, ignored, and named, so the
         // difference between the note and the game is written down rather
         // than quietly dropped.
-        let start = Vec3::new(0.0, 70.0, 0.0);
-        let hiding = Vec3::new(7.0, 70.0, -5.0);
+        let start = DVec3::new(0.0, 70.0, 0.0);
+        let hiding = DVec3::new(7.0, 70.0, -5.0);
         let mut belief = Belief::default();
         belief.seen(start);
 
@@ -456,7 +456,7 @@ mod tests {
             let Some((tx, tz)) = belief.search_target(searcher) else {
                 break;
             };
-            let to = Vec3::new(tx as f32 - searcher.x, 0.0, tz as f32 - searcher.z);
+            let to = DVec3::new(tx as f64 - searcher.x, 0.0, tz as f64 - searcher.z);
             if to.length() > 0.01 {
                 searcher += to.normalize() * 0.5;
             }
@@ -471,13 +471,13 @@ mod tests {
     fn two_searches_from_the_same_sighting_are_identical() {
         let run = || {
             let mut belief = Belief::default();
-            belief.seen(Vec3::new(4.0, 70.0, 4.0));
+            belief.seen(DVec3::new(4.0, 70.0, 4.0));
             let mut targets = Vec::new();
             for step in 0..200 {
                 belief.diffuse(0.05, |x, z| (x + z) % 7 != 0);
                 if step % 10 == 0 {
                     belief.clear_seen(|x, _| x < 0);
-                    targets.push(belief.search_target(Vec3::new(4.0, 70.0, 4.0)));
+                    targets.push(belief.search_target(DVec3::new(4.0, 70.0, 4.0)));
                 }
             }
             targets

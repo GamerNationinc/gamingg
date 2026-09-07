@@ -31,7 +31,7 @@ use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::Path;
 
-use glam::Vec3;
+use glam::DVec3;
 use vx_core::BlockPos;
 use vx_world::{PlayerBody, World};
 
@@ -39,10 +39,13 @@ use crate::movement::{self, Movement};
 use crate::tuning::Tuning;
 
 const MAGIC: &[u8; 4] = b"VXAR";
-const VERSION: u32 = 1;
+/// 2: a crash's column is `f64` on disk (stage 45). A version-1 file reads
+/// its `f32` columns and widens them.
+const VERSION: u32 = 2;
+const OLDEST: u32 = 1;
 
 /// Seconds per journal tick — the projectile integration step.
-pub const TICK_SECONDS: f32 = (1.0 / crate::mining::TICK_RATE) as f32;
+pub const TICK_SECONDS: f64 = 1.0 / crate::mining::TICK_RATE;
 
 /// Muzzle speed, metres per second. Slow for a bullet on purpose: you can
 /// watch the round go, and lead a moving caravan.
@@ -102,16 +105,16 @@ pub const BOUNTY_REPORTED: u64 = 20;
 /// One slug in flight.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Shot {
-    pub position: Vec3,
-    pub velocity: Vec3,
+    pub position: DVec3,
+    pub velocity: DVec3,
     pub age: u32,
 }
 
 /// Where one shot went this tick, and what it met.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sweep {
-    pub from: Vec3,
-    pub to: Vec3,
+    pub from: DVec3,
+    pub to: DVec3,
     pub hit: Option<Impact>,
 }
 
@@ -119,7 +122,7 @@ pub struct Sweep {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Impact {
     /// Where the round stopped.
-    pub at: Vec3,
+    pub at: DVec3,
     /// The block it struck.
     pub block: BlockPos,
     /// Whether the block gave way. A glance off rock is still an impact —
@@ -137,25 +140,26 @@ pub struct Impact {
 pub fn launch(
     shots: &mut Vec<Shot>,
     movement: &mut Movement,
-    muzzle: Vec3,
+    muzzle: DVec3,
     yaw_q: i16,
     pitch_q: i16,
 ) {
+    // The aim is a direction and stays `f32`; it is widened once to scale
+    // the muzzle, which is a place.
     let aim = movement::aim_vector(yaw_q, pitch_q);
+    let along = aim.as_dvec3();
     shots.push(Shot {
-        position: muzzle + aim * MUZZLE_CLEARANCE,
-        velocity: aim * movement.tuning.slug_speed,
+        position: muzzle + along * f64::from(MUZZLE_CLEARANCE),
+        velocity: along * f64::from(movement.tuning.slug_speed),
         age: 0,
     });
     movement.kick(-aim * movement.tuning.slug_kick);
 }
 
-/// Where the muzzle sits for a body about to fire.
-pub fn muzzle_of(player: &PlayerBody) -> Vec3 {
-    // Narrowed on purpose: the muzzle is the one float that crosses the
-    // journal's wire, and a shot lives for a few hundred blocks. It is exact
-    // to a sixteenth of a block out to a thousand kilometres.
-    player.eye_position().as_vec3()
+/// Where the muzzle sits for a body about to fire: the eye, exactly. The
+/// muzzle crosses the journal's wire at this width.
+pub fn muzzle_of(player: &PlayerBody) -> DVec3 {
+    player.eye_position()
 }
 
 /// Step every shot one journal tick, breaking what they break.
@@ -167,18 +171,26 @@ pub fn advance_shots(shots: &mut Vec<Shot>, world: &mut World, tuning: &Tuning) 
     let mut sweeps = Vec::with_capacity(shots.len());
     shots.retain_mut(|shot| {
         let from = shot.position;
-        shot.velocity.y -= tuning.slug_gravity * TICK_SECONDS;
+        shot.velocity.y -= f64::from(tuning.slug_gravity) * TICK_SECONDS;
         let travel = shot.velocity * TICK_SECONDS;
         let length = travel.length();
+        // The origin is exact; the direction is scale-free and the ray takes
+        // it narrow, as `sight` does.
         let hit = if length > 1.0e-6 {
-            vx_world::raycast_solid(&*world, world.registry(), from.as_dvec3(), travel / length, length)
+            vx_world::raycast_solid(
+                &*world,
+                world.registry(),
+                from,
+                (travel / length).as_vec3(),
+                length as f32,
+            )
         } else {
             None
         };
 
         let (alive, to, impact) = match hit {
             Some(found) => {
-                let stopped = from + travel / length * found.distance;
+                let stopped = from + travel / length * f64::from(found.distance);
                 let breakable = world
                     .registry()
                     .get(found.id)
@@ -191,8 +203,10 @@ pub fn advance_shots(shots: &mut Vec<Shot>, world: &mut World, tuning: &Tuning) 
                 // may damage at all is unchanged: rock too hard to punch
                 // still turns the round away without a mark.
                 let breakable = if breakable {
-                    let cell = |along: f32, block: i32| {
-                        (((along - block as f32) * vx_world::micro::SIDE as f32).floor() as i32)
+                    // The fraction inside the cell, from the exact corner.
+                    let cell = |along: f64, block: i32| {
+                        (((along - f64::from(block)) * f64::from(vx_world::micro::SIDE)).floor()
+                            as i32)
                             .clamp(0, vx_world::micro::SIDE - 1)
                     };
                     let face = vx_core::Face::ALL
@@ -238,8 +252,8 @@ pub fn advance_shots(shots: &mut Vec<Shot>, world: &mut World, tuning: &Tuning) 
 /// A downed caravan's load, on the ground where it fell.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Crash {
-    pub x: f32,
-    pub z: f32,
+    pub x: f64,
+    pub z: f64,
     pub good: usize,
     pub amount: u64,
 }
@@ -345,7 +359,8 @@ fn read_arsenal(path: &Path) -> std::io::Result<Option<ArsenalData>> {
     }
     let mut word = [0u8; 4];
     file.read_exact(&mut word)?;
-    if u32::from_le_bytes(word) != VERSION {
+    let version = u32::from_le_bytes(word);
+    if !(OLDEST..=VERSION).contains(&version) {
         return Err(std::io::Error::other("unknown version"));
     }
     let mut byte = [0u8; 1];
@@ -375,10 +390,17 @@ fn read_arsenal(path: &Path) -> std::io::Result<Option<ArsenalData>> {
     let mut crashes = Vec::new();
     for _ in 0..count {
         let mut long = [0u8; 8];
-        file.read_exact(&mut word)?;
-        let x = f32::from_bits(u32::from_le_bytes(word));
-        file.read_exact(&mut word)?;
-        let z = f32::from_bits(u32::from_le_bytes(word));
+        let mut column = |file: &mut std::io::BufReader<std::fs::File>| -> std::io::Result<f64> {
+            if version < 2 {
+                file.read_exact(&mut word)?;
+                Ok(f64::from(f32::from_bits(u32::from_le_bytes(word))))
+            } else {
+                file.read_exact(&mut long)?;
+                Ok(f64::from_bits(u64::from_le_bytes(long)))
+            }
+        };
+        let x = column(&mut file)?;
+        let z = column(&mut file)?;
         file.read_exact(&mut word)?;
         let good = u32::from_le_bytes(word) as usize;
         file.read_exact(&mut long)?;
@@ -405,10 +427,10 @@ pub fn witnessed_bounty(damage: u64, witnesses: usize) -> u64 {
 /// The caravan test: the box is the machine's hull, the segment is where a
 /// slug went this tick. Standard slab test, degenerate axes handled by the
 /// containment check.
-pub fn segment_hits_box(from: Vec3, to: Vec3, centre: Vec3, half: Vec3) -> bool {
+pub fn segment_hits_box(from: DVec3, to: DVec3, centre: DVec3, half: DVec3) -> bool {
     let direction = to - from;
-    let mut enter = 0.0f32;
-    let mut exit = 1.0f32;
+    let mut enter = 0.0f64;
+    let mut exit = 1.0f64;
     for axis in 0..3 {
         let start = from[axis] - centre[axis];
         let step = direction[axis];
@@ -449,8 +471,8 @@ mod tests {
         let tuning = Tuning::default();
         let fly = |world: &mut World| {
             let mut shots = vec![Shot {
-                position: Vec3::new(0.5, 200.0, 0.5),
-                velocity: Vec3::new(tuning.slug_speed, 0.0, 0.0),
+                position: DVec3::new(0.5, 200.0, 0.5),
+                velocity: DVec3::new(f64::from(tuning.slug_speed), 0.0, 0.0),
                 age: 0,
             }];
             let mut path = Vec::new();
@@ -543,8 +565,8 @@ mod tests {
     /// One slug down the +x line at the wall, returning what it struck.
     fn fire_one(world: &mut World, tuning: &Tuning, y: f32, z: f32) -> Option<Impact> {
         let mut shots = vec![Shot {
-            position: Vec3::new(0.5, y, z),
-            velocity: Vec3::new(tuning.slug_speed, 0.0, 0.0),
+            position: DVec3::new(0.5, f64::from(y), f64::from(z)),
+            velocity: DVec3::new(f64::from(tuning.slug_speed), 0.0, 0.0),
             age: 0,
         }];
         // A tick sweeps ~7 m; the wall at x = 10 takes two.
@@ -562,8 +584,8 @@ mod tests {
         let mut world = open_sky();
         // Aimed up, so gravity brings it back slowly enough to time out.
         let mut shots = vec![Shot {
-            position: Vec3::new(0.5, 220.0, 0.5),
-            velocity: Vec3::new(0.0, 30.0, 0.0),
+            position: DVec3::new(0.5, 220.0, 0.5),
+            velocity: DVec3::new(0.0, 30.0, 0.0),
             age: 0,
         }];
         for _ in 0..SLUG_TTL {
@@ -578,7 +600,7 @@ mod tests {
         let mut movement = Movement::default();
         let mut body = PlayerBody::default();
         // Aim straight down -Z (yaw_q = 0, pitch_q = 0).
-        launch(&mut shots, &mut movement, body.eye_position().as_vec3(), 0, 0);
+        launch(&mut shots, &mut movement, body.eye_position(), 0, 0);
         assert_eq!(shots.len(), 1);
         assert!(shots[0].velocity.z < 0.0, "yaw 0 must fire down -Z");
 
@@ -604,24 +626,24 @@ mod tests {
 
     #[test]
     fn the_segment_box_test_hits_and_misses() {
-        let centre = Vec3::new(10.0, 26.0, 0.0);
-        let half = Vec3::new(2.0, 1.5, 2.0);
+        let centre = DVec3::new(10.0, 26.0, 0.0);
+        let half = DVec3::new(2.0, 1.5, 2.0);
         assert!(segment_hits_box(
-            Vec3::new(0.0, 26.0, 0.0),
-            Vec3::new(20.0, 26.0, 0.0),
+            DVec3::new(0.0, 26.0, 0.0),
+            DVec3::new(20.0, 26.0, 0.0),
             centre,
             half
         ));
         assert!(!segment_hits_box(
-            Vec3::new(0.0, 40.0, 0.0),
-            Vec3::new(20.0, 40.0, 0.0),
+            DVec3::new(0.0, 40.0, 0.0),
+            DVec3::new(20.0, 40.0, 0.0),
             centre,
             half
         ));
         // Degenerate axis: a segment running inside the slab on x only.
         assert!(!segment_hits_box(
-            Vec3::new(9.0, 0.0, 30.0),
-            Vec3::new(11.0, 0.0, 30.0),
+            DVec3::new(9.0, 0.0, 30.0),
+            DVec3::new(11.0, 0.0, 30.0),
             centre,
             half
         ));
@@ -659,4 +681,49 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&directory);
     }
+    /// A version-1 `arsenal.dat` carried `f32` crash columns; it reads back
+    /// widened, and a version-2 file round-trips a column no `f32` could
+    /// hold.
+    #[test]
+    fn a_crash_column_survives_the_disk_at_both_widths() {
+        let directory = std::env::temp_dir().join(format!("vx-arsenal-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        // Version 1, by hand: one crash at (12.25, -3.5) of good 2, amount 7.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.push(1);
+        bytes.extend_from_slice(&40u32.to_le_bytes());
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.extend_from_slice(&12.25f32.to_bits().to_le_bytes());
+        bytes.extend_from_slice(&(-3.5f32).to_bits().to_le_bytes());
+        bytes.extend_from_slice(&2u32.to_le_bytes());
+        bytes.extend_from_slice(&7u64.to_le_bytes());
+        std::fs::write(directory.join("arsenal.dat"), bytes).unwrap();
+        let mut old = Arsenal::default();
+        old.load(&directory);
+        assert!(old.owned);
+        assert_eq!(old.ammo, 40);
+        assert_eq!(
+            old.crashes,
+            vec![Crash { x: 12.25, z: -3.5, good: 2, amount: 7 }],
+            "the old columns did not widen"
+        );
+
+        // Version 2: a column three thousand kilometres out, to the eighth.
+        let mut far = Arsenal {
+            owned: true,
+            ..Arsenal::default()
+        };
+        far.crashes.push(Crash { x: 3_000_000.125, z: -3_000_000.875, good: 1, amount: 3 });
+        far.save(&directory).unwrap();
+        let mut read = Arsenal::default();
+        read.load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(read.crashes, far.crashes, "the far column did not survive the disk");
+        assert_ne!(f64::from(3_000_000.125f32), 3_000_000.125, "the test proves nothing at f32");
+    }
+
 }

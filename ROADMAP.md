@@ -119,7 +119,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 41 | `4856472` | Seasons: the twenty-eight day year the roster already counted for birthdays now runs the sky and the woods — a week each of spring, summer, autumn and winter, one season to an election term. The leaves turn gold and go bare and come back, the sward goes to straw, the spruce barely notice and the sky goes with them; **summer is a fire season** where the ground stays tinder days after a shower and lightning actually bites, winter is sodden and nothing will light; and the woods **stop growing over the winter**, so a stand you burn in October is still black in February and only starts coming back in the spring |
 | 42 | `7beb30b` | The floating origin: the renderer draws relative to the chunk the camera stands in — the camera's corner and every chunk's corner are exact integers, subtracted in the vertex shader before anything reaches a float multiply — and the player's body, its physics, the camera and the aim ray move to `f64`, so the millimetre skin the collision sweep runs on means what it says everywhere. Proved the only way it can be: the same scene renders byte-identical sixteen hundred kilometres out, and the same journal walks the same walk at spawn and at three thousand |
 | 43 | `2c2df23` | Founding a town, and taking one — the civic note's other two routes into office. Print a charter, stand on flat dry ground a lattice cell clear of anybody, and `FOUND IRON REACH`: the whole town is raised out of the ground by the same generator that draws every other one — plateau, tower, shed, clinic, bank, dwellings, lockboxes, the mini star, three settlers with the market already open — with you in both chairs and a founder's due that keeps you there through the quiet first terms. Or get a warrant, break the posse it sends, and `TAKE` at the console: both chairs are yours, the Compact hates it, every neighbouring mayor signs paper on you and the residents trust you nothing, so the town votes on you at its next poll and a town you took is a town you have to keep |
-| 44 | _this_ | Snow that settles, and ice — the half of a winter stage 41 deliberately left out, because it is the half that edits blocks. Four cold blocks: snowed grass, sand and sphagnum, each the bare block's twin at the same height, and ice, a solid translucent block. The cold is named in one place (`FREEZING`, a threshold on a temperature the place mostly decides and the year leans on), and a frost automaton shaped like the rain's source term — sixteen hashed columns within twenty-four blocks of the player every sixty-four ticks — snows open ground when it is snowing, freezes full still water at or below sea level when it is freezing, and gives both back exactly when it is not. It runs inside `Command::Advance` on both sides of the journal, so a winter replays to the same snow and the same ice. Everything else is an existing system reading a new block: you and the drones and the deputies walk across the lake, a pump on it lifts nothing, an electrolyser beside it finds no water, and fire finds no fuel |
+| 44 | `c90ecea` | Snow that settles, and ice — the half of a winter stage 41 deliberately left out, because it is the half that edits blocks. Four cold blocks: snowed grass, sand and sphagnum, each the bare block's twin at the same height, and ice, a solid translucent block. The cold is named in one place (`FREEZING`, a threshold on a temperature the place mostly decides and the year leans on), and a frost automaton shaped like the rain's source term — sixteen hashed columns within twenty-four blocks of the player every sixty-four ticks — snows open ground when it is snowing, freezes full still water at or below sea level when it is freezing, and gives both back exactly when it is not. It runs inside `Command::Advance` on both sides of the journal, so a winter replays to the same snow and the same ice. Everything else is an existing system reading a new block: you and the drones and the deputies walk across the lake, a pump on it lifts nothing, an electrolyser beside it finds no water, and fire finds no fuel |
+| 45 | _this_ | Entities in `f64` — the line stage 42 drew at the things that travel, moved out to everything that carries a position. Villagers, deputies, holders, the stalker, shots, sweeps, falling stems, marks, sightings, the belief board, caravans and crashes all run at the body's width; directions, headings, ranges and rig geometry stay `f32` and the difference is taken wide first. Every body is drawn in the camera's frame and marked so, the per-object lighting pass adds the origin back before reading a column, the muzzle crosses the journal's wire at `f64` (VERSION 29) and `arsenal.dat` widens its crash columns (VERSION 2, v1 read). Proved by the stage-42 tests' siblings: the same posse walks the same walk, the same townsfolk stroll the same stroll, the same rounds leave the same craters, and the same rig draws the same bytes, at spawn and three thousand kilometres out |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -2526,7 +2527,7 @@ off where it did. The one float that crosses the wire — the muzzle of a shot
 **Known limits, documented rather than fixed.** `f32` objects are exact to a
 sixteenth of a block out to a thousand kilometres and a quarter of one at
 three thousand; in a still, invisible. Entities in `f64` is stage 45 if it is
-ever wanted. The `i32` block lattice is the world's boundary and every test
+ever wanted — and it was: stage 45 moved every body to the same width. The `i32` block lattice is the world's boundary and every test
 above runs well inside the 2^28 where chunk corners are exact.
 
 **Deliberately not in 42:** entities in `f64`; a world fence; persisting the
@@ -2700,6 +2701,98 @@ sand with the ice breaking up into open water.
 leaves; snow drawn falling; icicles; ice you can fall through; skating; snow
 that changes what a market wants; a shovel, or any way to clear a path other
 than breaking the block; frost outside the player's reach.
+
+## Shipped — Stage 45: entities in `f64`
+
+**The line, moved.** Stage 42 made the renderer camera-relative and moved
+*the one thing that travels* — the player's body, its physics, the camera and
+the aim ray — to `f64`, and wrote the limit down for everything else: `f32`
+objects exact to a sixteenth of a block at a thousand kilometres and a
+quarter of one at three thousand, "in a still, invisible". Three things made
+it worth moving. Every body but the held tool and the player's own was built
+in absolute `f32` and rebased by the renderer *after* the rounding, so a
+deputy's feet far out were a quarter block from where the simulation had
+them. The muzzle of a shot was narrowed to `f32` before it was recorded, so a
+round far out began a quarter block from the eye. And twenty sites in
+`main.rs` handed the `f64` player position to entity systems narrowed, with a
+matching widening at every `sight` call on the way back — ninety-nine
+conversions, each a place the two widths could disagree.
+
+**The rule.** A world position is `DVec3` wherever it lives. A direction, a
+heading, a range, a speed and a rig's local geometry stay `f32` — they are
+scale-free — and the difference is taken wide before it is narrowed:
+`Gaze::towards` and `in_cone` narrow `(at - from)`, `yaw_towards` takes the
+level difference as `f32`, the raycast takes an exact `f64` origin and a
+`Vec3` direction. `vx_agent` was never in this: drones, fliers, the kestrel
+and the base are `BlockPos`, and the oracle already covered them at that
+width.
+
+**The bodies.** `Villager`, `Deputy`, `Garrison.hatch`, `Stalker`, `Shot`,
+`Sweep`, `Impact`, `Falling`'s hinge and tip, `Mark`, `Sighting`,
+`Surroundings.player`, `Belief.last_known`, `Shipment::position_at` and
+`Crash` — every place named is wide, every `x as f32 + 0.5` that built one is
+`f64::from(x) + 0.5`, every `dt` is widened once at the top of the walk, and
+every `.as_dvec3()` at a `sight` call is gone because the position already
+was. `dose::exposure`, `roost::sees`, `mining::roster` and the intruder's
+reach take `DVec3`.
+
+**The draw path.** `Rig::objects` and its siblings still take a `Vec3`, but
+it is the *local* one: every body block in `App::render` — machines,
+villagers, deputies, the stalker, falling stems, holders, caravans, shots,
+the roost kestrel, marks, crashes — builds from `renderer.relative(position)`
+and maps `Object::already_relative`, exactly as the held tool and the
+player's body did since 42. `Villagers::objects`, `Mining::objects` and
+`kestrel_objects` take the `relative` closure so the modules never see the
+renderer. The fixtures build their bodies after the camera is placed, through
+`Camera::relative`, which is a pure function of the camera's position. The
+per-object lighting pass adds `render_origin()` back before it reads
+`surface_y`, so it reads the right column for every object for the first
+time — the player's own body had been lit from the origin chunk's column
+since stage 42. Two duplicated blocks (the roost kestrel and the marks, each
+drawn twice) collapsed to one.
+
+**The wire.** `Command::Fire { muzzle: [f64; 3] }`, tag 12 unchanged,
+**journal VERSION 29**: the loader is exact-match only, so a version-28 log
+restarts the oracle like every older one. `muzzle_of` returns the eye
+unnarrowed. `arsenal.dat` is **VERSION 2** with `f64` crash columns and an
+`OLDEST = 1` reader that widens the `f32` ones — the first save file in the
+project whose range check widens a float.
+
+**Proved the way 42 was.** `the_posse_walks_the_same_walk_three_thousand_kilometres_out`:
+the same callout on the same flat floor at the origin and at
+`(3_000_000, 3_000_000)`, two hundred and forty frames, every deputy's
+displacement within a micrometre, and the squad actually walked.
+`the_townsfolk_stroll_the_same_stroll_three_thousand_kilometres_out`: the
+home town's plan with its centre moved, four thousand frames, every villager
+within a micrometre of the town centre's frame.
+`a_shot_lands_the_same_crater_three_thousand_kilometres_out`: the same two
+rounds over the same floor through `replay_from`, the wounds compared block
+for block *and mask for mask* relative to the floor's corner.
+`the_same_body_draws_the_same_bytes_sixteen_hundred_kilometres_out`: the
+player's rig through `Camera::relative` at the origin and a hundred thousand
+chunks out, every matrix and bound compared as bits. And
+`a_crash_column_survives_the_disk_at_both_widths`: a hand-written version-1
+file widens, and a version-2 column no `f32` could hold round-trips.
+
+**Three bugs on the way past.** A stem that landed across the *stump* of a
+tree already felled found the tree in the worldgen's list and felled it
+again — twice the logs — and the chain count was read off the landing tick
+alone, so a neighbour taken early in the arc was forgotten by the time the
+stem came down. Stage 45's rounding exposed both: `cos` of a single-precision
+right angle is not zero, and in `f64` the level tip sat a millionth of a
+block under the hinge, one block lower, which is how the old test had been
+passing. `tip()` says down is level, `is_standing` reads the first trunk
+block above the stump band, and `Falling.took` counts across the fall. And
+the handheld's roster pushed the kestrel's row twice.
+
+**`--posse --close --at 3000000,3000000`.** The same callout at spawn and
+three thousand kilometres out, three deputies and the player, framed
+overhead: every body on its feet in both.
+
+**Deliberately not in 45:** drones in `f64` (they are cells, and the note
+that says why stands); a world fence; persisting any entity that is not
+persisted now; the single dynamic-offset origin buffer; widening headings,
+ranges, speeds or rig geometry.
 
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
@@ -3043,15 +3136,15 @@ B2 in 39, B3 in 40.
 What follows is the board's own work rather than anybody's note. Seasons
 shipped in 41; the floating origin in 42; the civic note's last two routes into
 office — founding a town, and taking one — in 43; the ground half of a winter
-— snow that settles, and ice — in 44.
+— snow that settles, and ice — in 44; and in 45 the line stage 42 drew at the
+things that travel moved out to every body in the game.
 
-| Stage | What | Why here |
-|---|---|---|
-| 45 | Entities in `f64` | Villagers, deputies and shots still carry `f32` positions, exact to a sixteenth of a block out to a thousand kilometres and a quarter of one at three thousand. Stage 42 drew the line at the things that travel; this moves it |
+**Nothing named is left on the arc.** What the board holds is the
+outstanding engineering below, and whatever the next note says.
 
 ## The feature map
 
-The whole game at a glance, as of stage 44.
+The whole game at a glance, as of stage 45.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -3209,12 +3302,14 @@ named once as a threshold the place mostly decides and the year leans on; a
 frost automaton on the journal's side of the line that snows open ground,
 freezes still low water and gives both back, so a winter replays to the same
 snow; a lake you and the deputies walk across, a pump that lifts nothing and
-an electrolyser that finds no water until the thaw); a Steam Deck dist build
-every round.
+an electrolyser that finds no water until the thaw); every body in `f64`
+(villagers, deputies, holders, the stalker, shots, stems, marks, caravans and
+crashes at the body's width, drawn in the camera's frame, the muzzle on the
+wire at `f64`, and the same walk, stroll, crater and bytes at spawn and three
+thousand kilometres out); a Steam Deck dist build every round.
 
-**Planned, in arc order:** entities in `f64`, moving the line stage 42 drew
-at the things that travel out to the villagers, deputies and shots that still
-carry `f32` positions.
+**Planned, in arc order:** nothing named. Every design note the project was
+given is shipped, and the board's own arc closed with 45.
 
 **Outstanding engineering:** journal-shrunk saves;
 real min-cost flow for freight; ammunition as a trade good; the rest of the

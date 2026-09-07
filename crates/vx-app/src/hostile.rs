@@ -34,7 +34,7 @@
 //! the honest fiction, since property damage is precisely what they are
 //! billing you for.
 
-use glam::Vec3;
+use glam::DVec3;
 
 use vx_core::BlockPos;
 use vx_world::World;
@@ -138,7 +138,7 @@ pub fn band(composure: f32, temperament: &Temperament) -> Mode {
 /// One deputy.
 #[derive(Debug, Clone)]
 pub struct Deputy {
-    pub position: Vec3,
+    pub position: DVec3,
     pub yaw: f32,
     pub temperament: Temperament,
     pub composure: f32,
@@ -146,7 +146,7 @@ pub struct Deputy {
     /// Seconds until this deputy may fire again.
     pub reload: f32,
     /// Where they are trying to get to.
-    pub going: Option<Vec3>,
+    pub going: Option<DVec3>,
     /// Ticks since they last closed any distance on `going`.
     stuck: u32,
     /// Distance to `going` when it was last checked.
@@ -164,7 +164,7 @@ pub const DEPUTY_HITS: u8 = 3;
 pub const HIT_RADIUS: f32 = 0.6;
 
 impl Deputy {
-    pub(crate) fn new(position: Vec3, temperament: Temperament, variant: usize) -> Self {
+    pub(crate) fn new(position: DVec3, temperament: Temperament, variant: usize) -> Self {
         Deputy {
             position,
             yaw: 0.0,
@@ -194,8 +194,8 @@ impl Deputy {
     }
 
     /// Their eye, for line-of-sight questions.
-    pub fn eye(&self) -> Vec3 {
-        self.position + Vec3::Y * crate::awareness::VILLAGER_EYE
+    pub fn eye(&self) -> DVec3 {
+        self.position + DVec3::Y * f64::from(crate::awareness::VILLAGER_EYE)
     }
 }
 
@@ -207,7 +207,7 @@ impl Deputy {
 /// waist-high cover you can peek over; blocked only prone is a last resort.
 /// Voxels make this cheap, and it is the very same call the roost uses to
 /// witness a crime.
-pub fn cover_score(world: &World, at: Vec3, threat: Vec3) -> u32 {
+pub fn cover_score(world: &World, at: DVec3, threat: DVec3) -> u32 {
     let registry = world.registry();
     let heights = [
         crate::movement::Stance::Grounded.eye_cm(),
@@ -217,8 +217,8 @@ pub fn cover_score(world: &World, at: Vec3, threat: Vec3) -> u32 {
     heights
         .into_iter()
         .filter(|centimetres| {
-            let eye = at + Vec3::Y * (*centimetres as f32 / 100.0);
-            vx_world::sight::obstruction(world, registry, eye.as_dvec3(), threat.as_dvec3()).is_some()
+            let eye = at + DVec3::Y * (f64::from(*centimetres) / 100.0);
+            vx_world::sight::obstruction(world, registry, eye, threat).is_some()
         })
         .count() as u32
 }
@@ -229,7 +229,7 @@ pub fn cover_score(world: &World, at: Vec3, threat: Vec3) -> u32 {
 /// ever fires through another. Its absence is the thing that reads as
 /// contempt in other games, and enforcing it *at the shot* means the failure
 /// cannot exist.
-pub fn lane_is_clear(from: Vec3, at: Vec3, allies: &[Vec3]) -> bool {
+pub fn lane_is_clear(from: DVec3, at: DVec3, allies: &[DVec3]) -> bool {
     let along = at - from;
     let distance = along.length();
     if distance < 1.0e-3 {
@@ -243,7 +243,7 @@ pub fn lane_is_clear(from: Vec3, at: Vec3, allies: &[Vec3]) -> bool {
         if !(0.0..distance).contains(&ahead) {
             return false;
         }
-        (to_ally - direction * ahead).length() < LANE_WIDTH
+        (to_ally - direction * ahead).length() < f64::from(LANE_WIDTH)
     })
 }
 
@@ -274,7 +274,7 @@ impl Pathing {
     /// goal has genuinely moved. Building is a bounded breadth-first sweep;
     /// doing it every frame would be waste, and doing it never would be a
     /// navmesh.
-    pub fn steer(&mut self, dt: f32, world: &World, goal: Vec3) {
+    pub fn steer(&mut self, dt: f32, world: &World, goal: DVec3) {
         self.rebuild_in -= dt;
         let cell = BlockPos::new(
             goal.x.floor() as i32,
@@ -300,7 +300,7 @@ impl Pathing {
     }
 
     /// The next cell on the route from `from`, when the route knows one.
-    pub(crate) fn step(&self, world: &World, from: Vec3) -> Option<BlockPos> {
+    pub(crate) fn step(&self, world: &World, from: DVec3) -> Option<BlockPos> {
         let feet = BlockPos::new(
             from.x.floor() as i32,
             from.y.floor() as i32,
@@ -367,8 +367,8 @@ impl Posse {
     /// on `town`'s warrant.
     pub fn call_out(
         &mut self,
-        near: Vec3,
-        ground: impl Fn(f32, f32) -> f32,
+        near: DVec3,
+        ground: impl Fn(f64, f64) -> f64,
         seed: u64,
         town: Option<(i32, i32)>,
     ) {
@@ -380,12 +380,12 @@ impl Posse {
             .map(|index| {
                 // Fanned out on an arc, never on top of the player: the note's
                 // floor distance, so nobody materialises in your face.
-                let angle = index as f32 * std::f32::consts::TAU / SQUAD as f32;
+                let angle = index as f64 * std::f64::consts::TAU / SQUAD as f64;
                 let x = near.x + angle.cos() * 26.0;
                 let z = near.z + angle.sin() * 26.0;
                 let temperament = crate::people::temperament_from(seed ^ index as u64);
                 Deputy::new(
-                    Vec3::new(x, ground(x, z), z),
+                    DVec3::new(x, ground(x, z), z),
                     temperament,
                     index % 3,
                 )
@@ -452,7 +452,7 @@ impl Posse {
     /// expensive thing that can happen to a squad. Suppression is composure
     /// spent faster than cover restores it, which hands the player *pinning*
     /// as a verb without a single new system.
-    pub fn under_fire(&mut self, from: Vec3, to: Vec3) -> Report {
+    pub fn under_fire(&mut self, from: DVec3, to: DVec3) -> Report {
         if !self.called_out() {
             return Report::default();
         }
@@ -467,7 +467,7 @@ impl Posse {
         &mut self,
         dt: f32,
         world: &World,
-        player: Vec3,
+        player: DVec3,
         player_down: bool,
     ) -> Report {
         let mut report = Report::default();
@@ -492,7 +492,7 @@ impl Posse {
         }
 
         let registry = world.registry();
-        let eye_of_player = player + Vec3::Y * crate::awareness::PLAYER_EYE;
+        let eye_of_player = player + DVec3::Y * f64::from(crate::awareness::PLAYER_EYE);
 
         // Who can see the player right now? Asked fresh, because sight is
         // the whole game here.
@@ -501,12 +501,12 @@ impl Posse {
             .iter()
             .map(|deputy| {
                 deputy.active()
-                    && (player - deputy.position).length() <= crate::awareness::SIGHT_RANGE * 1.5
+                    && (player - deputy.position).length() <= f64::from(crate::awareness::SIGHT_RANGE * 1.5)
                     && vx_world::sight::sees(
                         world,
                         registry,
-                        deputy.eye().as_dvec3(),
-                        eye_of_player.as_dvec3(),
+                        deputy.eye(),
+                        eye_of_player,
                         crate::awareness::SIGHT_RANGE * 1.5,
                     )
             })
@@ -526,7 +526,7 @@ impl Posse {
                     .is_some_and(|top| (top - player.y as i32).abs() < 6)
             });
             // Everything a deputy can see is everything the player is not.
-            let eyes: Vec<Vec3> = self
+            let eyes: Vec<DVec3> = self
                 .deputies
                 .iter()
                 .filter(|deputy| deputy.active())
@@ -534,13 +534,13 @@ impl Posse {
                 .collect();
             self.belief.clear_seen(|x, z| {
                 eyes.iter().any(|eye| {
-                    let at = Vec3::new(x as f32 + 0.5, eye.y, z as f32 + 0.5);
-                    (at - *eye).length() <= crate::awareness::SIGHT_RANGE
+                    let at = DVec3::new(x as f64 + 0.5, eye.y, z as f64 + 0.5);
+                    (at - *eye).length() <= f64::from(crate::awareness::SIGHT_RANGE)
                         && vx_world::sight::sees(
                             world,
                             registry,
-                            eye.as_dvec3(),
-                            at.as_dvec3(),
+                            *eye,
+                            at,
                             crate::awareness::SIGHT_RANGE,
                         )
                 })
@@ -563,7 +563,7 @@ impl Posse {
             return report;
         }
 
-        let positions: Vec<Vec3> = self.deputies.iter().map(|deputy| deputy.position).collect();
+        let positions: Vec<DVec3> = self.deputies.iter().map(|deputy| deputy.position).collect();
         let outnumbering = self.active();
         let target = self.belief.search_target(player);
         let holding = self.backing_off > 0.0;
@@ -573,14 +573,14 @@ impl Posse {
         let goal = if self.exposed {
             player
         } else if let Some((x, z)) = target {
-            Vec3::new(x as f32 + 0.5, player.y, z as f32 + 0.5)
+            DVec3::new(x as f64 + 0.5, player.y, z as f64 + 0.5)
         } else {
             player
         };
         self.pathing.steer(dt, world, goal);
 
         for (index, sees) in seen_by.iter().copied().enumerate() {
-            let allies: Vec<Vec3> = positions
+            let allies: Vec<DVec3> = positions
                 .iter()
                 .enumerate()
                 .filter(|(other, _)| *other != index)
@@ -613,10 +613,10 @@ impl Posse {
         deputy: &mut Deputy,
         dt: f32,
         world: &World,
-        player: Vec3,
+        player: DVec3,
         player_down: bool,
         sees: bool,
-        allies: &[Vec3],
+        allies: &[DVec3],
         outnumbering: usize,
         search: Option<(i32, i32)>,
         holding: bool,
@@ -666,7 +666,7 @@ impl Posse {
             Mode::Engage if !holding => {
                 let gap = (player - deputy.position).length();
                 deputy.face(player);
-                if gap > ENGAGE_RANGE {
+                if gap > f64::from(ENGAGE_RANGE) {
                     Self::walk(deputy, dt, player, 3.0, world, Some(route));
                     return false;
                 }
@@ -703,7 +703,7 @@ impl Posse {
             }
             Mode::Investigate | Mode::Patrol => {
                 if let Some((x, z)) = search {
-                    let to = Vec3::new(x as f32 + 0.5, deputy.position.y, z as f32 + 0.5);
+                    let to = DVec3::new(x as f64 + 0.5, deputy.position.y, z as f64 + 0.5);
                     Self::walk(deputy, dt, to, 2.4, world, Some(route));
                     deputy.face(to);
                 }
@@ -721,7 +721,7 @@ impl Posse {
     pub(crate) fn walk(
         deputy: &mut Deputy,
         dt: f32,
-        to: Vec3,
+        to: DVec3,
         speed: f32,
         world: &World,
         route: Option<&Pathing>,
@@ -731,16 +731,16 @@ impl Posse {
         // the *fallback* now, not the plan.
         let waypoint = route
             .and_then(|route| route.step(world, deputy.position))
-            .map(|cell| Vec3::new(cell.x as f32 + 0.5, cell.y as f32, cell.z as f32 + 0.5))
+            .map(|cell| DVec3::new(cell.x as f64 + 0.5, cell.y as f64, cell.z as f64 + 0.5))
             .unwrap_or(to);
 
-        let along = Vec3::new(
+        let along = DVec3::new(
             waypoint.x - deputy.position.x,
             0.0,
             waypoint.z - deputy.position.z,
         );
         let gap = along.length();
-        let total = Vec3::new(to.x - deputy.position.x, 0.0, to.z - deputy.position.z).length();
+        let total = DVec3::new(to.x - deputy.position.x, 0.0, to.z - deputy.position.z).length();
         if total < 0.05 {
             deputy.stuck = 0;
             return;
@@ -748,9 +748,9 @@ impl Posse {
         // The watchdog measures progress toward the *destination*, not the
         // waypoint — a route that shuffles someone between two cells is as
         // stuck as a wall.
-        if total < deputy.last_gap - 0.01 {
+        if total < f64::from(deputy.last_gap) - 0.01 {
             deputy.stuck = 0;
-            deputy.last_gap = total;
+            deputy.last_gap = total as f32;
         } else {
             deputy.stuck += 1;
             if deputy.stuck > STUCK_TICKS {
@@ -762,7 +762,7 @@ impl Posse {
         }
         deputy.going = Some(to);
         if gap > 1.0e-3 {
-            deputy.position += along / gap * speed * dt;
+            deputy.position += along / gap * f64::from(speed * dt);
         }
         // Height. A routed step carries its own floor — stairs, bunker
         // decks, cave ledges — so follow it. Unrouted walking snaps to the
@@ -771,13 +771,13 @@ impl Posse {
         // second-worst idea.
         if route.and_then(|route| route.step(world, deputy.position)).is_some() {
             let target_y = waypoint.y;
-            let climb = (target_y - deputy.position.y).clamp(-6.0 * dt, 6.0 * dt);
+            let climb = (target_y - deputy.position.y).clamp(f64::from(-6.0 * dt), f64::from(6.0 * dt));
             deputy.position.y += climb;
         } else if let Some(top) = world.surface_y(
             deputy.position.x.floor() as i32,
             deputy.position.z.floor() as i32,
         ) {
-            let surface = (top + 1) as f32;
+            let surface = (top + 1) as f64;
             if (surface - deputy.position.y).abs() <= 3.0 {
                 deputy.position.y = surface;
             }
@@ -786,11 +786,11 @@ impl Posse {
     }
 
     /// Move out of an ally's line rather than standing in it.
-    fn sidestep(deputy: &mut Deputy, dt: f32, player: Vec3) {
+    fn sidestep(deputy: &mut Deputy, dt: f32, player: DVec3) {
         let along = player - deputy.position;
-        let across = Vec3::new(-along.z, 0.0, along.x);
+        let across = DVec3::new(-along.z, 0.0, along.x);
         if across.length() > 1.0e-3 {
-            deputy.position += across.normalize() * 2.0 * dt;
+            deputy.position += across.normalize() * f64::from(2.0 * dt);
         }
     }
 }
@@ -806,8 +806,12 @@ impl Mode {
 }
 
 impl Deputy {
-    pub(crate) fn face(&mut self, at: Vec3) {
-        if let Some(yaw) = crate::rig::yaw_towards(at.x - self.position.x, at.z - self.position.z) {
+    pub(crate) fn face(&mut self, at: DVec3) {
+        // A bearing needs no more than the level difference, narrowed.
+        if let Some(yaw) = crate::rig::yaw_towards(
+            (at.x - self.position.x) as f32,
+            (at.z - self.position.z) as f32,
+        ) {
             self.yaw = yaw;
         }
     }
@@ -830,12 +834,12 @@ pub(crate) fn bark_for(mode: Mode) -> Option<String> {
 ///
 /// Scores a ring of candidates by how many stances the geometry covers,
 /// nearest winning ties, so the answer is deterministic.
-pub fn best_cover(world: &World, from: Vec3, threat: Vec3) -> Option<Vec3> {
-    let mut best: Option<(Vec3, u32, f32)> = None;
+pub fn best_cover(world: &World, from: DVec3, threat: DVec3) -> Option<DVec3> {
+    let mut best: Option<(DVec3, u32, f64)> = None;
     for step in 0..12 {
-        let angle = step as f32 * std::f32::consts::TAU / 12.0;
-        for reach in [2.0f32, 4.0, 6.0] {
-            let at = Vec3::new(
+        let angle = f64::from(step) * std::f64::consts::TAU / 12.0;
+        for reach in [2.0f64, 4.0, 6.0] {
+            let at = DVec3::new(
                 from.x + angle.cos() * reach,
                 from.y,
                 from.z + angle.sin() * reach,
@@ -861,7 +865,7 @@ pub fn best_cover(world: &World, from: Vec3, threat: Vec3) -> Option<Vec3> {
 /// and an ally going down costs everyone still standing. Shared by the
 /// posse and the bunker garrisons, because a bullet does not care whose
 /// squad it crosses.
-pub(crate) fn rake(deputies: &mut [Deputy], exposed: bool, from: Vec3, to: Vec3) -> Report {
+pub(crate) fn rake(deputies: &mut [Deputy], exposed: bool, from: DVec3, to: DVec3) -> Report {
     let mut report = Report::default();
     let along = to - from;
     let travel = along.length();
@@ -876,11 +880,11 @@ pub(crate) fn rake(deputies: &mut [Deputy], exposed: bool, from: Vec3, to: Vec3)
             continue;
         }
         // Nearest approach of the round to this deputy's chest.
-        let chest = deputy.position + Vec3::Y;
+        let chest = deputy.position + DVec3::Y;
         let ahead = (chest - from).dot(direction).clamp(0.0, travel);
         let miss = (chest - (from + direction * ahead)).length();
 
-        if miss <= HIT_RADIUS {
+        if miss <= f64::from(HIT_RADIUS) {
             deputy.hits = deputy.hits.saturating_sub(1);
             if deputy.hits == 0 {
                 deputy.mode = Mode::Down;
@@ -891,14 +895,14 @@ pub(crate) fn rake(deputies: &mut [Deputy], exposed: bool, from: Vec3, to: Vec3)
                     report.barks.push(line);
                 }
             }
-        } else if miss <= SUPPRESS_NEAR {
+        } else if miss <= f64::from(SUPPRESS_NEAR) {
             // Pinned: near misses cost more nerve than cover gives back.
             if let Some(mode) = deputy.rattle(ROUND_NEAR_COVER) {
                 if let Some(line) = bark_for(mode) {
                     report.barks.push(line);
                 }
             }
-        } else if (chest - from).length() < crate::awareness::SIGHT_RANGE * 2.0 {
+        } else if (chest - from).length() < f64::from(crate::awareness::SIGHT_RANGE * 2.0) {
             // Heard, not felt — and worse when it comes from somewhere
             // they cannot see, which is the note's "challenged from an
             // unseen position" and the reason shooting from cover is
@@ -984,7 +988,7 @@ mod tests {
 
     #[test]
     fn rattling_reports_only_the_transitions() {
-        let mut deputy = Deputy::new(Vec3::ZERO, temperament(Archetype::Steady, 128), 0);
+        let mut deputy = Deputy::new(DVec3::ZERO, temperament(Archetype::Steady, 128), 0);
         assert_eq!(deputy.rattle(1.0), None, "a scratch changed the mode");
         assert_eq!(deputy.rattle(45.0), Some(Mode::Hide));
         assert_eq!(deputy.rattle(1.0), None);
@@ -998,32 +1002,32 @@ mod tests {
     fn nobody_ever_fires_through_a_friend() {
         // An invariant, not a tuning goal. An ally anywhere in the lane
         // blocks the shot; one behind you or off to the side does not.
-        let muzzle = Vec3::new(0.0, 70.0, 0.0);
-        let target = Vec3::new(10.0, 70.0, 0.0);
+        let muzzle = DVec3::new(0.0, 70.0, 0.0);
+        let target = DVec3::new(10.0, 70.0, 0.0);
         assert!(lane_is_clear(muzzle, target, &[]));
         assert!(
-            !lane_is_clear(muzzle, target, &[Vec3::new(5.0, 70.0, 0.4)]),
+            !lane_is_clear(muzzle, target, &[DVec3::new(5.0, 70.0, 0.4)]),
             "fired straight through a deputy"
         );
         assert!(
-            !lane_is_clear(muzzle, target, &[Vec3::new(9.0, 70.0, -1.0)]),
+            !lane_is_clear(muzzle, target, &[DVec3::new(9.0, 70.0, -1.0)]),
             "fired past a deputy inside the lane"
         );
         // Behind the muzzle, past the target, and well off to one side are
         // all fine.
-        assert!(lane_is_clear(muzzle, target, &[Vec3::new(-3.0, 70.0, 0.0)]));
-        assert!(lane_is_clear(muzzle, target, &[Vec3::new(14.0, 70.0, 0.0)]));
-        assert!(lane_is_clear(muzzle, target, &[Vec3::new(5.0, 70.0, 3.0)]));
+        assert!(lane_is_clear(muzzle, target, &[DVec3::new(-3.0, 70.0, 0.0)]));
+        assert!(lane_is_clear(muzzle, target, &[DVec3::new(14.0, 70.0, 0.0)]));
+        assert!(lane_is_clear(muzzle, target, &[DVec3::new(5.0, 70.0, 3.0)]));
     }
 
     #[test]
     fn the_lane_check_is_symmetric_in_the_only_way_that_matters() {
         // A crossfire from many angles, thousands of samples, and never once
         // a round through a friend.
-        let target = Vec3::new(0.0, 70.0, 0.0);
+        let target = DVec3::new(0.0, 70.0, 0.0);
         for step in 0..360 {
-            let angle = step as f32 * std::f32::consts::TAU / 360.0;
-            let muzzle = Vec3::new(angle.cos() * 12.0, 70.0, angle.sin() * 12.0);
+            let angle = step as f64 * std::f64::consts::TAU / 360.0;
+            let muzzle = DVec3::new(angle.cos() * 12.0, 70.0, angle.sin() * 12.0);
             // An ally placed exactly halfway must always block.
             let ally = (muzzle + target) * 0.5;
             assert!(
@@ -1061,8 +1065,8 @@ mod tests {
             }
         }
 
-        let start = Vec3::new(-6.5, (ground + 1) as f32, 0.5);
-        let goal = Vec3::new(6.5, (ground + 1) as f32, 0.5);
+        let start = DVec3::new(-6.5, (ground + 1) as f64, 0.5);
+        let goal = DVec3::new(6.5, (ground + 1) as f64, 0.5);
 
         let mut route = Pathing::default();
         route.steer(0.1, &world, goal);
@@ -1121,4 +1125,60 @@ mod tests {
             }
         }
     }
+    /// **The posse walks the same walk three thousand kilometres out.** The
+    /// same callout on the same flat floor at the origin and far out, the
+    /// same player standing still, two hundred and forty frames: every
+    /// deputy's displacement agrees to a micrometre. In `f32` the far
+    /// squad's steps were quantised to a quarter of a block.
+    #[test]
+    fn the_posse_walks_the_same_walk_three_thousand_kilometres_out() {
+        let floor = |ox: i32, oz: i32| {
+            let mut world = World::new(2024);
+            world.load_around(vx_core::BlockPos::new(ox, 0, oz).chunk(), 3);
+            let stone = world.registry().id_of("engine:stone").unwrap();
+            for x in -40..40 {
+                for z in -40..40 {
+                    for y in 60..96 {
+                        world.set_block(vx_core::BlockPos::new(ox + x, y, oz + z), vx_core::BlockId::AIR);
+                    }
+                    world.set_block(vx_core::BlockPos::new(ox + x, 64, oz + z), stone);
+                }
+            }
+            world
+        };
+        let run = |ox: i32, oz: i32| {
+            let world = floor(ox, oz);
+            let player = DVec3::new(f64::from(ox) + 0.5, 65.0, f64::from(oz) + 0.5);
+            let mut posse = Posse::default();
+            posse.call_out(player, |_, _| 65.0, 0xc0ffee, None);
+            let mut trail = Vec::new();
+            for _ in 0..240 {
+                posse.update(1.0 / 30.0, &world, player, false);
+                trail.push(
+                    posse
+                        .deputies
+                        .iter()
+                        .map(|deputy| deputy.position - player)
+                        .collect::<Vec<_>>(),
+                );
+            }
+            trail
+        };
+        let here = run(0, 0);
+        let there = run(3_000_000, 3_000_000);
+        assert_eq!(here.len(), there.len());
+        let mut moved = 0.0f64;
+        for (frame, (near, distant)) in here.iter().zip(&there).enumerate() {
+            assert_eq!(near.len(), distant.len(), "a squad lost a deputy at frame {frame}");
+            for (a, b) in near.iter().zip(distant) {
+                assert!(
+                    (*a - *b).length() < 1.0e-6,
+                    "frame {frame}: a deputy stood at {a} at spawn and {b} far out"
+                );
+            }
+            moved = moved.max((here[0][0] - near[0]).length());
+        }
+        assert!(moved > 2.0, "the deputies never walked ({moved} blocks)");
+    }
+
 }

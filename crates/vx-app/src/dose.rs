@@ -65,7 +65,7 @@ pub fn let_through(marks: u32) -> f32 {
 /// Pure in the world and the position — the same body in the same gallery
 /// always reads the same, which is what makes "cut it back and wall it up"
 /// a strategy rather than a hope.
-pub fn exposure(world: &vx_world::World, at: glam::Vec3) -> f32 {
+pub fn exposure(world: &vx_world::World, at: glam::DVec3) -> f32 {
     let Some(hot) = world.registry().id_of("engine:uranium_ore") else {
         return 0.0;
     };

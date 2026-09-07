@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use glam::Vec3;
+use glam::{DVec3, Vec3};
 use vx_agent::{
     options, DroneState, Fleet, FlierState, MineMethod, MinePlan, Operation, PilotCommand, Sector,
     VoxelAabb,
@@ -188,7 +188,7 @@ impl Mining {
     ///
     /// Idempotent so callers need not track whether it happened; one flier is
     /// this milestone's scope.
-    pub fn ensure_flier(&mut self, position: Vec3) {
+    pub fn ensure_flier(&mut self, position: DVec3) {
         if self.fleet.fliers.is_empty() {
             self.fleet.add_flier(BlockPos::new(
                 position.x.floor() as i32,
@@ -594,11 +594,11 @@ impl Mining {
     /// The single source of truth for machine positions on screen. Both the
     /// rigs and the FPV camera go through it, which is what stops a piloted
     /// machine's view from drifting against its own body.
-    fn interpolated(&self, from: BlockPos, to: BlockPos) -> Vec3 {
+    fn interpolated(&self, from: BlockPos, to: BlockPos) -> DVec3 {
         let fraction = self.tick_fraction();
-        let a = Vec3::new(from.x as f32 + 0.5, from.y as f32, from.z as f32 + 0.5);
-        let b = Vec3::new(to.x as f32 + 0.5, to.y as f32, to.z as f32 + 0.5);
-        a + (b - a) * fraction
+        let a = DVec3::new(from.x as f64 + 0.5, from.y as f64, from.z as f64 + 0.5);
+        let b = DVec3::new(to.x as f64 + 0.5, to.y as f64, to.z as f64 + 0.5);
+        a + (b - a) * f64::from(fraction)
     }
 
     /// Eye height above a machine's ground point, per kind.
@@ -613,7 +613,7 @@ impl Mining {
     }
 
     /// Where a machine's camera sits this frame.
-    pub fn machine_eye(&self, machine: MachineRef) -> Option<Vec3> {
+    pub fn machine_eye(&self, machine: MachineRef) -> Option<DVec3> {
         let base = match machine {
             MachineRef::Digger(index) => {
                 let drone = self.operation.as_ref()?.drones.get(index)?;
@@ -628,7 +628,7 @@ impl Mining {
                 self.interpolated(craft.previous_position, craft.position)
             }
         };
-        Some(base + Vec3::Y * Self::eye_height(machine))
+        Some(base + DVec3::Y * f64::from(Self::eye_height(machine)))
     }
 
     /// Where a machine is, in whole blocks.
@@ -643,7 +643,7 @@ impl Mining {
     }
 
     /// The roster the handheld lists, nearest to `from` first.
-    pub fn roster(&self, from: Vec3) -> Vec<MachineListing> {
+    pub fn roster(&self, from: DVec3) -> Vec<MachineListing> {
         let mut rows = Vec::new();
         if let Some(operation) = &self.operation {
             for (index, drone) in operation.drones.iter().enumerate() {
@@ -662,7 +662,7 @@ impl Mining {
                     },
                     distance: self
                         .machine_eye(machine)
-                        .map_or(0.0, |at| (at - from).length()),
+                        .map_or(0.0, |at| (at - from).length() as f32),
                     cargo: drone.carrying(),
                     capacity: drone.capacity,
                 });
@@ -677,21 +677,7 @@ impl Mining {
                 state: kestrel_state(kestrel).into(),
                 distance: self
                     .machine_eye(machine)
-                    .map_or(0.0, |at| (at - from).length()),
-                cargo: 0,
-                capacity: 0,
-            });
-        }
-        if let Some(kestrel) = &self.kestrel {
-            let machine = MachineRef::Kestrel;
-            rows.push(MachineListing {
-                machine,
-                condition: self.wear.condition(machine),
-                name: "KESTREL".into(),
-                state: kestrel_state(kestrel).into(),
-                distance: self
-                    .machine_eye(machine)
-                    .map_or(0.0, |at| (at - from).length()),
+                    .map_or(0.0, |at| (at - from).length() as f32),
                 cargo: 0,
                 capacity: 0,
             });
@@ -711,7 +697,7 @@ impl Mining {
                 },
                 distance: self
                     .machine_eye(machine)
-                    .map_or(0.0, |at| (at - from).length()),
+                    .map_or(0.0, |at| (at - from).length() as f32),
                 cargo: flier.carrying(),
                 capacity: flier.capacity,
             });
@@ -721,7 +707,7 @@ impl Mining {
     }
 
     /// One machine's row, for the feed banner.
-    pub fn listing(&self, machine: MachineRef, from: Vec3) -> Option<MachineListing> {
+    pub fn listing(&self, machine: MachineRef, from: DVec3) -> Option<MachineListing> {
         self.roster(from)
             .into_iter()
             .find(|row| row.machine == machine)
@@ -798,33 +784,37 @@ impl Mining {
         self.pilot_look = yaw;
     }
 
-    /// The cubes to draw this frame: corner markers and drones.
-    pub fn objects(&self) -> Vec<Object> {
+    /// The cubes to draw this frame: corner markers and drones, built in
+    /// the camera's frame — `relative` measures a place from the render
+    /// origin — and marked so.
+    pub fn objects(&self, relative: impl Fn(DVec3) -> Vec3) -> Vec<Object> {
         let mut objects = Vec::new();
+        let marker = |centre: DVec3, size: f32| {
+            let half = DVec3::splat(f64::from(size) * 0.5);
+            Object::box_between(relative(centre - half), relative(centre + half), slot::COPPER_ORE)
+                .already_relative()
+        };
 
         if let Some(area) = self.area {
             for corner in area_corners(area) {
-                objects.push(Object::box_between(
-                    corner - Vec3::splat(MARKER_SIZE * 0.5),
-                    corner + Vec3::splat(MARKER_SIZE * 0.5),
-                    slot::COPPER_ORE,
-                ));
+                objects.push(marker(corner, MARKER_SIZE));
             }
         } else {
             // One corner down: show it on its own, so it is obvious the second
             // click is still owed.
             for corner in &self.corners {
-                let centre = Vec3::new(corner.x as f32 + 0.5, corner.y as f32 + 1.0, corner.z as f32 + 0.5);
-                objects.push(Object::box_between(
-                    centre - Vec3::splat(MARKER_SIZE * 0.5),
-                    centre + Vec3::splat(MARKER_SIZE * 0.5),
-                    slot::COPPER_ORE,
-                ));
+                let centre = DVec3::new(
+                    f64::from(corner.x) + 0.5,
+                    f64::from(corner.y) + 1.0,
+                    f64::from(corner.z) + 0.5,
+                );
+                objects.push(marker(centre, MARKER_SIZE));
             }
         }
 
         // Machines are rigs, gliding between their tick positions.
-        let lerp = |from: BlockPos, to: BlockPos| -> Vec3 { self.interpolated(from, to) };
+        let lerp = |from: BlockPos, to: BlockPos| -> Vec3 { relative(self.interpolated(from, to)) };
+        let placed = |built: Vec<Object>| built.into_iter().map(Object::already_relative);
 
         if let Some(operation) = &self.operation {
             for (index, drone) in operation.drones.iter().enumerate() {
@@ -834,44 +824,40 @@ impl Mining {
                 } else {
                     0.0
                 };
-                objects.extend(self.digger_rig.objects(
+                objects.extend(placed(self.digger_rig.objects(
                     lerp(drone.previous_position, drone.position),
                     yaw,
                     spin,
-                ));
+                )));
             }
         }
 
         // The scout, only while off the pack: a docked kestrel is stowed,
         // not a second hat on the player's head.
         if let Some(kestrel) = self.kestrel.as_ref().filter(|kestrel| kestrel.aloft()) {
-            objects.extend(self.kestrel_rig.objects(
+            objects.extend(placed(self.kestrel_rig.objects(
                 lerp(kestrel.craft.previous_position, kestrel.craft.position),
                 self.kestrel_yaw,
                 self.spin * 3.0,
-            ));
+            )));
         }
         for (index, flier) in self.fleet.fliers.iter().enumerate() {
             let yaw = self.flier_yaws.get(index).copied().unwrap_or(0.0);
-            objects.extend(self.flier_rig.objects(
+            objects.extend(placed(self.flier_rig.objects(
                 lerp(flier.previous_position, flier.position),
                 yaw,
                 self.spin * 2.5,
-            ));
+            )));
         }
 
         // Pings hover and read as copper, since copper is what they promise.
         for ping in self.fleet.pings() {
-            let centre = Vec3::new(
-                ping.position.x as f32 + 0.5,
-                ping.position.y as f32 + 1.0,
-                ping.position.z as f32 + 0.5,
+            let centre = DVec3::new(
+                f64::from(ping.position.x) + 0.5,
+                f64::from(ping.position.y) + 1.0,
+                f64::from(ping.position.z) + 0.5,
             );
-            objects.push(Object::box_between(
-                centre - Vec3::splat(PING_SIZE * 0.5),
-                centre + Vec3::splat(PING_SIZE * 0.5),
-                slot::COPPER_ORE,
-            ));
+            objects.push(marker(centre, PING_SIZE));
         }
 
         objects
@@ -941,12 +927,13 @@ impl Mining {
 impl Mining {
     /// The kestrel rig at an arbitrary position: the roost borrows the same
     /// silhouette — one machine, two owners, made literal on screen.
-    pub fn kestrel_objects(&self, at: BlockPos) -> Vec<Object> {
-        self.kestrel_rig.objects(
-            Vec3::new(at.x as f32 + 0.5, at.y as f32, at.z as f32 + 0.5),
-            0.0,
-            self.spin * 3.0,
-        )
+    pub fn kestrel_objects(&self, at: BlockPos, relative: impl Fn(DVec3) -> Vec3) -> Vec<Object> {
+        let centre = DVec3::new(f64::from(at.x) + 0.5, f64::from(at.y), f64::from(at.z) + 0.5);
+        self.kestrel_rig
+            .objects(relative(centre), 0.0, self.spin * 3.0)
+            .into_iter()
+            .map(Object::already_relative)
+            .collect()
     }
 }
 
@@ -968,18 +955,18 @@ pub fn kestrel_state(kestrel: &vx_agent::Kestrel) -> &'static str {
 /// The eight corners of a marked area, in world coordinates.
 ///
 /// Blocks are cells, so the far corner of the box is one block past `max`.
-fn area_corners(area: VoxelAabb) -> Vec<Vec3> {
-    let lo = Vec3::new(area.min.x as f32, area.min.y as f32, area.min.z as f32);
-    let hi = Vec3::new(
-        area.max.x as f32 + 1.0,
-        area.max.y as f32 + 1.0,
-        area.max.z as f32 + 1.0,
+fn area_corners(area: VoxelAabb) -> Vec<DVec3> {
+    let lo = DVec3::new(area.min.x as f64, area.min.y as f64, area.min.z as f64);
+    let hi = DVec3::new(
+        area.max.x as f64 + 1.0,
+        area.max.y as f64 + 1.0,
+        area.max.z as f64 + 1.0,
     );
     let mut corners = Vec::with_capacity(8);
     for x in [lo.x, hi.x] {
         for y in [lo.y, hi.y] {
             for z in [lo.z, hi.z] {
-                corners.push(Vec3::new(x, y, z));
+                corners.push(DVec3::new(x, y, z));
             }
         }
     }
@@ -996,7 +983,7 @@ mod tests {
         world.load_around(vx_core::ChunkPos::new(0, 0), 2);
         let ground = world.surface_y(0, 0).unwrap_or(80);
         let mut mining = Mining::default();
-        mining.ensure_flier(Vec3::new(0.5, ground as f32, 0.5));
+        mining.ensure_flier(DVec3::new(0.5, ground as f64, 0.5));
         (world, mining)
     }
 
@@ -1059,7 +1046,7 @@ mod tests {
         mining.fleet.add_flier(BlockPos::new(120, 100, 120));
         let _ = &world;
 
-        let rows = mining.roster(Vec3::new(0.5, 80.0, 0.5));
+        let rows = mining.roster(DVec3::new(0.5, 80.0, 0.5));
         assert_eq!(rows.len(), 2, "both fliers should be listed");
         assert!(
             rows[0].distance <= rows[1].distance,
@@ -1087,7 +1074,7 @@ mod tests {
             let eye = mining.machine_eye(MachineRef::Flier(0)).unwrap();
             let lift = Mining::eye_height(MachineRef::Flier(0));
             assert!(
-                (eye - (drawn + Vec3::Y * lift)).length() < 1.0e-5,
+                (eye - (drawn + DVec3::Y * f64::from(lift))).length() < 1.0e-5,
                 "eye {eye:?} does not sit on the drawn hull {drawn:?} at fraction {fraction}"
             );
         }
@@ -1102,7 +1089,7 @@ mod tests {
         assert_eq!(mining.piloted(), Some(MachineRef::Flier(0)));
         assert_eq!(mining.fleet.fliers[0].state, FlierState::Manual);
         assert_eq!(
-            mining.roster(Vec3::ZERO)[0].state,
+            mining.roster(DVec3::ZERO)[0].state,
             "PILOTED",
             "the roster should say who has the wheel"
         );
@@ -1185,10 +1172,10 @@ mod tests {
 
         // The box wraps the blocks rather than sitting on their origins, so it
         // spans four blocks, not three.
-        let xs: Vec<f32> = corners.iter().map(|corner| corner.x).collect();
+        let xs: Vec<f64> = corners.iter().map(|corner| corner.x).collect();
         assert_eq!(
-            xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max)
-                - xs.iter().cloned().fold(f32::INFINITY, f32::min),
+            xs.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+                - xs.iter().cloned().fold(f64::INFINITY, f64::min),
             4.0
         );
     }
@@ -1202,7 +1189,7 @@ mod tests {
         assert!(mining.area.is_none());
         assert!(mining.selected_plan().is_none());
         // Still worth drawing, so the player can see the click landed.
-        assert_eq!(mining.objects().len(), 1);
+        assert_eq!(mining.objects(|at| at.as_vec3()).len(), 1);
     }
 
     #[test]
@@ -1236,7 +1223,7 @@ mod tests {
 
         mining.cancel(&mut world);
         assert!(mining.area.is_none());
-        assert!(mining.objects().is_empty());
+        assert!(mining.objects(|at| at.as_vec3()).is_empty());
         assert!(!mining.is_running());
     }
 

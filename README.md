@@ -872,6 +872,45 @@ closed door. So there is a whole middle now between "nothing happened" and
 "there are four lads with guns coming over the hill", and you can talk, pay or
 run your way out of it.
 
+### Everybody gets the good math
+
+Stage 42 fixed the far-from-home jitter for *you*: your body, your feet, your
+aim and the camera moved to double precision, and the renderer started drawing
+relative to the chunk you stand in. It left everybody else on single
+precision and wrote the limit down — a quarter of a block at three thousand
+kilometres, invisible in a still. This stage moves the line.
+
+Every body in the game now carries a double-precision position: the
+townsfolk, the deputies and the shelters' holders, the thing in the dark, the
+slugs in the air, the falling stems, the caravans, the kestrel's marks, what
+a villager last saw and where a posse believes you are. Directions, headings,
+ranges, speeds and the rigs' own geometry stay single: they are scale-free,
+and the rule is the one stage 42 set — *take the difference wide, then
+narrow it*. Every body is drawn in the camera's frame too, the way your own
+body and the tool in your hand already were, so a villager's feet three
+thousand kilometres out land on the same bytes as they do at spawn. The
+per-object lighting pass, which darkens a body by the column it stands in,
+now adds the render origin back before it reads the column — it had been
+reading your own body's light from the wrong chunk since stage 42.
+
+The muzzle of a shot is the one float that crosses the journal's wire, and it
+crosses at double precision now: a round fired from three thousand kilometres
+out starts at your eye rather than a quarter block from it. That is a new
+journal version, so an older log restarts the oracle the way every older log
+does. A downed caravan's load remembers its column at the same width, and an
+old `arsenal.dat` reads its narrow columns and widens them.
+
+The proofs are the stage-42 tests' siblings: the same posse called out on
+the same floor at spawn and at three thousand kilometres walks the same walk
+to a micrometre for two hundred and forty frames; the home town's people,
+moved to a far centre, stroll the same stroll; the same two rounds leave the
+same craters, block for block and bite for bite; and the player's rig built
+through the camera at the origin and a hundred thousand chunks out comes out
+bit-identical. On the way past: a falling stem that hit the stump of a tree
+already down used to fell it again, and a stem that took a neighbour early in
+its arc forgot it by the time it landed. Both fixed. And the handheld's roster
+listed the kestrel twice.
+
 ### Winter is ground now
 
 Stage 41 gave the country a year and drew one line through it: a season can
@@ -1882,6 +1921,7 @@ cargo run --release -p vx-app -- --screenshot far-lamp.ppm --at 3000000,3000000 
 cargo run --release -p vx-app -- --screenshot founded.ppm --at 600,40 --founded --time 0.5
 cargo run --release -p vx-app -- --screenshot frost.ppm --at 0,10 --frost --time 0.5
 cargo run --release -p vx-app -- --screenshot thaw.ppm --at 0,10 --thaw --time 0.5
+cargo run --release -p vx-app -- --screenshot far-posse.ppm --at 3000000,3000000 --posse --close --time 0.5
 cargo run --release -p vx-app -- --screenshot taken.ppm --at 0,10 --taken
 
 # the pocket arcade, mid-fight, on the raised handheld

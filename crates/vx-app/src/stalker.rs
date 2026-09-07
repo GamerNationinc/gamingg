@@ -38,7 +38,7 @@
 //! block, never touches the pile, and never decides how long the fleet
 //! turns. The oracle has no business here.
 
-use glam::Vec3;
+use glam::DVec3;
 use vx_core::BlockPos;
 use vx_world::World;
 
@@ -139,7 +139,7 @@ struct Director {
     /// How much noise has been made lately.
     heat: f32,
     /// The last zone worth passing on, and how strongly.
-    hint: Option<(Vec3, f32)>,
+    hint: Option<(DVec3, f32)>,
     /// Seconds of continuous contact.
     pressure: f32,
     /// Seconds left of a forced break.
@@ -149,7 +149,7 @@ struct Director {
 impl Director {
     /// A report reached the deep. `loudness` is the same scale the roost
     /// hears on: a drill is small and continuous, a shot is large and rare.
-    fn hear(&mut self, at: Vec3, loudness: f32) {
+    fn hear(&mut self, at: DVec3, loudness: f32) {
         let weight = loudness * HINT_NOISE_W;
         self.heat = (self.heat + weight).min(HEAT_CAP);
         // The loudest report of the moment is the one worth passing on, and
@@ -161,7 +161,7 @@ impl Director {
     }
 
     /// Take the standing hint, if there is one.
-    fn take_hint(&mut self) -> Option<Vec3> {
+    fn take_hint(&mut self) -> Option<DVec3> {
         self.hint.take().map(|(zone, _)| zone)
     }
 }
@@ -169,7 +169,7 @@ impl Director {
 /// The half that has to find you.
 #[derive(Debug)]
 pub struct Stalker {
-    pub position: Vec3,
+    pub position: DVec3,
     pub mood: Mood,
     pub yaw: f32,
     /// Its own picture of where you are. Never the truth, only ever the
@@ -182,8 +182,8 @@ pub struct Stalker {
 
 impl Stalker {
     /// Where its eyes are.
-    pub fn eye(&self) -> Vec3 {
-        self.position + Vec3::new(0.0, 1.3, 0.0)
+    pub fn eye(&self) -> DVec3 {
+        self.position + DVec3::new(0.0, 1.3, 0.0)
     }
 
     /// How badly it is hurt, for the readouts.
@@ -200,13 +200,15 @@ impl Stalker {
 /// share is the important half: a routed step carries its own floor, so it
 /// climbs the gallery it is actually in rather than snapping to the meadow
 /// overhead.
-fn creep(stalker: &mut Stalker, dt: f32, to: Vec3, speed: f32, world: &World) {
+fn creep(stalker: &mut Stalker, dt: f32, to: DVec3, speed: f32, world: &World) {
+    let dt = f64::from(dt);
+    let speed = f64::from(speed);
     let routed = stalker.pathing.step(world, stalker.position);
     let waypoint = routed
-        .map(|cell| Vec3::new(cell.x as f32 + 0.5, cell.y as f32, cell.z as f32 + 0.5))
+        .map(|cell| DVec3::new(cell.x as f64 + 0.5, cell.y as f64, cell.z as f64 + 0.5))
         .unwrap_or(to);
 
-    let along = Vec3::new(
+    let along = DVec3::new(
         waypoint.x - stalker.position.x,
         0.0,
         waypoint.z - stalker.position.z,
@@ -219,9 +221,10 @@ fn creep(stalker: &mut Stalker, dt: f32, to: Vec3, speed: f32, world: &World) {
         let climb = (waypoint.y - stalker.position.y).clamp(-6.0 * dt, 6.0 * dt);
         stalker.position.y += climb;
     }
+    // A bearing needs no more than the level difference, narrowed.
     if let Some(yaw) = crate::rig::yaw_towards(
-        to.x - stalker.position.x,
-        to.z - stalker.position.z,
+        (to.x - stalker.position.x) as f32,
+        (to.z - stalker.position.z) as f32,
     ) {
         stalker.yaw = yaw;
     }
@@ -243,7 +246,7 @@ pub struct TheDark {
     stalker: Option<Stalker>,
     /// Where the last thing it was told about was, so a spawn arrives from
     /// somewhere plausible rather than from nowhere.
-    approach: Option<Vec3>,
+    approach: Option<DVec3>,
 }
 
 impl TheDark {
@@ -258,7 +261,7 @@ impl TheDark {
     }
 
     /// A noise was made at `at`. Loudness is the roost's scale.
-    pub fn hear(&mut self, at: Vec3, loudness: f32) {
+    pub fn hear(&mut self, at: DVec3, loudness: f32) {
         self.director.hear(at, loudness);
         self.approach = Some(at);
     }
@@ -274,14 +277,14 @@ impl TheDark {
     ///
     /// A column check rather than a cave-membership test: what matters is
     /// how much rock is overhead, which is the same thing a player feels.
-    pub fn is_deep(world: &World, at: Vec3) -> bool {
+    pub fn is_deep(world: &World, at: DVec3) -> bool {
         world
             .surface_y(at.x.floor() as i32, at.z.floor() as i32)
-            .is_some_and(|top| (top as f32 - at.y) >= DEEP as f32)
+            .is_some_and(|top| (top as f64 - at.y) >= DEEP as f64)
     }
 
     /// A round of the player's went past. Returns whether it landed.
-    pub fn under_fire(&mut self, from: Vec3, to: Vec3) -> bool {
+    pub fn under_fire(&mut self, from: DVec3, to: DVec3) -> bool {
         let Some(stalker) = &mut self.stalker else {
             return false;
         };
@@ -293,10 +296,10 @@ impl TheDark {
             return false;
         }
         let direction = along / length;
-        let towards = stalker.position + Vec3::new(0.0, 1.0, 0.0) - from;
+        let towards = stalker.position + DVec3::new(0.0, 1.0, 0.0) - from;
         let projected = towards.dot(direction).clamp(0.0, length);
         let nearest = from + direction * projected;
-        if (nearest - (stalker.position + Vec3::new(0.0, 1.0, 0.0))).length() > HIT_RADIUS {
+        if (nearest - (stalker.position + DVec3::new(0.0, 1.0, 0.0))).length() > f64::from(HIT_RADIUS) {
             // Missing still tells it where you are standing. Being shot at
             // is the loudest hint there is.
             self.director.hear(from, 4.0);
@@ -318,7 +321,7 @@ impl TheDark {
         &mut self,
         dt: f32,
         world: &World,
-        player: Vec3,
+        player: DVec3,
         seed: u64,
     ) -> Report {
         let mut report = Report::default();
@@ -365,12 +368,12 @@ impl TheDark {
 
         let registry = world.registry();
         let eyes_on = !leaving
-            && (player - stalker.position).length() <= SIGHT
+            && (player - stalker.position).length() <= f64::from(SIGHT)
             && vx_world::sight::sees(
                 world,
                 registry,
-                stalker.eye().as_dvec3(),
-                (player + Vec3::new(0.0, 1.5, 0.0)).as_dvec3(),
+                stalker.eye(),
+                player + DVec3::new(0.0, 1.5, 0.0),
                 SIGHT,
             );
 
@@ -390,9 +393,9 @@ impl TheDark {
             });
             let eye = stalker.eye();
             stalker.belief.clear_seen(|x, z| {
-                let at = Vec3::new(x as f32 + 0.5, eye.y, z as f32 + 0.5);
-                (at - eye).length() <= SIGHT
-                    && vx_world::sight::sees(world, registry, eye.as_dvec3(), at.as_dvec3(), SIGHT)
+                let at = DVec3::new(x as f64 + 0.5, eye.y, z as f64 + 0.5);
+                (at - eye).length() <= f64::from(SIGHT)
+                    && vx_world::sight::sees(world, registry, eye, at, SIGHT)
             });
             // A fresh rumour, but never over a fresh sighting — the shelters'
             // rule, and for the same reason.
@@ -423,7 +426,7 @@ impl TheDark {
             Mood::Closing => {
                 stalker.pathing.steer(dt, world, player);
                 let gap = (player - stalker.position).length();
-                if gap > STRIKE_REACH {
+                if gap > f64::from(STRIKE_REACH) {
                     creep(stalker, dt, player, CHARGE, world);
                     stalker.strike_clock = 0.0;
                 } else {
@@ -436,7 +439,7 @@ impl TheDark {
             }
             Mood::Hunting | Mood::Roused => {
                 if let Some((x, z)) = stalker.belief.search_target(stalker.position) {
-                    let to = Vec3::new(x as f32 + 0.5, stalker.position.y, z as f32 + 0.5);
+                    let to = DVec3::new(x as f64 + 0.5, stalker.position.y, z as f64 + 0.5);
                     stalker.pathing.steer(dt, world, to);
                     creep(stalker, dt, to, PROWL, world);
                 }
@@ -446,9 +449,9 @@ impl TheDark {
                 let from = stalker.belief.last_known().unwrap_or(player);
                 let away = stalker.position - from;
                 if away.length() > 1.0e-3 {
-                    stalker.position += away.normalize() * PROWL * dt;
+                    stalker.position += away.normalize() * f64::from(PROWL * dt);
                 }
-                if (stalker.position - player).length() > NO_SPAWN_R {
+                if (stalker.position - player).length() > f64::from(NO_SPAWN_R) {
                     self.stalker = None;
                     self.director.pressure = 0.0;
                     report.tells.push(tell_for(Mood::Asleep).to_string());
@@ -472,23 +475,23 @@ impl TheDark {
     /// Returns nothing rather than compromising. A hunt that cannot start
     /// properly does not start — the floor distance is not negotiable, and
     /// neither is arriving inside a wall.
-    fn arrival(&self, world: &World, player: Vec3, seed: u64) -> Option<Vec3> {
+    fn arrival(&self, world: &World, player: DVec3, seed: u64) -> Option<DVec3> {
         let approach = self.approach.unwrap_or(player);
         let bearing = {
-            let along = Vec3::new(player.x - approach.x, 0.0, player.z - approach.z);
+            let along = DVec3::new(player.x - approach.x, 0.0, player.z - approach.z);
             if along.length() > 1.0e-3 {
                 along.normalize()
             } else {
-                Vec3::new(1.0, 0.0, 0.0)
+                DVec3::new(1.0, 0.0, 0.0)
             }
         };
 
         for step in 0..12 {
             // Sweep around from the direction the noise came from, at a
             // radius that starts outside the floor and works outward.
-            let turn = (step as f32) * std::f32::consts::TAU / 12.0
-                + (seed % 97) as f32 * 0.01;
-            let radius = NO_SPAWN_R + 8.0 + (step % 3) as f32 * 6.0;
+            let turn = f64::from(step) * std::f64::consts::TAU / 12.0
+                + (seed % 97) as f64 * 0.01;
+            let radius = f64::from(NO_SPAWN_R) + 8.0 + f64::from(step % 3) * 6.0;
             let dx = bearing.x * turn.cos() - bearing.z * turn.sin();
             let dz = bearing.x * turn.sin() + bearing.z * turn.cos();
             let column = BlockPos::new(
@@ -497,12 +500,12 @@ impl TheDark {
                 (player.z + dz * radius).floor() as i32,
             );
             let settled = vx_agent::settle(world, column);
-            let at = Vec3::new(
-                settled.x as f32 + 0.5,
-                settled.y as f32,
-                settled.z as f32 + 0.5,
+            let at = DVec3::new(
+                settled.x as f64 + 0.5,
+                settled.y as f64,
+                settled.z as f64 + 0.5,
             );
-            if (at - player).length() < NO_SPAWN_R {
+            if (at - player).length() < f64::from(NO_SPAWN_R) {
                 continue;
             }
             // It has to be *in* the deep too, or it is a thing standing in a
@@ -528,16 +531,16 @@ mod tests {
         // homing, and the round is pointless.
         let mut director = Director::default();
         for at in [
-            Vec3::new(11.4, 40.0, -7.2),
-            Vec3::new(-903.9, 18.0, 2_041.6),
-            Vec3::new(0.0, 0.0, 0.0),
+            DVec3::new(11.4, 40.0, -7.2),
+            DVec3::new(-903.9, 18.0, 2_041.6),
+            DVec3::new(0.0, 0.0, 0.0),
         ] {
             director.hear(at, 1.0);
             let hint = director.take_hint().expect("a hint was made");
             assert_eq!(hint, zone_of(at));
-            let slip = (Vec3::new(hint.x, 0.0, hint.z) - Vec3::new(at.x, 0.0, at.z)).length();
+            let slip = (DVec3::new(hint.x, 0.0, hint.z) - DVec3::new(at.x, 0.0, at.z)).length();
             assert!(
-                slip <= crate::garrison::HINT_GRADE as f32,
+                slip <= crate::garrison::HINT_GRADE as f64,
                 "the hint at {at:?} was accurate to {slip}"
             );
         }
@@ -549,15 +552,15 @@ mod tests {
         // shot has to outrank a drill, or working quietly buys nothing.
         let mut quiet = Director::default();
         let mut loud = Director::default();
-        quiet.hear(Vec3::ZERO, 0.4);
-        loud.hear(Vec3::ZERO, 4.0);
+        quiet.hear(DVec3::ZERO, 0.4);
+        loud.hear(DVec3::ZERO, 4.0);
         assert!(loud.heat > quiet.heat * 5.0);
 
         // And the loudest report of the moment is the one passed on.
         let mut mixed = Director::default();
-        mixed.hear(Vec3::new(500.0, 0.0, 0.0), 0.2);
-        mixed.hear(Vec3::new(-500.0, 0.0, 0.0), 6.0);
-        assert_eq!(mixed.take_hint(), Some(zone_of(Vec3::new(-500.0, 0.0, 0.0))));
+        mixed.hear(DVec3::new(500.0, 0.0, 0.0), 0.2);
+        mixed.hear(DVec3::new(-500.0, 0.0, 0.0), 6.0);
+        assert_eq!(mixed.take_hint(), Some(zone_of(DVec3::new(-500.0, 0.0, 0.0))));
     }
 
     #[test]
@@ -567,7 +570,7 @@ mod tests {
         // stalker is a timer and the mining loop is not a lever.
         let mut director = Director::default();
         for _ in 0..200 {
-            director.hear(Vec3::ZERO, 0.05);
+            director.hear(DVec3::ZERO, 0.05);
             // A short burst, then a rest.
             director.heat = (director.heat - HEAT_FADE * 4.0).max(0.0);
         }
@@ -582,7 +585,7 @@ mod tests {
     fn heat_is_capped_so_an_afternoon_is_not_a_week() {
         let mut director = Director::default();
         for _ in 0..10_000 {
-            director.hear(Vec3::ZERO, 1.0);
+            director.hear(DVec3::ZERO, 1.0);
         }
         assert_eq!(director.heat, HEAT_CAP);
     }
@@ -654,15 +657,15 @@ mod tests {
         // this is a real answer rather than a vacuous one.
         let world = deep_world();
         let dark = TheDark {
-            approach: Some(Vec3::new(0.0, 20.0, 0.0)),
+            approach: Some(DVec3::new(0.0, 20.0, 0.0)),
             ..TheDark::default()
         };
-        let player = Vec3::new(8.0, 20.0, 8.0);
+        let player = DVec3::new(8.0, 20.0, 8.0);
         let at = dark
             .arrival(&world, player, 7)
             .expect("a gallery two hundred blocks across has somewhere to come from");
         assert!(
-            (at - player).length() >= NO_SPAWN_R,
+            (at - player).length() >= f64::from(NO_SPAWN_R),
             "it arrived {} blocks away",
             (at - player).length()
         );
@@ -674,13 +677,13 @@ mod tests {
         // Coming up is the reliable way out, and it has to be reliable or
         // the whole thing is a punishment rather than a place.
         let world = deep_world();
-        assert!(TheDark::is_deep(&world, Vec3::new(0.0, 20.0, 0.0)));
-        assert!(!TheDark::is_deep(&world, Vec3::new(0.0, 62.0, 0.0)));
+        assert!(TheDark::is_deep(&world, DVec3::new(0.0, 20.0, 0.0)));
+        assert!(!TheDark::is_deep(&world, DVec3::new(0.0, 62.0, 0.0)));
 
         let mut dark = TheDark::default();
         for _ in 0..400 {
-            dark.hear(Vec3::new(0.0, 62.0, 0.0), 1.0);
-            dark.update(0.1, &world, Vec3::new(0.0, 62.0, 0.0), 11);
+            dark.hear(DVec3::new(0.0, 62.0, 0.0), 1.0);
+            dark.update(0.1, &world, DVec3::new(0.0, 62.0, 0.0), 11);
         }
         assert!(
             dark.present().is_none(),
@@ -691,12 +694,12 @@ mod tests {
     #[test]
     fn a_noisy_dig_in_the_deep_brings_something_and_it_arrives_from_somewhere() {
         let world = deep_world();
-        let player = Vec3::new(0.0, 20.0, 0.0);
+        let player = DVec3::new(0.0, 20.0, 0.0);
         let mut dark = TheDark::default();
         let mut tells = Vec::new();
         for _ in 0..300 {
             // A crew working: small, continuous, and never stopping.
-            dark.hear(Vec3::new(2.0, 20.0, 2.0), 0.6);
+            dark.hear(DVec3::new(2.0, 20.0, 2.0), 0.6);
             let report = dark.update(0.1, &world, player, 4_242);
             tells.extend(report.tells);
             if dark.present().is_some() {
@@ -705,7 +708,7 @@ mod tests {
         }
         let stalker = dark.present().expect("a mine ran loud for half a minute");
         assert!(
-            (stalker.position - player).length() >= NO_SPAWN_R,
+            (stalker.position - player).length() >= f64::from(NO_SPAWN_R),
             "it started on top of the player"
         );
         assert_eq!(stalker.mood, Mood::Roused);

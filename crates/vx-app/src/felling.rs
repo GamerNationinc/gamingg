@@ -24,7 +24,7 @@
 //! the sweeps it returns carry the live-only half — who got hit, how loud it
 //! was — for the caller to spend or drop.
 
-use glam::Vec3;
+use glam::DVec3;
 use vx_core::{BlockId, BlockPos};
 use vx_world::flora::{self, Species, Tree, TreePart};
 use vx_world::micro;
@@ -127,9 +127,9 @@ pub fn ready(mask: micro::Mask, face: usize) -> bool {
 /// was cut from — toward whoever cut it, which is both the forestry and the
 /// danger. Lean overrides a badly-cut stem: if the ground falls away hard
 /// enough against the notch, the trunk splits and goes downhill instead.
-pub fn aim(face: usize, lean: Vec3) -> (Vec3, bool) {
+pub fn aim(face: usize, lean: DVec3) -> (DVec3, bool) {
     let notch = face_normal(face);
-    let downhill = Vec3::new(lean.x, 0.0, lean.z);
+    let downhill = DVec3::new(lean.x, 0.0, lean.z);
     let pull = downhill.length();
     if pull > 0.35 && downhill.normalize().dot(notch) < -0.25 {
         // A hard leaner, cut against its lean: barber chair. It goes where it
@@ -138,7 +138,7 @@ pub fn aim(face: usize, lean: Vec3) -> (Vec3, bool) {
     }
     // A gentle lean only nudges the aim.
     let aimed = notch + downhill * 0.5;
-    let flat = Vec3::new(aimed.x, 0.0, aimed.z);
+    let flat = DVec3::new(aimed.x, 0.0, aimed.z);
     if flat.length() < 1.0e-3 {
         (notch, false)
     } else {
@@ -147,28 +147,28 @@ pub fn aim(face: usize, lean: Vec3) -> (Vec3, bool) {
 }
 
 /// The outward normal of a block face, by the index the raycast reports.
-pub fn face_normal(face: usize) -> Vec3 {
+pub fn face_normal(face: usize) -> DVec3 {
     match face {
-        0 => Vec3::NEG_X,
-        1 => Vec3::X,
-        2 => Vec3::NEG_Y,
-        3 => Vec3::Y,
-        4 => Vec3::NEG_Z,
-        _ => Vec3::Z,
+        0 => DVec3::NEG_X,
+        1 => DVec3::X,
+        2 => DVec3::NEG_Y,
+        3 => DVec3::Y,
+        4 => DVec3::NEG_Z,
+        _ => DVec3::Z,
     }
 }
 
 /// Which way the ground falls away under a column, as a vector whose length
 /// is the slope. A stem leans downhill and so does its fall.
-pub fn lean_at(world: &World, x: i32, z: i32) -> Vec3 {
+pub fn lean_at(world: &World, x: i32, z: i32) -> DVec3 {
     let height = |dx: i32, dz: i32| {
         world
             .surface_y(x + dx, z + dz)
             .unwrap_or_else(|| world.generator().natural_height_at(x + dx, z + dz))
-            as f32
+            as f64
     };
     let span = 8.0;
-    Vec3::new(
+    DVec3::new(
         (height(4, 0) - height(-4, 0)) / span,
         0.0,
         (height(0, 4) - height(0, -4)) / span,
@@ -183,7 +183,7 @@ pub struct Falling {
     pub species: Species,
     pub height: i32,
     /// Level, and pointing the way it is going.
-    pub direction: Vec3,
+    pub direction: DVec3,
     /// Radians from upright.
     pub angle: f32,
     /// Radians per second, growing as it goes over.
@@ -192,24 +192,34 @@ pub struct Falling {
     pub barber_chair: bool,
     /// It came down because something else landed on it.
     pub chained: bool,
+    /// How many other stems it has brought down so far. Counted across the
+    /// whole fall rather than read off the last tick, so a neighbour taken
+    /// early in the arc is still on the bill when the stem lands.
+    pub took: u32,
 }
 
 impl Falling {
     /// Where the hinge is: the top of the stump.
-    pub fn hinge_point(&self) -> Vec3 {
-        Vec3::new(
-            self.base.x as f32 + 0.5,
-            self.base.y as f32 + 1.0,
-            self.base.z as f32 + 0.5,
+    pub fn hinge_point(&self) -> DVec3 {
+        DVec3::new(
+            self.base.x as f64 + 0.5,
+            self.base.y as f64 + 1.0,
+            self.base.z as f64 + 0.5,
         )
     }
 
     /// Where the tip is at the angle it has reached.
-    pub fn tip(&self) -> Vec3 {
-        let reach = self.height as f32;
-        self.hinge_point()
-            + self.direction * (reach * self.angle.sin())
-            + Vec3::Y * (reach * self.angle.cos())
+    pub fn tip(&self) -> DVec3 {
+        // The angle is an angle and stays `f32`; the reach is a place. Down
+        // is level: `cos` of a single-precision right angle is not zero, and
+        // a tip a millionth of a block under the hinge reads a block lower.
+        let reach = f64::from(self.height);
+        let (along, rise) = if self.angle >= FLAT {
+            (1.0, 0.0)
+        } else {
+            (f64::from(self.angle.sin()), f64::from(self.angle.cos()))
+        };
+        self.hinge_point() + self.direction * (reach * along) + DVec3::Y * (reach * rise)
     }
 
     /// Is it down?
@@ -230,8 +240,8 @@ impl Falling {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Sweep {
     /// The trunk's centre line this tick, hinge first.
-    pub from: Vec3,
-    pub to: Vec3,
+    pub from: DVec3,
+    pub to: DVec3,
     pub species: Species,
     pub energy: f32,
     /// Set on the tick it finishes: where the trunk came to rest, how many
@@ -242,7 +252,7 @@ pub struct Sweep {
 /// The end of a fall.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Landing {
-    pub at: Vec3,
+    pub at: DVec3,
     pub logs: u32,
     /// Stopped by something it could not go through.
     pub hung_up: bool,
@@ -254,7 +264,7 @@ pub struct Landing {
 /// The stump stays — cut, and with whatever the notch left of it — because a
 /// stump is the mark of a tree somebody felled rather than one that was never
 /// there.
-pub fn start(world: &mut World, tree: &Tree, direction: Vec3, barber_chair: bool) -> Falling {
+pub fn start(world: &mut World, tree: &Tree, direction: DVec3, barber_chair: bool) -> Falling {
     clear_standing(world, tree);
     Falling {
         base: tree.base,
@@ -265,13 +275,14 @@ pub fn start(world: &mut World, tree: &Tree, direction: Vec3, barber_chair: bool
         rate: 0.0,
         barber_chair,
         chained: false,
+        took: 0,
     }
 }
 
-fn level(direction: Vec3) -> Vec3 {
-    let flat = Vec3::new(direction.x, 0.0, direction.z);
+fn level(direction: DVec3) -> DVec3 {
+    let flat = DVec3::new(direction.x, 0.0, direction.z);
     if flat.length() < 1.0e-3 {
-        Vec3::X
+        DVec3::X
     } else {
         flat.normalize()
     }
@@ -328,14 +339,15 @@ pub fn advance_falls(falls: &mut Vec<Falling>, world: &mut World) -> Vec<Sweep> 
         let to = fall.tip();
 
         let cleared = clear_path(world, fall, from, to, &mut started);
+        fall.took += cleared.chained;
         let done = fall.down() || cleared.blocked;
         let landing = done.then(|| {
-            let logs = lay_logs(world, fall, cleared.reach);
+            let logs = lay_logs(world, fall, cleared.reach as f32);
             Landing {
                 at: to,
                 logs,
                 hung_up: cleared.blocked && !fall.down(),
-                chained: cleared.chained,
+                chained: fall.took,
             }
         });
         finished.push(done);
@@ -364,7 +376,7 @@ pub fn advance_falls(falls: &mut Vec<Falling>, world: &mut World) -> Vec<Sweep> 
 
 struct Cleared {
     /// How far along the trunk the sweep got before something stopped it.
-    reach: f32,
+    reach: f64,
     blocked: bool,
     chained: u32,
 }
@@ -373,20 +385,20 @@ struct Cleared {
 fn clear_path(
     world: &mut World,
     fall: &Falling,
-    from: Vec3,
-    to: Vec3,
+    from: DVec3,
+    to: DVec3,
     started: &mut Vec<Falling>,
 ) -> Cleared {
     let span = (to - from).length();
     let along = if span > 1.0e-4 {
         (to - from) / span
     } else {
-        Vec3::Y
+        DVec3::Y
     };
     let steps = (span * 2.0).ceil() as i32;
     let mut chained = 0;
     for step in 1..=steps.max(1) {
-        let distance = span * step as f32 / steps.max(1) as f32;
+        let distance = span * step as f64 / steps.max(1) as f64;
         let at = from + along * distance;
         let pos = BlockPos::new(
             at.x.floor() as i32,
@@ -415,8 +427,10 @@ fn clear_path(
         // tick, so a replay sees it the same way.
         // The towns are gathered here rather than passed in, so the live
         // game and a replay of it cannot disagree about which list was used.
+        // A stump is the mark of a tree already down: hitting one topples
+        // nothing, however the worldgen's tree list reads it.
         let sites = world.towns_near((pos.x, pos.z), TOWN_REACH);
-        if let Some(neighbour) = standing_tree(world, pos, &sites) {
+        if let Some(neighbour) = standing_tree(world, pos, &sites).filter(|tree| is_standing(world, tree)) {
             if neighbour.base != fall.base && fall.energy() > energy(neighbour.species, 3) {
                 started.push(Falling {
                     chained: true,
@@ -453,7 +467,7 @@ fn lay_logs(world: &mut World, fall: &Falling, reach: f32) -> u32 {
     let length = (reach.floor() as i32).clamp(1, fall.height);
     let mut laid = 0;
     for step in 1..=length {
-        let at = fall.hinge_point() + fall.direction * step as f32;
+        let at = fall.hinge_point() + fall.direction * step as f64;
         let (x, z) = (at.x.floor() as i32, at.z.floor() as i32);
         let Some(ground) = world.surface_y(x, z) else {
             continue;
@@ -501,6 +515,12 @@ pub fn standing_tree(world: &World, pos: BlockPos, sites: &[TownSite]) -> Option
     trees.into_iter().find(|tree| {
         flora::tree_part_at(tree, pos.x, pos.y, pos.z) == Some(TreePart::Trunk)
     })
+}
+
+/// Is the tree still up, or only its stump? The first trunk block above
+/// the stump band is the tell: felling keeps the stump and takes the rest.
+pub fn is_standing(world: &World, tree: &Tree) -> bool {
+    world.block(BlockPos::new(tree.base.x, tree.base.y + STUMP_BAND + 1, tree.base.z)) != BlockId::AIR
 }
 
 /// Is this block low enough on its trunk to be a stump?
@@ -596,7 +616,7 @@ mod tests {
         let crown = BlockPos::new(tree.base.x, tree.base.y + tree.height, tree.base.z);
         assert_ne!(world.block(crown), BlockId::AIR, "the tree was not there");
 
-        let mut falls = vec![start(&mut world, &tree, Vec3::X, false)];
+        let mut falls = vec![start(&mut world, &tree, DVec3::X, false)];
         assert_ne!(world.block(stump), BlockId::AIR, "the stump went with it");
         assert_eq!(world.block(crown), BlockId::AIR, "the trunk is still standing");
 
@@ -621,7 +641,7 @@ mod tests {
         let fell = || {
             let mut world = woods();
             let (tree, _) = a_tree(&world);
-            let mut falls = vec![start(&mut world, &tree, Vec3::X, false)];
+            let mut falls = vec![start(&mut world, &tree, DVec3::X, false)];
             for _ in 0..64 * 8 {
                 advance_falls(&mut falls, &mut world);
                 if falls.is_empty() {
@@ -648,7 +668,7 @@ mod tests {
         let (tree, _) = a_tree(&world);
         let timber = timber_block(&world, tree.species).expect("no timber for this species");
 
-        let mut falls = vec![start(&mut world, &tree, Vec3::X, false)];
+        let mut falls = vec![start(&mut world, &tree, DVec3::X, false)];
         for _ in 0..64 * 8 {
             advance_falls(&mut falls, &mut world);
             if falls.is_empty() {
@@ -687,7 +707,7 @@ mod tests {
             }
         }
 
-        let mut falls = vec![start(&mut world, &tree, Vec3::X, false)];
+        let mut falls = vec![start(&mut world, &tree, DVec3::X, false)];
         let mut hung = false;
         for _ in 0..64 * 8 {
             for sweep in advance_falls(&mut falls, &mut world) {
@@ -741,15 +761,15 @@ mod tests {
     #[test]
     fn a_stem_falls_toward_the_side_it_was_cut_from() {
         // Cutting the +X face aims it +X: toward whoever is standing there.
-        let (direction, chair) = aim(1, Vec3::ZERO);
+        let (direction, chair) = aim(1, DVec3::ZERO);
         assert!(!chair);
         assert!(direction.x > 0.9, "{direction:?}");
 
-        let (direction, _) = aim(4, Vec3::ZERO);
+        let (direction, _) = aim(4, DVec3::ZERO);
         assert!(direction.z < -0.9, "{direction:?}");
 
         // A gentle lean only nudges it.
-        let (direction, chair) = aim(1, Vec3::new(0.0, 0.0, 0.2));
+        let (direction, chair) = aim(1, DVec3::new(0.0, 0.0, 0.2));
         assert!(!chair);
         assert!(direction.x > 0.8 && direction.z > 0.0, "{direction:?}");
     }
@@ -758,7 +778,7 @@ mod tests {
     fn a_hard_leaner_cut_against_its_lean_barber_chairs() {
         // The ground falls away hard to -X and the notch says +X. The tree
         // does not care what the notch says.
-        let (direction, chair) = aim(1, Vec3::new(-0.9, 0.0, 0.0));
+        let (direction, chair) = aim(1, DVec3::new(-0.9, 0.0, 0.0));
         assert!(chair, "the stem obeyed a notch it had no business obeying");
         assert!(direction.x < -0.9, "{direction:?}");
     }
@@ -769,11 +789,12 @@ mod tests {
             base: BlockPos::new(4, 80, -7),
             species: Species::Hardwood,
             height: 7,
-            direction: Vec3::X,
+            direction: DVec3::X,
             angle: START_TILT,
             rate: 0.0,
             barber_chair: false,
             chained: false,
+            took: 0,
         };
         let sweep = |mut fall: Falling| {
             let mut path = Vec::new();
@@ -804,11 +825,12 @@ mod tests {
                 base: BlockPos::new(0, 80, 0),
                 species: Species::Hardwood,
                 height,
-                direction: Vec3::X,
+                direction: DVec3::X,
                 angle: START_TILT,
                 rate: 0.0,
                 barber_chair: false,
                 chained: false,
+                took: 0,
             };
             let mut count = 0;
             while !fall.down() && count < 10_000 {
@@ -875,25 +897,25 @@ mod tests {
                     return false;
                 }
                 let (dx, dz) = (
-                    (other.base.x - tree.base.x) as f32,
-                    (other.base.z - tree.base.z) as f32,
+                    (other.base.x - tree.base.x) as f64,
+                    (other.base.z - tree.base.z) as f64,
                 );
                 let span = (dx * dx + dz * dz).sqrt();
                 // Close enough to reach, and standing at about the same
                 // height so the arc passes through its trunk rather than
                 // over it.
                 span > 1.0
-                    && span < tree.height as f32 - 1.5
+                    && span < tree.height as f64 - 1.5
                     && (other.base.y - tree.base.y).abs() <= 2
             });
         let Some((cutter, victim)) = pair else {
             panic!("no two trees within reach of each other in a 112-block square");
         };
 
-        let direction = Vec3::new(
-            (victim.base.x - cutter.base.x) as f32,
+        let direction = DVec3::new(
+            (victim.base.x - cutter.base.x) as f64,
             0.0,
-            (victim.base.z - cutter.base.z) as f32,
+            (victim.base.z - cutter.base.z) as f64,
         )
         .normalize();
         let mut falls = vec![start(&mut world, cutter, direction, false)];

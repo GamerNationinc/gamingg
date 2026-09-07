@@ -14,7 +14,7 @@
 //! Rigs face local +X; [`yaw_towards`] turns a movement delta into the yaw
 //! that points the nose along it.
 
-use glam::{Mat4, Vec3};
+use glam::{DVec3, Mat4, Vec3};
 use vx_render::tiles::slot;
 use vx_render::Object;
 
@@ -105,8 +105,9 @@ impl Gaze {
     };
 
     /// The gaze of a body at `from`, facing `facing`, looking at `at`.
-    pub fn towards(from: Vec3, facing: f32, at: Vec3) -> Gaze {
-        let to = at - from;
+    pub fn towards(from: DVec3, facing: f32, at: DVec3) -> Gaze {
+        // The difference is taken wide and narrowed: a gaze is a direction.
+        let to = (at - from).as_vec3();
         let flat = (to.x * to.x + to.z * to.z).sqrt();
         if flat < 1.0e-3 {
             return Gaze::AHEAD;
@@ -645,23 +646,23 @@ mod tests {
         // to read as "as far round as the eyes go", not as a pupil in an
         // ear — and it must never wrap the wrong way round the circle.
         let at = Vec3::new(0.0, 1.6, 0.0);
-        let ahead = Gaze::towards(at, 0.0, at + Vec3::new(4.0, 0.0, 0.0));
+        let ahead = Gaze::towards(at.as_dvec3(), 0.0, (at + Vec3::new(4.0, 0.0, 0.0)).as_dvec3());
         assert!(ahead.yaw.abs() < 1.0e-3, "looking down its own nose was {ahead:?}");
 
-        let behind = Gaze::towards(at, 0.0, at + Vec3::new(-4.0, 0.0, 0.0));
+        let behind = Gaze::towards(at.as_dvec3(), 0.0, (at + Vec3::new(-4.0, 0.0, 0.0)).as_dvec3());
         assert_eq!(behind.yaw.abs(), GAZE_YAW, "the gaze did not saturate");
 
         for turn in [-3.0f32, -1.2, -0.3, 0.0, 0.7, 2.5, 3.1] {
             for side in [-1.0f32, 1.0] {
                 let target = at + Vec3::new(turn.cos() * 5.0, 0.0, side * 5.0);
-                let gaze = Gaze::towards(at, 0.0, target);
+                let gaze = Gaze::towards(at.as_dvec3(), 0.0, (target).as_dvec3());
                 assert!(gaze.yaw.abs() <= GAZE_YAW + 1.0e-6);
                 assert!(gaze.pitch.abs() <= GAZE_PITCH + 1.0e-6);
             }
         }
 
         // And up is up: somebody on a roof pulls the eyes up, not down.
-        let above = Gaze::towards(at, 0.0, at + Vec3::new(2.0, 4.0, 0.0));
+        let above = Gaze::towards(at.as_dvec3(), 0.0, (at + Vec3::new(2.0, 4.0, 0.0)).as_dvec3());
         assert!(above.pitch > 0.0, "the eyes looked away from a target overhead");
     }
 
@@ -812,4 +813,42 @@ mod tests {
         }
         assert!(yaw_towards(0.0, 0.0).is_none(), "a parked rig must keep its yaw");
     }
+    /// **The same body draws the same bytes sixteen hundred kilometres
+    /// out.** A rig built from `Camera::relative` at the origin and at a
+    /// hundred thousand chunks out — camera and body moved by the same
+    /// offset — produces bit-identical model matrices, which is the render
+    /// test's byte-identical frame without a GPU: nothing in the draw path
+    /// ever holds an absolute `f32`.
+    #[test]
+    fn the_same_body_draws_the_same_bytes_sixteen_hundred_kilometres_out() {
+        let far_blocks = 100_000.0 * f64::from(vx_core::CHUNK_SIZE);
+        let far = DVec3::new(far_blocks, 0.0, far_blocks);
+        let scene = |offset: DVec3| {
+            let camera = vx_render::Camera {
+                position: DVec3::new(3.25, 71.5, -2.75) + offset,
+                ..vx_render::Camera::default()
+            };
+            let body = DVec3::new(1.375, 65.0, -9.625) + offset;
+            let eye = body + DVec3::new(0.0, 1.4, 0.0);
+            let gaze = Gaze::towards(eye, 0.7, camera.position);
+            Rig::player()
+                .objects_looking(camera.relative(body), 0.7, 0.3, gaze)
+                .into_iter()
+                .map(Object::already_relative)
+                .collect::<Vec<_>>()
+        };
+        let here = scene(DVec3::ZERO);
+        let there = scene(far);
+        assert_eq!(here.len(), there.len());
+        assert!(here.len() > 4, "the player rig has parts");
+        for (near, distant) in here.iter().zip(&there) {
+            let a: Vec<u32> = near.model.to_cols_array().iter().map(|v| v.to_bits()).collect();
+            let b: Vec<u32> = distant.model.to_cols_array().iter().map(|v| v.to_bits()).collect();
+            assert_eq!(a, b, "a part's matrix differs far out");
+            assert_eq!(near.bounds_min.to_array().map(f32::to_bits), distant.bounds_min.to_array().map(f32::to_bits));
+            assert_eq!(near.bounds_max.to_array().map(f32::to_bits), distant.bounds_max.to_array().map(f32::to_bits));
+            assert!(near.relative && distant.relative);
+        }
+    }
+
 }

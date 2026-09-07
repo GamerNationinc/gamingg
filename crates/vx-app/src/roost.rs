@@ -23,7 +23,7 @@
 //! Like the kestrel's marks, all of this is live-side: the roost never
 //! touches ground, so the replay oracle never needs to hear about it.
 
-use glam::Vec3;
+use glam::DVec3;
 use vx_agent::Flier;
 use vx_core::BlockPos;
 use vx_world::World;
@@ -148,12 +148,12 @@ impl Roost {
     /// and has the charge; an already-flying roost re-tasks to the newer
     /// noise — fresh trouble outranks a cold scene.
     pub fn report(&mut self, at: BlockPos, kind: Report) {
-        let level = Vec3::new(
-            (at.x - self.home.x) as f32,
+        let level = DVec3::new(
+            (at.x - self.home.x) as f64,
             0.0,
-            (at.z - self.home.z) as f32,
+            (at.z - self.home.z) as f64,
         );
-        if level.length() > kind.hearing() {
+        if level.length() > f64::from(kind.hearing()) {
             return;
         }
         if self.blind_at(self.last_tick) {
@@ -253,26 +253,26 @@ impl Roost {
     /// still flying its patrols in plain view — that gap is exactly what
     /// silencing buys, and why nobody notices it until an offence goes
     /// strangely unpunished.
-    pub fn sees(&self, world: &World, target_eye: Vec3) -> bool {
+    pub fn sees(&self, world: &World, target_eye: DVec3) -> bool {
         if !self.aloft() {
             return false;
         }
         let at = self.craft.position;
-        let eye = Vec3::new(at.x as f32 + 0.5, at.y as f32 + 0.3, at.z as f32 + 0.5);
-        if (target_eye - eye).length() > WATCH_RADIUS {
+        let eye = DVec3::new(at.x as f64 + 0.5, at.y as f64 + 0.3, at.z as f64 + 0.5);
+        if (target_eye - eye).length() > f64::from(WATCH_RADIUS) {
             return false;
         }
         vx_world::sight::sees(
             world,
             world.registry(),
-            eye.as_dvec3(),
-            target_eye.as_dvec3(),
+            eye,
+            target_eye,
             WATCH_RADIUS + 2.0,
         )
     }
 
     /// Does what it sees go on your sheet? Not while it is silenced.
-    pub fn witnesses(&self, world: &World, target_eye: Vec3) -> bool {
+    pub fn witnesses(&self, world: &World, target_eye: DVec3) -> bool {
         !self.silenced_at(self.last_tick) && self.sees(world, target_eye)
     }
 
@@ -462,14 +462,14 @@ mod tests {
         );
 
         let at = roost.position();
-        let exposed = Vec3::new(at.x as f32 + 3.5, at.y as f32 - 4.0, at.z as f32 + 0.5);
+        let exposed = DVec3::new(at.x as f64 + 3.5, at.y as f64 - 4.0, at.z as f64 + 0.5);
         assert!(roost.sees(&world, exposed), "missed a contact in the open");
 
         // Inside the security office, under its roof, is under cover.
-        let indoors = Vec3::new(
-            (roost.home.x - 3) as f32,
-            (roost.home.y - 3) as f32,
-            (roost.home.z - 2) as f32,
+        let indoors = DVec3::new(
+            (roost.home.x - 3) as f64,
+            (roost.home.y - 3) as f64,
+            (roost.home.z - 2) as f64,
         );
         assert!(
             !roost.sees(&world, indoors),
@@ -523,7 +523,7 @@ mod tests {
         let clock = watching_over(&mut roost, &world, scene);
 
         let at = roost.position();
-        let exposed = Vec3::new(at.x as f32 + 3.5, at.y as f32 - 4.0, at.z as f32 + 0.5);
+        let exposed = DVec3::new(at.x as f64 + 3.5, at.y as f64 - 4.0, at.z as f64 + 0.5);
         assert!(roost.witnesses(&world, exposed), "it was not watching to begin with");
 
         roost.hack(crate::intrusion::Grade::Silence, clock + 1_000);
