@@ -49,6 +49,7 @@ mod fuel;
 mod movement;
 mod office;
 mod optics;
+mod osk;
 mod printer;
 mod rain;
 mod reputation;
@@ -112,6 +113,8 @@ const DEBUG_SLOT: usize = 15;
 const WELL_SLOT: usize = 16;
 /// The clinic's ward panel.
 const WARD_SLOT: usize = 17;
+/// The on-screen keyboard, over the terminal it types into.
+const OSK_SLOT: usize = 18;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -267,6 +270,8 @@ struct Options {
     fire: Option<String>,
     /// Which season to paint the country in: spring, summer, autumn, winter.
     season: Option<String>,
+    /// The on-screen keyboard, over the terminal it types into.
+    osk: bool,
     /// Put real paperwork on the beacon panel's civic block.
     warrant: bool,
     /// Turn the console to its ballot page.
@@ -338,6 +343,7 @@ fn parse_args() -> Result<Options, String> {
         storm: false,
         fire: None,
         season: None,
+        osk: false,
         warrant: false,
         ballot: false,
         elected: false,
@@ -418,6 +424,10 @@ fn parse_args() -> Result<Options, String> {
             "--vault" => options.vault = true,
             "--footing" => options.footing = true,
             "--terminal" => options.terminal = true,
+            "--osk" => {
+                options.terminal = true;
+                options.osk = true;
+            }
             "--people" => options.people = true,
             "--pad" => options.pad = true,
             "--kit" => options.kit = true,
@@ -3686,7 +3696,10 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         ] {
             console.say(kind, line);
         }
-        for character in "status".chars() {
+        // With `--osk` the line is being typed from the pad's own board
+        // rather than a keyboard, which is the whole of stage 46b.
+        let typed = if options.osk { "found iron reach" } else { "status" };
+        for character in typed.chars() {
             console.type_char(character);
         }
         let pixels = terminal::render_terminal(&console, true);
@@ -3705,6 +3718,30 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
                 height: panel_height,
             },
         );
+
+        if options.osk {
+            // The board, under the line it types into, with the cursor over
+            // a key — exactly as `refresh_osk` places it in play.
+            let mut board = osk::Osk::default();
+            board.open();
+            board.move_cursor(5, 1);
+            let keys = osk::render_osk(&board);
+            let board_width = osk::OSK_WIDTH as f32 * osk::OSK_SCALE;
+            let board_height = osk::OSK_HEIGHT as f32 * osk::OSK_SCALE;
+            renderer.set_overlay(
+                OSK_SLOT,
+                &context.device,
+                &context.queue,
+                (osk::OSK_WIDTH, osk::OSK_HEIGHT),
+                &keys,
+                vx_render::OverlayRect {
+                    x: (width as f32 - board_width) / 2.0,
+                    y: (height as f32 + panel_height) / 2.0 + 8.0,
+                    width: board_width,
+                    height: board_height,
+                },
+            );
+        }
     }
 
     if options.people && !options.close {
@@ -4719,6 +4756,8 @@ struct Active {
     friends: disposition::Disposition,
     /// The typed console, and the log the toasts also land in.
     terminal: terminal::Terminal,
+    /// The pad's own keyboard, raised over the terminal.
+    osk: osk::Osk,
     /// The last toast written into that log, so one line is not written
     /// every frame it happens to still be on screen.
     logged: Option<Instant>,
@@ -8874,6 +8913,14 @@ impl App {
         if self.pad.held.contains(&gilrs::Button::LeftTrigger) {
             return gamepad::Context::Palette;
         }
+        // The board is typed on, so it outranks the panel it sits over.
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.osk.open && active.terminal.open)
+        {
+            return gamepad::Context::Typing;
+        }
         if self.a_panel_is_open() {
             return gamepad::Context::Panel;
         }
@@ -8978,6 +9025,21 @@ impl App {
                                 self.place_at_target();
                             }
                         }
+                        // The one action with no keyboard twin: on a
+                        // keyboard you press the letter itself, so there is
+                        // no `KeyCode` for "the key I am pointing at".
+                        gilrs::Button::South
+                            if matches!(context, gamepad::Context::Typing) =>
+                        {
+                            let picked = self
+                                .active
+                                .as_ref()
+                                .map(|active| active.osk.picked());
+                            if let (Some(character), Some(active)) = (picked, &mut self.active) {
+                                active.terminal.type_char(character);
+                            }
+                            self.refresh_terminal();
+                        }
                         _ => {
                             // Anything pressed while a modifier is held is
                             // what that modifier was held *for*, so its tap
@@ -9079,6 +9141,36 @@ impl App {
     }
 
     /// Show or clear the controller overlay.
+    /// Redraw the on-screen keyboard, or take it down.
+    ///
+    /// Sits under the terminal rather than over it: the point of the board is
+    /// to type into a line you can still read.
+    fn refresh_osk(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.osk.open || !active.terminal.open {
+            active.renderer.clear_overlay(OSK_SLOT);
+            return;
+        }
+        let pixels = osk::render_osk(&active.osk);
+        let (width, height) = active.renderer.size();
+        let panel_width = osk::OSK_WIDTH as f32 * osk::OSK_SCALE;
+        let panel_height = osk::OSK_HEIGHT as f32 * osk::OSK_SCALE;
+        let terminal_height = terminal::TERM_HEIGHT as f32 * shop::SHOP_SCALE;
+        active.renderer.set_overlay(
+            OSK_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (osk::OSK_WIDTH, osk::OSK_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (width as f32 - panel_width) / 2.0,
+                y: (height as f32 + terminal_height) / 2.0 + 8.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+    }
+
     fn refresh_pad_help(&mut self) {
         let show = self.pad.help;
         let Some(active) = &mut self.active else { return };
@@ -9213,7 +9305,9 @@ impl App {
                 KeyCode::Escape => {
                     let Some(active) = &mut self.active else { return };
                     active.terminal.close();
+                    active.osk.close();
                     active.renderer.clear_overlay(TERM_SLOT);
+                    active.renderer.clear_overlay(OSK_SLOT);
                 }
                 KeyCode::Enter | KeyCode::NumpadEnter => self.run_typed_command(),
                 KeyCode::Backspace => {
@@ -9224,21 +9318,40 @@ impl App {
                     let Some(active) = &mut self.active else { return };
                     active.terminal.delete();
                 }
-                KeyCode::ArrowLeft => {
+                // The pad's own keyboard, raised and put away on the one
+                // key no letter can produce. A keyboard player never needs
+                // it and never sees it.
+                KeyCode::Tab => {
                     let Some(active) = &mut self.active else { return };
-                    active.terminal.move_caret(-1);
+                    if active.osk.open {
+                        active.osk.close();
+                        active.renderer.clear_overlay(OSK_SLOT);
+                    } else {
+                        active.osk.open();
+                    }
+                    self.refresh_osk();
                 }
-                KeyCode::ArrowRight => {
+                // While the board is up the arrows walk it; otherwise they
+                // do what they always did — the caret and the history.
+                KeyCode::ArrowLeft | KeyCode::ArrowRight | KeyCode::ArrowUp | KeyCode::ArrowDown => {
                     let Some(active) = &mut self.active else { return };
-                    active.terminal.move_caret(1);
-                }
-                KeyCode::ArrowUp => {
-                    let Some(active) = &mut self.active else { return };
-                    active.terminal.recall(-1);
-                }
-                KeyCode::ArrowDown => {
-                    let Some(active) = &mut self.active else { return };
-                    active.terminal.recall(1);
+                    if active.osk.open {
+                        let (dx, dy) = match code {
+                            KeyCode::ArrowLeft => (-1, 0),
+                            KeyCode::ArrowRight => (1, 0),
+                            KeyCode::ArrowUp => (0, -1),
+                            _ => (0, 1),
+                        };
+                        active.osk.move_cursor(dx, dy);
+                        self.refresh_osk();
+                        return;
+                    }
+                    match code {
+                        KeyCode::ArrowLeft => active.terminal.move_caret(-1),
+                        KeyCode::ArrowRight => active.terminal.move_caret(1),
+                        KeyCode::ArrowUp => active.terminal.recall(-1),
+                        _ => active.terminal.recall(1),
+                    }
                 }
                 KeyCode::Home => {
                     let Some(active) = &mut self.active else { return };
@@ -9647,7 +9760,10 @@ impl App {
                 if let Some(active) = &mut self.active {
                     active.terminal.toggle();
                     if !active.terminal.open {
+                        // The board belongs to the line it types into.
+                        active.osk.close();
                         active.renderer.clear_overlay(TERM_SLOT);
+                        active.renderer.clear_overlay(OSK_SLOT);
                     }
                 }
             }
@@ -12112,6 +12228,7 @@ impl ApplicationHandler for App {
             banks: vaults,
             friends,
             terminal: terminal::Terminal::default(),
+            osk: osk::Osk::default(),
             logged: None,
             roost: {
                 // The box stands on the hometown security office roof; the

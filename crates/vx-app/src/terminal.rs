@@ -208,6 +208,15 @@ pub struct Terminal {
 }
 
 impl Terminal {
+    /// What is on the input line right now.
+    ///
+    /// Test-only: the game reads the line through `render_terminal`, and the
+    /// on-screen keyboard's tests need to see that a key actually landed.
+    #[cfg(test)]
+    pub fn typed(&self) -> &str {
+        &self.input
+    }
+
     pub fn toggle(&mut self) {
         self.open = !self.open;
         if self.open && self.lines.is_empty() {

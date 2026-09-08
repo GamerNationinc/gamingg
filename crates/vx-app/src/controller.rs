@@ -137,11 +137,12 @@ impl WalkController {
         set(KeyCode::KeyZ, movement::PRONE);
 
         // The pad walks too. `MoveCommand` is a bitfield, so a tilt becomes
-        // the same bits a key press would: eight directions, no analog. The
-        // stick is already radially deadzoned and rescaled in
-        // `gamepad::deadzoned`, so this threshold is dead travel on top of
-        // that rather than a second deadzone. Sign convention is the one
-        // `poll_pad` packs: `x` right, `z` forward, matching W/S and A/D.
+        // the same bits a key press would — eight directions — and the *speed*
+        // rides beside them in the throttle byte. The stick is already
+        // radially deadzoned and rescaled in `gamepad::deadzoned`, so this
+        // threshold is dead travel on top of that rather than a second
+        // deadzone. Sign convention is the one `poll_pad` packs: `x` right,
+        // `z` forward, matching W/S and A/D.
         const TILT: f32 = 0.35;
         let pad = input.pad_axes();
         if pad.z > TILT {
@@ -157,7 +158,20 @@ impl WalkController {
             bits |= movement::LEFT;
         }
 
-        MoveCommand::looking(bits, camera.yaw, camera.pitch)
+        // How hard the stick is pushed, in 255ths. A key is all-or-nothing
+        // and wins any tie: holding W while nudging the stick walks at full
+        // pace, which is the only reading that is not a surprise.
+        let keyed = [KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA, KeyCode::KeyD]
+            .into_iter()
+            .any(|key| input.is_down(key));
+        let lean = glam::Vec2::new(pad.x, pad.z).length().min(1.0);
+        let throttle = if keyed || lean <= 0.0 {
+            movement::FULL_THROTTLE
+        } else {
+            (lean * f32::from(movement::FULL_THROTTLE)).round() as u8
+        };
+
+        MoveCommand::looking(bits, camera.yaw, camera.pitch).throttled(throttle)
     }
 }
 
@@ -412,6 +426,41 @@ mod tests {
         let command = controller.sample(&mut camera, &mut input);
 
         assert_eq!(command.bits, movement::FWD);
+    }
+
+    /// **A gentle push is a gentle walk.** The stick's magnitude rides the
+    /// command as a quantised byte, so the *speed* reaches the simulation
+    /// and the simulation replays it.
+    #[test]
+    fn the_sticks_lean_becomes_the_commands_throttle() {
+        let (mut camera, mut input, controller) = sampler();
+        input.set_pad_axes(glam::Vec3::new(0.0, 0.0, 1.0));
+        let full = controller.sample(&mut camera, &mut input);
+        assert_eq!(full.throttle, movement::FULL_THROTTLE, "full tilt is not full pace");
+
+        let (mut camera, mut input, controller) = sampler();
+        input.set_pad_axes(glam::Vec3::new(0.0, 0.0, 0.5));
+        let half = controller.sample(&mut camera, &mut input);
+        assert!(half.held(movement::FWD), "a half tilt should still walk");
+        let scale = half.throttle_scale();
+        assert!((scale - 0.5).abs() < 0.01, "a half tilt asked for {scale} of top speed");
+    }
+
+    /// A key is all-or-nothing, and keyboard play is untouched to the bit.
+    #[test]
+    fn a_key_always_walks_at_full_pace_whatever_the_stick_is_doing() {
+        let (mut camera, mut input, controller) = sampler();
+        input.press(KeyCode::KeyW);
+        let keyed = controller.sample(&mut camera, &mut input);
+        assert_eq!(keyed.throttle, movement::FULL_THROTTLE);
+
+        // A key held while the stick rests half way still walks fully: the
+        // key wins the tie, which is the only reading that is not a surprise.
+        let (mut camera, mut input, controller) = sampler();
+        input.press(KeyCode::KeyW);
+        input.set_pad_axes(glam::Vec3::new(0.0, 0.0, 0.5));
+        let both = controller.sample(&mut camera, &mut input);
+        assert_eq!(both.throttle, movement::FULL_THROTTLE);
     }
 
     #[test]

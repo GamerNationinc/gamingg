@@ -57,7 +57,8 @@ downloaded through a browser does: `chmod +x gamingg-linux-x86_64`.
 scheme in game), and Steam Input's default Gamepad layout is exactly what
 it expects. Every control the game has is on the pad somewhere: hold `LB`
 for the block palette, hold `SELECT` for the second layer, and `B` hangs up
-a machine feed. A keyboard is still wanted for *typing* into the terminal. A keyboard is only needed for *typing* into the terminal —
+a machine feed. Typing into the terminal is done from an on-screen keyboard the pad drives,
+so a keyboard is not wanted for anything. A keyboard is only needed for *typing* into the terminal —
 everything else, panels included, answers to the pad.
 
 ## What it needs from the system

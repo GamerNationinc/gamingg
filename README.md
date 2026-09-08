@@ -1413,14 +1413,22 @@ saves stay.
 **The controller works out of the box.** Steam Input's default Gamepad
 layout presents the Deck as an ordinary pad, and the game reads pads
 natively: left stick moves, right stick looks, and press `SELECT` any time
-for the full scheme on screen. On foot the stick walks in eight directions
-at one speed — a gentle tilt is still a walk, not a creep, because the
-command the simulation replays carries a direction and no magnitude. Flying
-and piloting a machine *are* analog, and read the tilt itself. Buttons
+for the full scheme on screen. The stick is analog everywhere: on foot a
+gentle push is a gentle walk, because the tilt rides the command as a
+quantised byte the simulation replays. A key is all-or-nothing and always
+walks at full pace, so keyboard play is exactly what it was. Buttons
 drive the very same bindings as the keyboard — one implementation of every
 rule, so every panel, the shop, the map and the handheld all answer to the
 pad. The terminal still wants a keyboard for *typing*, but scrolls and
 closes from the pad.
+
+**You never need a keyboard.** The terminal — where you found towns, take
+them, read the law and ask about the weather — types from an on-screen
+keyboard the pad drives: `Y` inside the terminal raises it, the d-pad walks
+the keys, `A` types, `X` rubs out, `Start` sends the line. And the left stick
+is properly analog on foot now: a gentle push is a gentle walk, because the
+speed rides the command the simulation replays rather than being thrown away
+at the door.
 
 **Every binding is reachable, and there is a test that says so.** Thirteen
 buttons cannot name twenty actions, so two of them are *layers*: hold `LB`

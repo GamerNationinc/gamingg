@@ -121,7 +121,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 43 | `2c2df23` | Founding a town, and taking one — the civic note's other two routes into office. Print a charter, stand on flat dry ground a lattice cell clear of anybody, and `FOUND IRON REACH`: the whole town is raised out of the ground by the same generator that draws every other one — plateau, tower, shed, clinic, bank, dwellings, lockboxes, the mini star, three settlers with the market already open — with you in both chairs and a founder's due that keeps you there through the quiet first terms. Or get a warrant, break the posse it sends, and `TAKE` at the console: both chairs are yours, the Compact hates it, every neighbouring mayor signs paper on you and the residents trust you nothing, so the town votes on you at its next poll and a town you took is a town you have to keep |
 | 44 | `c90ecea` | Snow that settles, and ice — the half of a winter stage 41 deliberately left out, because it is the half that edits blocks. Four cold blocks: snowed grass, sand and sphagnum, each the bare block's twin at the same height, and ice, a solid translucent block. The cold is named in one place (`FREEZING`, a threshold on a temperature the place mostly decides and the year leans on), and a frost automaton shaped like the rain's source term — sixteen hashed columns within twenty-four blocks of the player every sixty-four ticks — snows open ground when it is snowing, freezes full still water at or below sea level when it is freezing, and gives both back exactly when it is not. It runs inside `Command::Advance` on both sides of the journal, so a winter replays to the same snow and the same ice. Everything else is an existing system reading a new block: you and the drones and the deputies walk across the lake, a pump on it lifts nothing, an electrolyser beside it finds no water, and fire finds no fuel |
 | 45 | `0130222` | Entities in `f64` — the line stage 42 drew at the things that travel, moved out to everything that carries a position. Villagers, deputies, holders, the stalker, shots, sweeps, falling stems, marks, sightings, the belief board, caravans and crashes all run at the body's width; directions, headings, ranges and rig geometry stay `f32` and the difference is taken wide first. Every body is drawn in the camera's frame and marked so, the per-object lighting pass adds the origin back before reading a column, the muzzle crosses the journal's wire at `f64` (VERSION 29) and `arsenal.dat` widens its crash columns (VERSION 2, v1 read). Proved by the stage-42 tests' siblings: the same posse walks the same walk, the same townsfolk stroll the same stroll, the same rounds leave the same craters, and the same rig draws the same bytes, at spawn and three thousand kilometres out |
-| 46a | _this_ | The pad is the game — every control reachable from a controller and every panel escapable from one. Stage 24's single bit of context becomes five layers: the world, a held `LB` for the block palette, a held `SELECT` for the second layer, a panel, and — the one that did not exist — looking through a machine, where the pad had been in *world* context with no button that hung up. About twenty bindings that no button could reach get homes, the sticks drive panel cursors and the arcade, the triggers stop digging through an open panel, and a table-driven test walks every `KeyCode` the game binds and fails the build if the pad cannot produce it |
+| 46a | `63e69ce` | The pad is the game — every control reachable from a controller and every panel escapable from one. Stage 24's single bit of context becomes five layers: the world, a held `LB` for the block palette, a held `SELECT` for the second layer, a panel, and — the one that did not exist — looking through a machine, where the pad had been in *world* context with no button that hung up. About twenty bindings that no button could reach get homes, the sticks drive panel cursors and the arcade, the triggers stop digging through an open panel, and a table-driven test walks every `KeyCode` the game binds and fails the build if the pad cannot produce it |
+| 46b | _this_ | The keyboard you never need, and the stick that creeps. Typing arrives on a window's text event, which `poll_pad` cannot raise, so no binding of any button to any key could ever produce a character — the pad gets a grid and a cursor instead, and what it picks goes into the same `type_char` the window's text lands in. And `MoveCommand` gains a quantised throttle byte, so the stick's *lean* reaches the simulation and is replayed with it: a gentle push is a gentle walk. Journal VERSION 30 |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -2853,6 +2854,48 @@ stages after the pad shipped.
 `event.text` from a `WindowEvent` that `poll_pad` never synthesises, so a
 pad cannot enter a character however it is bound.
 
+## Shipped — Stage 46b: the keyboard you never need
+
+**A pad could not type, and no binding could have fixed it.** Every other
+control the pad reaches is a `KeyCode` synthesized into the same
+`handle_press` the keyboard drives — that is stage 24's design and it is why
+the pad gained every panel for free. Text is the one thing that does not work
+that way: typing arrives on `event.text` of a `WindowEvent`, deliberately,
+because a scancode is a *position* and reading letters off positions is how a
+game becomes unusable on half the world's keyboards. `poll_pad` never raises
+a `WindowEvent`. So the pad gets a grid and a cursor, and what it picks goes
+into `Terminal::type_char` — the same function the window's text lands in.
+
+**`osk.rs` is a pure render function over a cursor**, like every panel in this
+game: a row, a column, and a drawing that is a function of them. Every key on
+it is one the font draws *and* the terminal keeps, checked by a test that
+types each one and reads it back — a key that types nothing is worse than a
+key that is not there. The cursor wraps at every edge, because a thumbstick
+has no edges and clamping would make the walk from `A` to `.` a thirteen-step
+crawl. `Y` in the terminal raises and stows it; the board goes away with the
+line it types into.
+
+**The one action with no keyboard twin.** Every button on the typing layer
+resolves to a `KeyCode` except the one that types: on a keyboard you press
+the letter itself, so there is no key for "the character I am pointing at".
+`poll_pad` does that one directly, and `Context::Typing` exists to mark where
+the exception lives rather than letting it hide.
+
+**The stick that creeps.** `MoveCommand` carries a quantised `throttle` byte
+beside the two quantised angles, for the same reason they are quantised: it
+crosses the journal's wire and the simulation replays it. The walk sampler
+fills it from the stick's rescaled magnitude; a key writes `FULL_THROTTLE`
+and wins any tie, so keyboard play is unchanged to the bit. The scalar is
+kept out of `wish_dir` on purpose — the ledge probe, the landing and the
+slide launch all read the wish for its *direction*, and a shortened vector
+would have quietly changed all three.
+
+**Journal VERSION 30.** Tag 5 is one byte wider. A log recorded under 29 is
+a byte short per `Move` and restarts the oracle, like every older log.
+
+**The arc's stage 46 is closed.** It was named after the pad fix that
+followed stage 45, and it shipped here as half of a round about the pad.
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -3198,19 +3241,24 @@ office — founding a town, and taking one — in 43; the ground half of a winte
 — snow that settles, and ice — in 44; and in 45 the line stage 42 drew at the
 things that travel moved out to every body in the game.
 
-One thing is named on the arc, put there by a bug found on a Deck rather
-than by a note.
+The arc's one named entry — analog movement on foot, put there by a bug
+found on a Deck — shipped inside 46b, which is where it belonged: a round
+whose thesis is *the pad is the game* cannot leave the stick walking in
+eight directions at one speed.
+
+Two rounds are named now, both from playing the thing on a Deck:
 
 | Stage | What | Why here |
 |---|---|---|
-| 46 | Analog movement on foot | The pad's stick walks in eight directions at one speed, because `MoveCommand` carries direction bits and no magnitude. A gentle tilt should be a gentle walk — but the speed has to reach the simulation, and the simulation replays commands from the journal, so the magnitude must be quantised and versioned like the look angles already are. A journal bump, and its own round |
+| 47 | The body does not pass through the world | Three paths put the hull or the camera inside geometry, all of them bypassing the sweep: the mantle arc writes the body's position along a lerp with no collision query at all, the third-person orbit clamps a blocked camera back up to its floor and lands it past a wall face, and `headroom` omits the skin the rest of the physics keeps. No test anywhere asserts how much margin the sweep leaves |
+| 48 | The drone you can lose | The FPV camera sits inside the machine's own hull; a machine cannot collide with anything, so it cannot crash; and — the one nobody meant — piloted digging calls `break_block` while neither taking the wheel nor the per-tick pilot command is journalled, so a hand-dug hole replays as untouched ground. Closing that comes first, because integrity is oracle state for the same reason wear is |
 
-Beyond that the board holds the outstanding engineering below, and whatever
+Beyond those the board holds the outstanding engineering below, and whatever
 the next note says.
 
 ## The feature map
 
-The whole game at a glance, as of stage 45.
+The whole game at a glance, as of stage 46.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -3372,15 +3420,20 @@ an electrolyser that finds no water until the thaw); every body in `f64`
 (villagers, deputies, holders, the stalker, shots, stems, marks, caravans and
 crashes at the body's width, drawn in the camera's frame, the muzzle on the
 wire at `f64`, and the same walk, stroll, crater and bytes at spawn and three
-thousand kilometres out); a Steam Deck dist build every round.
+thousand kilometres out); a game you can play with a controller and nothing
+else (six mapping layers including two held modifiers and a machine feed that
+can finally be hung up, an on-screen keyboard for the terminal, an analog
+stick on foot, and a test that fails the build if a binding has no pad path);
+a Steam Deck dist build every round.
 
-**Planned, in arc order:** nothing named. Every design note the project was
-given is shipped, and the board's own arc closed with 45.
+**Planned, in arc order:** the body kept out of the world's geometry, then
+the drone you can lose — and, first inside that round, the replay hole where
+a hand-dug hole is not written down.
 
 **Outstanding engineering:** journal-shrunk saves;
 real min-cost flow for freight; ammunition as a trade good; the rest of the
 weapon table; the kestrel's
-cell state surviving a reload; pad text entry for the terminal; anything that hacks *you* (the hardened link
+cell state surviving a reload; anything that hacks *you* (the hardened link
 has no adversary until factions).
 
 ## Known rough edges

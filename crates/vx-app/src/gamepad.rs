@@ -179,6 +179,10 @@ pub enum Context {
     /// Looking through a machine. Neither a panel nor the world — the
     /// mistake this enum exists to fix, because there was no way to hang up.
     Feed,
+    /// The on-screen keyboard is up. Only the buttons with a keyboard twin
+    /// resolve here; the one that types has no twin at all — on a keyboard
+    /// you simply press the letter — so `main` handles it directly.
+    Typing,
 }
 
 /// What a button means on a given layer: the key it presses.
@@ -258,6 +262,21 @@ pub fn key_for(button: Button, context: Context) -> Option<KeyCode> {
             Button::RightThumb => Some(KeyCode::KeyX),
             _ => None,
         },
+        Context::Typing => match button {
+            Button::DPadUp => Some(KeyCode::ArrowUp),
+            Button::DPadDown => Some(KeyCode::ArrowDown),
+            Button::DPadLeft => Some(KeyCode::ArrowLeft),
+            Button::DPadRight => Some(KeyCode::ArrowRight),
+            Button::West => Some(KeyCode::Backspace),
+            Button::North => Some(KeyCode::Tab),
+            Button::East => Some(KeyCode::Escape),
+            Button::Start => Some(KeyCode::Enter),
+            Button::LeftThumb => Some(KeyCode::Home),
+            Button::RightThumb => Some(KeyCode::End),
+            // South types the key under the cursor. There is no `KeyCode`
+            // for "the letter I am pointing at", so `poll_pad` does it.
+            _ => None,
+        },
         Context::Feed => match button {
             // The fix this enum was written for: a feed is not a panel, so
             // the pad was in world context and east was *crouch*. There was
@@ -298,11 +317,9 @@ pub const TAPS: [(Button, Option<KeyCode>, &str); 2] = [
 // Read by the reachability test rather than by the game: it is a statement
 // about the mapping, and the mapping is what it guards.
 #[allow(dead_code)]
-pub const NOT_ON_THE_PAD: [(KeyCode, &str); 4] = [
+pub const NOT_ON_THE_PAD: [(KeyCode, &str); 2] = [
     (KeyCode::Escape, "world context: the pad never captures the mouse, so it has nothing to release"),
-    (KeyCode::Home, "terminal caret: the on-screen keyboard carries it"),
-    (KeyCode::End, "terminal caret: the on-screen keyboard carries it"),
-    (KeyCode::Delete, "terminal edit: backspace is the pad's delete, on the left stick's click"),
+    (KeyCode::Delete, "terminal edit: backspace is the pad's delete, and the board has no forward delete"),
 ];
 
 /// How far the stick must lean to walk a panel's cursor. Higher than the
@@ -319,11 +336,11 @@ pub const REPEAT_AGAIN: f32 = 0.09;
 /// to thirty-eight when the pad learned to reach everything, and at the
 /// shop's doubling it stood a thousand pixels tall on a seven-hundred-pixel
 /// screen — the top of the list off the top of the world.
-pub const PAD_SCALE: f32 = 1.4;
+pub const PAD_SCALE: f32 = 1.3;
 
 /// The help overlay's size in texture pixels.
 pub const PAD_WIDTH: u32 = 320;
-pub const PAD_HEIGHT: u32 = 500;
+pub const PAD_HEIGHT: u32 = 528;
 
 const TEXT: [u8; 4] = [235, 235, 235, 255];
 const DIM: [u8; 4] = [150, 150, 155, 255];
@@ -370,13 +387,17 @@ pub const SCHEME: [(&str, &str); 34] = [
     ("", "LOOKING THROUGH A MACHINE"),
 ];
 
-/// The feed layer's rows, kept out of [`SCHEME`] only because the array is
-/// already the height of the panel. Drawn under it.
-pub const FEED_SCHEME: [(&str, &str); 4] = [
+/// The two layers that did not fit in [`SCHEME`]'s array. Drawn under it.
+pub const FEED_SCHEME: [(&str, &str); 9] = [
     ("B", "HANG UP"),
     ("Y", "TAKE OR HAND BACK THE WHEEL"),
     ("X", "BACK TO THE ROSTER"),
     ("A, L-STICK", "CLIMB, DESCEND"),
+    ("", "TYPING - Y IN THE TERMINAL"),
+    ("D-PAD", "MOVE OVER THE KEYS"),
+    ("A, X", "TYPE, RUB OUT"),
+    ("START", "SEND THE LINE"),
+    ("Y", "PUT THE BOARD AWAY"),
 ];
 
 /// Draw the control scheme. Pure, like every panel here.
@@ -507,7 +528,8 @@ mod tests {
             KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA, KeyCode::KeyD, KeyCode::KeyQ,
         ];
         let every_context = [
-            Context::World, Context::Second, Context::Palette, Context::Panel, Context::Feed,
+            Context::World, Context::Second, Context::Palette, Context::Panel,
+            Context::Feed, Context::Typing,
         ];
         let every_button = [
             Button::South, Button::East, Button::West, Button::North,
@@ -550,7 +572,9 @@ mod tests {
         }
         // Select is main's own: tapped it is the help panel, held it is the
         // second layer. It is never a key itself.
-        for context in [Context::World, Context::Panel, Context::Feed, Context::Second] {
+        for context in [
+            Context::World, Context::Panel, Context::Feed, Context::Second, Context::Typing,
+        ] {
             assert_eq!(key_for(Button::Select, context), None);
         }
         // And LB is the palette modifier, so it is not a key in the world.

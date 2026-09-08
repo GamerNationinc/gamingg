@@ -184,7 +184,13 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // the muzzle of a shot — is written at that width. A log recorded under 28
 // carries `f32` muzzles four bytes shorter and cannot be read; it restarts
 // the oracle like every older log.
-const VERSION: u32 = 29;
+// 30: `Move` carries a throttle byte (stage 46b). A gentle push on a pad's
+// stick is a gentle walk, which means the *speed* reaches the simulation and
+// the simulation replays it — so it is quantised and versioned like the look
+// angles beside it. A keyboard writes full tilt, so keyboard play is what it
+// always was; a log recorded under 29 is one byte short per `Move` and
+// restarts the oracle like every older log.
+const VERSION: u32 = 30;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -231,6 +237,10 @@ pub enum Command {
         bits: u16,
         yaw_q: i16,
         pitch_q: i16,
+        /// How far the stick was pushed, in 255ths. A keyboard writes full
+        /// tilt, so a keyboard session is byte-identical to one recorded
+        /// before this byte existed except for the byte itself.
+        throttle: u8,
         load: u8,
     },
     /// Simulation ticks run. The unit of time the log speaks in.
@@ -458,6 +468,7 @@ impl Command {
             bits: command.bits,
             yaw_q: command.yaw_q,
             pitch_q: command.pitch_q,
+            throttle: command.throttle,
             load: command.load,
         }
     }
@@ -725,12 +736,14 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
             bits,
             yaw_q,
             pitch_q,
+            throttle,
             load,
         } => {
             state.held = MoveCommand {
                 bits: *bits,
                 yaw_q: *yaw_q,
                 pitch_q: *pitch_q,
+                throttle: *throttle,
                 load: *load,
             };
         }
@@ -1131,12 +1144,14 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
             bits,
             yaw_q,
             pitch_q,
+            throttle,
             load,
         } => {
             file.write_all(&[5u8])?;
             file.write_all(&bits.to_le_bytes())?;
             file.write_all(&yaw_q.to_le_bytes())?;
             file.write_all(&pitch_q.to_le_bytes())?;
+            file.write_all(&[*throttle])?;
             file.write_all(&[*load])?;
         }
         Command::Admin(order) => match order {
@@ -1403,12 +1418,15 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
             file.read_exact(&mut yaw)?;
             let mut pitch = [0u8; 2];
             file.read_exact(&mut pitch)?;
+            let mut throttle = [0u8; 1];
+            file.read_exact(&mut throttle)?;
             let mut load = [0u8; 1];
             file.read_exact(&mut load)?;
             Command::Move {
                 bits: u16::from_le_bytes(bits),
                 yaw_q: i16::from_le_bytes(yaw),
                 pitch_q: i16::from_le_bytes(pitch),
+                throttle: throttle[0],
                 load: load[0],
             }
         }

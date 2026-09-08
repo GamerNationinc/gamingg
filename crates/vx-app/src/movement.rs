@@ -73,17 +73,45 @@ pub const PITCH_STEPS: i32 = 2048;
 /// input sequence has to replay to the same position or the regression test is
 /// worthless, and a raw mouse delta is exactly the kind of value that will not
 /// survive being written to a file and read back.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+/// Full tilt, in 255ths. A keyboard only ever writes this.
+pub const FULL_THROTTLE: u8 = 255;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MoveCommand {
     pub bits: u16,
     pub yaw_q: i16,
     pub pitch_q: i16,
+    /// How far the stick is pushed, in 255ths of full tilt.
+    ///
+    /// Quantised for the same reason the angles are: it crosses the journal's
+    /// wire, and the simulation replays it. A key is all-or-nothing and
+    /// writes [`FULL_THROTTLE`], so keyboard play is unchanged to the bit —
+    /// the byte only ever means something when a stick sent it.
+    pub throttle: u8,
     /// How full the pack is, in 255ths — see [`load_byte`].
     ///
     /// Carried in the command rather than looked up during replay because the
     /// pack is not in the journal, and a replay that assumed an empty one would
     /// reproduce a lighter, faster player than the one who was actually there.
     pub load: u8,
+}
+
+/// A command asking for nothing, at full tilt.
+///
+/// Written by hand rather than derived so `throttle` starts at
+/// [`FULL_THROTTLE`]: a derived zero would mean "the stick is centred", and
+/// every caller that builds a command from `..Default::default()` would ask
+/// the body to stand still.
+impl Default for MoveCommand {
+    fn default() -> Self {
+        MoveCommand {
+            bits: 0,
+            yaw_q: 0,
+            pitch_q: 0,
+            throttle: FULL_THROTTLE,
+            load: 0,
+        }
+    }
 }
 
 impl MoveCommand {
@@ -102,8 +130,25 @@ impl MoveCommand {
             bits,
             yaw_q: yaw_q.rem_euclid(YAW_STEPS) as i16,
             pitch_q: pitch_q as i16,
+            throttle: FULL_THROTTLE,
             load: 0,
         }
+    }
+
+    /// The same command at a fraction of full tilt.
+    pub fn throttled(mut self, throttle: u8) -> Self {
+        self.throttle = throttle;
+        self
+    }
+
+    /// How much of top speed this command asks for, `0..1`.
+    ///
+    /// A separate scalar from [`MoveCommand::wish_dir`] rather than a shorter
+    /// wish vector, because everything else that reads the wish — the ledge
+    /// probe, the landing, the slide launch — wants the *direction* and would
+    /// quietly change behaviour if a gentle push shortened it.
+    pub fn throttle_scale(&self) -> f32 {
+        f32::from(self.throttle) / f32::from(FULL_THROTTLE)
     }
 
     /// The same command, carrying a load.
@@ -571,7 +616,12 @@ impl Movement {
         let speed = self.top_speed(mass);
         body.height = self.stance.body_height() as f64;
         body.eye_height = self.stance.eye_cm() as f64 / 100.0;
-        body.step_with(world, (wish * speed).as_dvec3(), dt as f64, params);
+        body.step_with(
+            world,
+            (wish * speed * command.throttle_scale()).as_dvec3(),
+            dt as f64,
+            params,
+        );
 
         if body.on_ground {
             self.settle_stance(world, body, command);
