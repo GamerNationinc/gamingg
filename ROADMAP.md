@@ -122,7 +122,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 44 | `c90ecea` | Snow that settles, and ice — the half of a winter stage 41 deliberately left out, because it is the half that edits blocks. Four cold blocks: snowed grass, sand and sphagnum, each the bare block's twin at the same height, and ice, a solid translucent block. The cold is named in one place (`FREEZING`, a threshold on a temperature the place mostly decides and the year leans on), and a frost automaton shaped like the rain's source term — sixteen hashed columns within twenty-four blocks of the player every sixty-four ticks — snows open ground when it is snowing, freezes full still water at or below sea level when it is freezing, and gives both back exactly when it is not. It runs inside `Command::Advance` on both sides of the journal, so a winter replays to the same snow and the same ice. Everything else is an existing system reading a new block: you and the drones and the deputies walk across the lake, a pump on it lifts nothing, an electrolyser beside it finds no water, and fire finds no fuel |
 | 45 | `0130222` | Entities in `f64` — the line stage 42 drew at the things that travel, moved out to everything that carries a position. Villagers, deputies, holders, the stalker, shots, sweeps, falling stems, marks, sightings, the belief board, caravans and crashes all run at the body's width; directions, headings, ranges and rig geometry stay `f32` and the difference is taken wide first. Every body is drawn in the camera's frame and marked so, the per-object lighting pass adds the origin back before reading a column, the muzzle crosses the journal's wire at `f64` (VERSION 29) and `arsenal.dat` widens its crash columns (VERSION 2, v1 read). Proved by the stage-42 tests' siblings: the same posse walks the same walk, the same townsfolk stroll the same stroll, the same rounds leave the same craters, and the same rig draws the same bytes, at spawn and three thousand kilometres out |
 | 46a | `63e69ce` | The pad is the game — every control reachable from a controller and every panel escapable from one. Stage 24's single bit of context becomes five layers: the world, a held `LB` for the block palette, a held `SELECT` for the second layer, a panel, and — the one that did not exist — looking through a machine, where the pad had been in *world* context with no button that hung up. About twenty bindings that no button could reach get homes, the sticks drive panel cursors and the arcade, the triggers stop digging through an open panel, and a table-driven test walks every `KeyCode` the game binds and fails the build if the pad cannot produce it |
-| 46b | _this_ | The keyboard you never need, and the stick that creeps. Typing arrives on a window's text event, which `poll_pad` cannot raise, so no binding of any button to any key could ever produce a character — the pad gets a grid and a cursor instead, and what it picks goes into the same `type_char` the window's text lands in. And `MoveCommand` gains a quantised throttle byte, so the stick's *lean* reaches the simulation and is replayed with it: a gentle push is a gentle walk. Journal VERSION 30 |
+| 46b | `a1a0292` | The keyboard you never need, and the stick that creeps. Typing arrives on a window's text event, which `poll_pad` cannot raise, so no binding of any button to any key could ever produce a character — the pad gets a grid and a cursor instead, and what it picks goes into the same `type_char` the window's text lands in. And `MoveCommand` gains a quantised throttle byte, so the stick's *lean* reaches the simulation and is replayed with it: a gentle push is a gentle walk. Journal VERSION 30 |
+| 47 | _this_ | The body does not pass through the world. Every collision test in the game is a *binary* predicate — inside a block or not — and none of them ever said how much room was left, so the millimetre skin the sweep promises was a promise nothing checked. Three places were not keeping it: a mantle walked the hull along a fixed arc with **no collision query at all** and only its destination validated, the follow camera's minimum-orbit floor overruled a wall and put the lens a quarter block inside it, and standing up under a ceiling asked only whether the taller hull collides — which, thanks to the inset in the block query, a head resting exactly on the plane does not. All three fixed, the block query made symmetric at both ends, and the margin family of tests that never existed written: the hull rests *exactly* `SKIN` off a wall and a floor, a mantle is outside the rock on every tick of the climb, and the orbit keeps its whole skin at every angle inside a three-block room |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -2896,6 +2897,75 @@ a byte short per `Move` and restarts the oracle, like every older log.
 **The arc's stage 46 is closed.** It was named after the pad fix that
 followed stage 45, and it shipped here as half of a round about the pad.
 
+## Shipped — Stage 47: the body does not pass through the world
+
+**The bug report said the player clips into things, and the obvious cause was
+not it.** The near plane is nowhere near the wall: eye-to-wall when the hull
+is flush is 0.301 m and the furthest corner of the near plane reaches 0.174 m,
+so there is 0.127 m of margin at 16:9. What was actually happening was three
+separate paths that put the hull, or the lens, inside geometry — and the
+reason all three survived twenty stages is the same reason: **every collision
+test in this engine is a binary predicate.** `collides` answers *is this box
+inside a block*. Nothing anywhere asked *how much room is left*. `SKIN` is a
+millimetre the sweep leaves against every surface it stops against, and it was
+a promise no test made the code keep.
+
+**The mantle ran with no collision query at all.** It is the one movement that
+is not ordinary physics — the integrator is suspended and the box is walked
+along a fixed arc, hand over the edge and up — and that exception was meant to
+be about *momentum*. It had quietly become an exception about *geometry*:
+`classify_ledge` checks where a mantle lands, and nothing checked where it
+went. For about six tenths of a second per ledge the hull, and the eye inside
+it, passed through the block being climbed. Every step of the arc is checked
+now, and a blocked one aborts to `Airborne` — a hand slipping, which is what
+the sweep would have done. Writing that check immediately failed a *legitimate*
+mantle, which turned out to be a second bug hiding behind the first: the lift
+and the reach phases overlapped between 0.4 and 0.6, rising while already
+moving in, and that overlap is precisely the window where the hull cuts the
+corner of the block. Separating them — up first, then across, which is what the
+comment always claimed — costs nothing and is what makes the arc survive its
+own check.
+
+**The camera had a floor that outranked the wall.** `clear_orbit_distance`
+used to `clamp` a blocked distance back *up* to `MIN_ORBIT_DISTANCE`. That
+floor exists so the orbit cannot collapse onto the back of your own head, and
+it was also, silently, overruling geometry: a wall closer than
+`MIN_ORBIT_DISTANCE + CAMERA_SKIN` put the lens up to a quarter of a block
+inside the rock. It returns `Option` now and refuses; the caller falls back to
+the eye for that frame. Backing into a corner briefly becomes first person,
+which is what the rough-edge note about filling the frame with your own back
+wanted anyway — and first person is never inside anything.
+
+**Standing up was the third, and the smallest.** `headroom` built the taller
+hull and asked whether it collides. A head resting *exactly* on the ceiling
+plane does not collide — the inset in the block query sees to that — so the one
+gesture in the game that grows the hull was the one place in the system whose
+margin was zero rather than `SKIN`. It adds the skin now, which is why `SKIN`
+became `pub` and is exported from `vx-world`.
+
+**The block query is symmetric.** `overlapping_blocks` nudged its upper bound
+inward by `INSET` and its lower bound not at all, so the box's two ends
+answered the same question differently: a face resting on a line was outside
+the far block going up and inside the near block going down. Nothing depended
+on the difference while every caller only asked the binary question. The moment
+a test asserts *how much* room the sweep leaves, an asymmetric predicate makes
+the margin `SKIN` on one face of the hull and `SKIN` minus a grid line's worth
+of luck on the other.
+
+**The margin family, which did not exist.** Walk into a wall and the hull's
+face rests exactly `SKIN` from the plane, to a part in a billion — not merely
+"not colliding". Fall onto a floor and it rests exactly `SKIN` above it, because
+a floor is a wall you fell onto. Climb a two-block bench and assert on *every
+tick* that the hull is outside the rock, rather than on where it ended up.
+Sweep the orbit all the way round inside a closed three-block room and assert
+there is a whole `CAMERA_SKIN` of clear air past the lens at every angle, or
+that the frame honestly refused. And the block query claims one block for a box
+that pokes less than `INSET` past a line at either end.
+
+**No capture.** This round is a margin, not a picture: the fix is a millimetre,
+and a screenshot of a millimetre is a screenshot of a wall. The tests are the
+evidence.
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -3244,13 +3314,14 @@ things that travel moved out to every body in the game.
 The arc's one named entry — analog movement on foot, put there by a bug
 found on a Deck — shipped inside 46b, which is where it belonged: a round
 whose thesis is *the pad is the game* cannot leave the stick walking in
-eight directions at one speed.
+eight directions at one speed. And 47 closed the reported clipping: the
+mantle arc, the orbit floor and the headroom check all stopped bypassing the
+sweep, and the margin the sweep promises is asserted rather than assumed.
 
-Two rounds are named now, both from playing the thing on a Deck:
+One round is named now, from playing the thing on a Deck:
 
 | Stage | What | Why here |
 |---|---|---|
-| 47 | The body does not pass through the world | Three paths put the hull or the camera inside geometry, all of them bypassing the sweep: the mantle arc writes the body's position along a lerp with no collision query at all, the third-person orbit clamps a blocked camera back up to its floor and lands it past a wall face, and `headroom` omits the skin the rest of the physics keeps. No test anywhere asserts how much margin the sweep leaves |
 | 48 | The drone you can lose | The FPV camera sits inside the machine's own hull; a machine cannot collide with anything, so it cannot crash; and — the one nobody meant — piloted digging calls `break_block` while neither taking the wheel nor the per-tick pilot command is journalled, so a hand-dug hole replays as untouched ground. Closing that comes first, because integrity is oracle state for the same reason wear is |
 
 Beyond those the board holds the outstanding engineering below, and whatever
@@ -3258,7 +3329,7 @@ the next note says.
 
 ## The feature map
 
-The whole game at a glance, as of stage 46.
+The whole game at a glance, as of stage 47.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);

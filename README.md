@@ -872,6 +872,52 @@ closed door. So there is a whole middle now between "nothing happened" and
 "there are four lads with guns coming over the hill", and you can talk, pay or
 run your way out of it.
 
+### The body stays out of the wall
+
+You could get inside the world. Not far, and not for long, but you could —
+walk up flush to a rock face and the corner of you was in it, climb onto a
+ledge and for about half a second you were *inside* the ledge, back the
+over-the-shoulder camera into a corner and the lens went through the stone.
+Three different paths, one cause: every collision test in the game answered
+a yes-or-no question — *is this box inside a block* — and not one of them
+ever asked *how much room is left*. So the millimetre of clearance the
+collision sweep leaves against every surface was a promise nothing checked,
+and in three places it was quietly not being kept.
+
+**Climbing a ledge was the bad one.** A mantle is the one movement the
+physics does not drive: the body is walked along a fixed arc, hand over the
+edge and up, and the integrator is suspended while it happens. That was
+meant to be an exception about *momentum*. It had become an exception about
+*geometry* too — nothing along that arc was checked against the world at
+all, only where it finished. Now every tick of the climb is checked, and a
+blocked one lets go: you drop off the edge like a hand slipping, which is
+what the sweep would have done anyway. On the way past, the arc was made to
+be what its own comment always claimed — up first, *then* across, instead of
+the two overlapping in the middle, which is exactly the window where you cut
+the corner of the block you were climbing.
+
+**The camera had a floor that outranked the wall.** The follow camera pulls
+in when something is behind you, and it was never allowed closer than about
+half a block so it could not collapse into the back of your own head. When a
+wall was closer than that, the floor won — and put the lens a quarter of a
+block into the rock. It now refuses instead: no clear air behind you means
+the frame is first person, which is what you wanted anyway when your own
+back is filling the screen.
+
+**And standing up left no room at all.** Getting to your feet under a low
+ceiling checked whether the taller you *collides* — and a head resting
+exactly on the ceiling plane does not collide, by a hair, so the one gesture
+in the game that grows your body was the one that gave it no clearance. It
+takes the same millimetre as everything else now.
+
+There are no new pictures in this one; a margin does not photograph. What
+there is instead is the family of tests that never existed: walk into a wall
+and the hull rests *exactly* a millimetre off the face, land on a floor and
+it rests exactly a millimetre above it, climb a two-block bench and the hull
+is outside the rock on every single tick of the climb, and sweep the camera
+all the way round inside a three-block room and there is a full quarter block
+of air past the lens at every angle.
+
 ### Everybody gets the good math
 
 Stage 42 fixed the far-from-home jitter for *you*: your body, your feet, your

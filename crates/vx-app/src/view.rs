@@ -62,15 +62,23 @@ impl ViewMode {
     }
 }
 
-/// How far back the orbit may sit before terrain gets in the way.
+/// How far back the orbit may sit before terrain gets in the way, or `None`
+/// when there is not even [`MIN_ORBIT_DISTANCE`] of clear air behind the eye.
 ///
-/// `back` is the unit direction from the pivot toward the camera. Never
-/// returns less than [`MIN_ORBIT_DISTANCE`].
-pub fn clear_orbit_distance(world: &World, pivot: DVec3, back: Vec3, wanted: f32) -> f32 {
+/// `back` is the unit direction from the pivot toward the camera.
+///
+/// The `None` is stage 47's correction. This used to `clamp` a blocked
+/// distance back *up* to the floor, so a wall closer than
+/// `MIN_ORBIT_DISTANCE + CAMERA_SKIN` put the camera up to a quarter of a
+/// block *inside solid rock* — the floor was there to stop the orbit
+/// collapsing onto the body, and it was quietly also overruling the wall.
+/// Refusing is the honest answer, and the caller has somewhere sensible to
+/// go with it.
+pub fn clear_orbit_distance(world: &World, pivot: DVec3, back: Vec3, wanted: f32) -> Option<f32> {
     let blocked = vx_world::raycast_solid(world, world.registry(), pivot, back, wanted)
         .map(|hit| hit.distance - CAMERA_SKIN)
         .unwrap_or(wanted);
-    blocked.clamp(MIN_ORBIT_DISTANCE, wanted)
+    (blocked >= MIN_ORBIT_DISTANCE).then(|| blocked.min(wanted))
 }
 
 /// The camera's position for this frame, given where its owner's eyes are.
@@ -83,8 +91,15 @@ pub fn camera_placement(world: &World, camera: &Camera, pivot: DVec3, mode: View
         ViewMode::ThirdPerson => {
             let anchor = pivot + DVec3::Y * THIRD_PERSON_LIFT as f64;
             let back = -camera.forward();
-            let distance = clear_orbit_distance(world, anchor, back, THIRD_PERSON_DISTANCE);
-            anchor + (back * distance).as_dvec3()
+            // Nowhere clear to stand off to: fall back to the eye for this
+            // frame rather than putting the camera inside the wall. Backing
+            // into a corner briefly becomes first person, which is what the
+            // rough-edge note about filling the frame with your own back
+            // wanted anyway.
+            match clear_orbit_distance(world, anchor, back, THIRD_PERSON_DISTANCE) {
+                Some(distance) => anchor + (back * distance).as_dvec3(),
+                None => pivot,
+            }
         }
     }
 }
@@ -186,22 +201,26 @@ mod tests {
     }
 
     #[test]
-    fn the_orbit_camera_never_collapses_onto_the_pivot() {
+    fn a_buried_pivot_falls_back_to_the_eye_rather_than_into_the_rock() {
         // A pivot inside solid rock makes the raycast report an obstruction
-        // at distance zero. Without the floor the camera would land on the
-        // player's own head.
+        // at distance zero. The floor used to *clamp* that back up, which put
+        // the camera a quarter of a block inside the wall — the floor was
+        // there to stop the orbit collapsing onto the body and was quietly
+        // also overruling the geometry. Refusing is the honest answer: the
+        // frame is first person, and first person is never inside anything.
         let world = world();
         let ground = world.surface_y(0, 0).unwrap();
         let buried = DVec3::new(0.5, ground as f64 - 4.0, 0.5);
         let camera = camera_looking(1.1, 0.0);
-
-        let placed = camera_placement(&world, &camera, buried, ViewMode::ThirdPerson);
         let anchor = buried + DVec3::Y * THIRD_PERSON_LIFT as f64;
-        assert!(
-            (placed - anchor).length() >= MIN_ORBIT_DISTANCE as f64 - 1e-4,
-            "camera collapsed to {} from the pivot",
-            (placed - anchor).length()
+
+        assert_eq!(
+            clear_orbit_distance(&world, anchor, -camera.forward(), THIRD_PERSON_DISTANCE),
+            None,
+            "a buried anchor reported clear air behind it"
         );
+        let placed = camera_placement(&world, &camera, buried, ViewMode::ThirdPerson);
+        assert_eq!(placed, buried, "a blocked orbit did not fall back to the eye");
     }
 
     #[test]
@@ -229,6 +248,78 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The margin, not the cell. `the_camera_keeps_clear_of_geometry_all_the
+    /// _way_round` asks whether the camera's own block is solid, which a
+    /// camera sitting a centimetre off a wall face passes just as happily as
+    /// one sitting a metre off it. `CAMERA_SKIN` is the promise: a quarter of
+    /// a block of air between the lens and whatever it pulled in against.
+    /// Sweeping the yaw inside a tight room is where the old clamp used to
+    /// break it — the floor overruled the wall and put the lens inside the
+    /// stone — so that is where the promise gets checked.
+    #[test]
+    fn the_orbit_camera_keeps_its_whole_skin_off_every_wall() {
+        let mut world = world();
+        let ground = world.surface_y(0, 0).unwrap();
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        let floor = ground + 1;
+
+        // A closed room three blocks across, so every yaw finds a wall well
+        // inside THIRD_PERSON_DISTANCE.
+        for x in -3i32..=3 {
+            for z in -3i32..=3 {
+                for y in floor..=floor + 4 {
+                    let shell = x.abs() == 3 || z.abs() == 3 || y == floor || y == floor + 4;
+                    world.set_block(
+                        BlockPos::new(x, y, z),
+                        if shell { stone } else { vx_core::BlockId::AIR },
+                    );
+                }
+            }
+        }
+
+        let pivot = DVec3::new(0.5, floor as f64 + 1.6, 0.5);
+        let mut pulled_in = 0;
+        for step in 0..64 {
+            let yaw = step as f32 * std::f32::consts::TAU / 64.0;
+            for pitch in [-0.4f32, 0.0, 0.4] {
+                let camera = camera_looking(yaw, pitch);
+                let anchor = pivot + DVec3::Y * THIRD_PERSON_LIFT as f64;
+                let back = -camera.forward();
+                match clear_orbit_distance(&world, anchor, back, THIRD_PERSON_DISTANCE) {
+                    Some(distance) => {
+                        pulled_in += 1;
+                        // There is a whole skin of air past where the lens
+                        // sits: a ray that far and a hair further finds
+                        // nothing.
+                        let reach = distance + CAMERA_SKIN - 1.0e-3;
+                        assert!(
+                            vx_world::raycast_solid(
+                                &world,
+                                world.registry(),
+                                anchor,
+                                back,
+                                reach
+                            )
+                            .is_none(),
+                            "only {distance} of clear air at yaw {yaw}, pitch {pitch}:                              the lens is inside its own skin"
+                        );
+                        assert!(
+                            distance >= MIN_ORBIT_DISTANCE,
+                            "orbited closer than the floor at yaw {yaw}"
+                        );
+                    }
+                    None => {
+                        let placed =
+                            camera_placement(&world, &camera, pivot, ViewMode::ThirdPerson);
+                        assert_eq!(placed, pivot, "a refused orbit did not fall back to the eye");
+                    }
+                }
+            }
+        }
+
+        assert!(pulled_in > 0, "no yaw in a three-block room pulled the camera in");
     }
 
     #[test]

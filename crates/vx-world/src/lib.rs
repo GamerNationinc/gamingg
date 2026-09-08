@@ -38,7 +38,7 @@ pub use noise::Fbm;
 pub use ore::{deposits_overlapping, ore_at, Deposit, OreKind};
 pub use physics::{
     collides, step_aabb, supported, Aabb, MoveParams, PlayerBody, StepResult, GRAVITY, INSET,
-    JUMP_SPEED, STEP_HEIGHT, SUBSTEPS, TERMINAL_VELOCITY,
+    JUMP_SPEED, SKIN, STEP_HEIGHT, SUBSTEPS, TERMINAL_VELOCITY,
 };
 pub use raycast::{raycast, raycast_solid, RayHit};
 pub use save::{SaveError, WorldSave};

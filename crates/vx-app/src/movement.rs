@@ -573,7 +573,7 @@ impl Movement {
         mass: f32,
         dt: f32,
     ) {
-        if self.advance_mantle(body, dt) {
+        if self.advance_mantle(body, world, dt) {
             return;
         }
 
@@ -651,21 +651,47 @@ impl Movement {
     /// A mantle is the one state that is not ordinary physics: the integrator is
     /// suspended and the box is walked along a fixed arc. Keeping it the only
     /// exception is what stops the rest from becoming special cases.
-    fn advance_mantle(&mut self, body: &mut PlayerBody, dt: f32) -> bool {
+    fn advance_mantle(&mut self, body: &mut PlayerBody, world: &World, dt: f32) -> bool {
         let Stance::Mantling { from, to, t, span } = self.stance else {
             return false;
         };
         let _ = dt;
         let next = t + 1;
         let progress = next as f64 / span as f64;
-        // Up first, then across: the shape of pulling yourself over an edge.
-        let lift = progress.min(0.6) / 0.6;
-        let reach = ((progress - 0.4).max(0.0)) / 0.6;
-        body.position = DVec3::new(
+        // Up first, then across: the shape of pulling yourself over an edge,
+        // and now literally that rather than nearly it. The two phases used
+        // to overlap between 0.4 and 0.6 — rising while already moving in —
+        // and that overlap is exactly the window where the hull cut the
+        // corner of the block being climbed. Separating them costs nothing
+        // (the same span, the same endpoints) and is what makes the arc
+        // survive the collision check below.
+        let lift = (progress / 0.5).min(1.0);
+        let reach = ((progress - 0.5).max(0.0)) / 0.5;
+        let step = DVec3::new(
             from.x + (to.x - from.x) * reach,
             from.y + (to.y - from.y) * lift,
             from.z + (to.z - from.z) * reach,
         );
+
+        // The arc is validated at every step, not only at its destination.
+        //
+        // This is the one state that is not ordinary physics — the integrator
+        // is suspended and the box is walked along a fixed curve — and until
+        // now that meant *no collision query at all*. `classify_ledge` checks
+        // where a mantle lands and nothing checks where it goes, so between
+        // the lift and the reach the hull passed straight through the block
+        // it was climbing: about six tenths of a second with the eye inside
+        // solid rock. The exception was meant to be the integrator, not the
+        // geometry.
+        if collides(world, &Aabb::standing_on(step, body.width, body.height)) {
+            // Blocked mid-arc. Stop where the last clear step left the body
+            // rather than pressing on through: it reads as a hand slipping,
+            // and it is the same thing the sweep would have done.
+            self.stance = Stance::Airborne { coyote: 0 };
+            body.velocity = DVec3::ZERO;
+            return true;
+        }
+        body.position = step;
         body.velocity = DVec3::ZERO;
 
         if next >= span {
@@ -754,9 +780,15 @@ impl Movement {
     }
 
     fn headroom(&self, world: &World, body: &PlayerBody, height: f32) -> bool {
+        // The skin, like everywhere else the physics touches a plane. Without
+        // it a body could stand up with its head *exactly* on the ceiling
+        // plane — not colliding, thanks to the inset in the block query, but
+        // with none of the millimetre the sweep leaves against every other
+        // surface. That is the one place in the system where the margin was
+        // zero rather than `SKIN`.
         !collides(
             world,
-            &Aabb::standing_on(body.position, body.width, height as f64),
+            &Aabb::standing_on(body.position, body.width, height as f64 + vx_world::SKIN),
         )
     }
 
@@ -1143,6 +1175,80 @@ mod tests {
             body.position.y
         );
         assert!(!collides(&world, &body.aabb()));
+    }
+
+    /// The mantle is the one state that is not ordinary physics, and until
+    /// stage 47 that meant it ran with *no collision query at all*: the box
+    /// was walked along a fixed arc and only the destination had ever been
+    /// checked. For about six tenths of a second per ledge the hull — and the
+    /// eye inside it — passed through the block being climbed. This is the
+    /// test that would have caught it: not "did it end up somewhere legal",
+    /// but "was it ever anywhere illegal".
+    #[test]
+    fn a_mantle_never_puts_the_hull_inside_the_ledge_it_climbs() {
+        let mut world = flat_world();
+        let stone = stone_of(&world);
+        // A two-block bench: too tall to walk or vault, exactly what a mantle
+        // is for.
+        for x in 8..32 {
+            for z in -5..15 {
+                for y in 41..43 {
+                    world.set_block(BlockPos::new(x, y, z), stone);
+                }
+            }
+        }
+
+        let mut body = standing(5.0, 4.5);
+        let mut movement = Movement::default();
+        let climb = MoveCommand::looking(FWD | JUMP, facing_plus_x(), 0.0);
+        let mut mantled = false;
+        for tick in 0..192 {
+            movement.advance(&mut body, &world, climb, 1.0, MOVE_TICK);
+            mantled |= matches!(movement.stance, Stance::Mantling { .. });
+            assert!(
+                !collides(&world, &body.aabb()),
+                "tick {tick}: hull inside the ledge at {:?} as {:?}",
+                body.position,
+                movement.stance
+            );
+        }
+
+        assert!(mantled, "never mantled, so the arc was never exercised");
+        assert!(
+            body.position.y > 42.5,
+            "never got up the bench: ended at y={}",
+            body.position.y
+        );
+    }
+
+    /// Standing up is the other place the margin was zero. `headroom` asked
+    /// whether the taller hull *collides*, and thanks to the inset in the
+    /// block query a head resting exactly on the ceiling plane does not — so
+    /// the one gesture in the game that grows the hull was also the one that
+    /// left it no room at all. The boundary is now `SKIN` below the plane,
+    /// like every other surface the body meets.
+    #[test]
+    fn standing_up_under_a_ceiling_keeps_the_skin() {
+        let mut world = flat_world();
+        let stone = stone_of(&world);
+        for x in 0..10 {
+            for z in 0..10 {
+                world.set_block(BlockPos::new(x, 43, z), stone);
+            }
+        }
+
+        let body = standing(4.5, 4.5);
+        let movement = Movement::default();
+        // Feet at 41, the ceiling's underside at 43: two blocks of gap.
+        let gap = 43.0 - body.position.y;
+        assert!(
+            !movement.headroom(&world, &body, gap as f32),
+            "a hull exactly filling the gap was allowed to stand"
+        );
+        assert!(
+            movement.headroom(&world, &body, (gap - vx_world::SKIN) as f32),
+            "a hull a skin short of the gap was refused"
+        );
     }
 
     #[test]

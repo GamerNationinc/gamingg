@@ -73,7 +73,14 @@ pub const SUBSTEPS: u32 = 4;
 
 /// Kept between the body and the blocks it rests against, so a body snapped
 /// flush to a grid line is not counted as intersecting what is past it.
-const SKIN: f64 = 1.0e-3;
+///
+/// Public since stage 47: it is the margin the whole system promises, and
+/// callers outside this crate — `movement`'s headroom check, and the tests
+/// that assert the promise is kept — have to be able to name it. Every
+/// "not inside a block" test in this file is a *binary* predicate; none of
+/// them said how much room was left, which is how the two paths that
+/// bypassed the sweep entirely went unnoticed for twenty stages.
+pub const SKIN: f64 = 1.0e-3;
 
 /// How far past a grid line a box may reach before it claims the block there.
 ///
@@ -147,13 +154,23 @@ impl Aabb {
 
     /// Every block position this box overlaps.
     ///
-    /// The upper bound is nudged inward so a box whose face lies exactly on a
-    /// grid line does not claim the block on the far side of it.
+    /// Both bounds are nudged inward by [`INSET`], so a box whose face lies on
+    /// a grid line — or reaches less than a hundredth of a millimetre past one
+    /// — does not claim the block beyond it.
+    ///
+    /// The nudge used to be on `max` alone, which meant the box's two ends
+    /// answered the same question differently: a face resting exactly on a
+    /// line was outside the far block going up, and inside the near block
+    /// going down. Nothing depended on the difference, because every caller
+    /// only ever asked the binary question; but the moment stage 47 started
+    /// asserting *how much* room the sweep leaves, an asymmetric predicate
+    /// meant the margin was `SKIN` on one face of the hull and `SKIN` minus a
+    /// grid line's worth of luck on the other.
     pub fn overlapping_blocks(&self) -> impl Iterator<Item = BlockPos> + '_ {
         let lo = [
-            self.min.x.floor() as i32,
-            self.min.y.floor() as i32,
-            self.min.z.floor() as i32,
+            (self.min.x + INSET).floor() as i32,
+            (self.min.y + INSET).floor() as i32,
+            (self.min.z + INSET).floor() as i32,
         ];
         let hi = [
             (self.max.x - INSET).floor() as i32,
@@ -682,6 +699,73 @@ mod tests {
         };
         let blocks: Vec<_> = aabb.overlapping_blocks().collect();
         assert_eq!(blocks, vec![BlockPos::new(0, 0, 0)]);
+    }
+
+    #[test]
+    fn the_block_query_is_symmetric_at_both_ends() {
+        // A box that pokes less than INSET past a line does not claim what is
+        // beyond it, whichever end of the box did the poking. Before stage 47
+        // only the upper end was nudged, so the same hair of overlap was
+        // ignored going up and honoured going down.
+        let half = INSET * 0.5;
+        let aabb = Aabb {
+            min: DVec3::new(1.0 - half, 1.0 - half, 1.0 - half),
+            max: DVec3::new(2.0 + half, 2.0 + half, 2.0 + half),
+        };
+        let blocks: Vec<_> = aabb.overlapping_blocks().collect();
+        assert_eq!(
+            blocks,
+            vec![BlockPos::new(1, 1, 1)],
+            "the query is not symmetric: {blocks:?}"
+        );
+
+        // And a real overlap, on either end, is still an overlap.
+        let low = aabb.translated(DVec3::splat(-INSET * 4.0));
+        assert!(low.overlapping_blocks().any(|b| b == BlockPos::new(0, 0, 0)));
+        let high = aabb.translated(DVec3::splat(INSET * 4.0));
+        assert!(high.overlapping_blocks().any(|b| b == BlockPos::new(2, 2, 2)));
+    }
+
+    /// The margin, asserted rather than assumed.
+    ///
+    /// Every collision test in this file is a *binary* predicate — inside a
+    /// block or not — and for twenty stages that is all any test checked.
+    /// `SKIN` is the promise the sweep actually makes: a body stopped by a
+    /// surface rests exactly a millimetre off it, not "somewhere that does
+    /// not collide". A margin of zero passes `collides` and still reads, on
+    /// screen, as standing in the wall.
+    #[test]
+    fn walking_into_a_wall_leaves_exactly_the_skin() {
+        let mut world = flat_world();
+        let stone = world.registry().id_of("engine:stone").unwrap();
+        for y in 41..43 {
+            for z in -10..20 {
+                world.set_block(BlockPos::new(8, y, z), stone);
+            }
+        }
+
+        let mut body = body_at(4.5, 41.0, 4.5);
+        settle(&mut body, &world, 30);
+        for _ in 0..240 {
+            body.step(&world, DVec3::new(6.0, 0.0, 0.0), 1.0 / 60.0);
+        }
+
+        // The wall's near face is the grid line x=8.
+        let gap = 8.0 - body.aabb().max.x;
+        assert!(
+            (gap - SKIN).abs() < 1.0e-9,
+            "rested {gap} from the wall face, wanted exactly {SKIN}"
+        );
+
+        // And the same on the floor it has been standing on the whole time:
+        // a floor is a wall you fell onto.
+        let mut floored = body_at(4.5, 60.0, 4.5);
+        settle(&mut floored, &world, 300);
+        let drop = floored.aabb().min.y - 41.0;
+        assert!(
+            (drop - SKIN).abs() < 1.0e-9,
+            "settled {drop} above the floor, wanted exactly {SKIN}"
+        );
     }
 
     #[test]
