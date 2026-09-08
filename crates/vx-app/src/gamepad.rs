@@ -26,7 +26,7 @@
 //! container) leaves a `Pad` that polls nothing, forever. Input must never
 //! be the reason the game cannot start.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use gilrs::{Axis, Button, EventType, Gilrs};
 use winit::keyboard::KeyCode;
@@ -61,8 +61,20 @@ pub struct Pad {
     /// context can change mid-hold, and a remap between press and release
     /// would leak a stuck key.
     pub down: HashMap<Button, KeyCode>,
+    /// Modifiers physically held right now — `SELECT` and `LB`. Kept apart
+    /// from `down` because a modifier is a *layer*, not a key: it resolves
+    /// to nothing until it is let go, and then only if it was never used.
+    pub held: HashSet<Button>,
+    /// Modifiers that had a button pressed under them. A used modifier was
+    /// a hold; an unused one was a tap, and a tap has its own action.
+    pub used: HashSet<Button>,
     /// Whether the control-scheme overlay is up.
     pub help: bool,
+    /// Seconds until the held stick moves a panel's cursor again.
+    pub repeat: f32,
+    /// Whether the stick has just been pushed, so the first step waits
+    /// longer than the ones that follow — the keyboard's own repeat shape.
+    pub fresh: bool,
 }
 
 impl Pad {
@@ -81,6 +93,10 @@ impl Pad {
             left: (0.0, 0.0),
             right: (0.0, 0.0),
             down: HashMap::new(),
+            held: HashSet::new(),
+            used: HashSet::new(),
+            repeat: 0.0,
+            fresh: true,
             help: false,
         }
     }
@@ -141,18 +157,86 @@ fn deadzoned(raw: (f32, f32)) -> (f32, f32) {
     (raw.0 * scale, raw.1 * scale)
 }
 
-/// What a button means: the key it presses. `panel` is whether any panel
-/// owns the screen — the one bit of context the mapping needs.
+/// Which layer the pad is on. The mapping's whole context.
 ///
-/// `Select` is absent on purpose (it toggles the help overlay in `main`,
-/// not a key), and so are the analog triggers (they mirror the mouse
-/// buttons, which have no `KeyCode` to resolve to).
-pub fn key_for(button: Button, panel: bool) -> Option<KeyCode> {
-    if panel {
-        return match button {
+/// Stage 24 shipped this as one bit — panel or world — which was enough
+/// when the pad only had to reach the things a hand finds without looking.
+/// It is not enough to *play* from: a live machine feed is not a panel and
+/// not the world, and the pad had no way out of one; and thirteen buttons
+/// cannot name twenty actions without a modifier. Both are layers, so both
+/// are this enum rather than a second input path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Context {
+    /// Walking about, nothing owning the screen.
+    World,
+    /// `SELECT` held: the world's second layer, for everything that does not
+    /// fit on a face button and does not need to be fast.
+    Second,
+    /// `LB` held: the block palette, one slot per direction.
+    Palette,
+    /// A panel owns the screen. South confirms, east backs out.
+    Panel,
+    /// Looking through a machine. Neither a panel nor the world — the
+    /// mistake this enum exists to fix, because there was no way to hang up.
+    Feed,
+}
+
+/// What a button means on a given layer: the key it presses.
+///
+/// `Select` and `LeftTrigger` are absent from [`Context::World`] on purpose —
+/// they are the two modifiers, and `main` decides on release whether a tap
+/// meant the help panel or a view change. The analog triggers are absent
+/// everywhere: they mirror the mouse buttons, which have no `KeyCode`.
+pub fn key_for(button: Button, context: Context) -> Option<KeyCode> {
+    match context {
+        Context::World => match button {
+            Button::South => Some(KeyCode::Space),
+            Button::East => Some(KeyCode::ShiftLeft),
+            Button::West => Some(KeyCode::KeyE),
+            Button::North => Some(KeyCode::KeyV),
+            Button::RightTrigger => Some(KeyCode::Tab),
+            Button::LeftThumb => Some(KeyCode::ControlLeft),
+            Button::RightThumb => Some(KeyCode::KeyL),
+            Button::DPadUp => Some(KeyCode::KeyM),
+            Button::DPadDown => Some(KeyCode::KeyN),
+            // The minimap is always up, so zoom earns the two directions
+            // scan and fly used to hold. Both moved to the second layer.
+            Button::DPadLeft => Some(KeyCode::BracketLeft),
+            Button::DPadRight => Some(KeyCode::BracketRight),
+            Button::Start => Some(KeyCode::Enter),
+            _ => None,
+        },
+        // Everything a hand does not need in a hurry.
+        Context::Second => match button {
+            Button::North => Some(KeyCode::KeyT),
+            Button::South => Some(KeyCode::KeyZ),
+            Button::West => Some(KeyCode::F10),
+            Button::East => Some(KeyCode::Backspace),
+            Button::DPadUp => Some(KeyCode::F3),
+            Button::DPadDown => Some(KeyCode::F5),
+            Button::DPadLeft => Some(KeyCode::KeyG),
+            Button::DPadRight => Some(KeyCode::KeyF),
+            _ => None,
+        },
+        // Ten slots, ten controls, no cursor: the palette is muscle memory
+        // or it is nothing.
+        Context::Palette => match button {
+            Button::DPadUp => Some(KeyCode::Digit1),
+            Button::DPadRight => Some(KeyCode::Digit2),
+            Button::DPadDown => Some(KeyCode::Digit3),
+            Button::DPadLeft => Some(KeyCode::Digit4),
+            Button::North => Some(KeyCode::Digit5),
+            Button::East => Some(KeyCode::Digit6),
+            Button::South => Some(KeyCode::Digit7),
+            Button::West => Some(KeyCode::Digit8),
+            Button::RightTrigger => Some(KeyCode::Digit9),
+            Button::RightThumb => Some(KeyCode::Digit0),
+            _ => None,
+        },
+        Context::Panel => match button {
             // Console convention: south confirms, east backs out. Every
             // panel already closes on Escape, which is what makes one
-            // mapping serve eleven panels.
+            // mapping serve fourteen panels.
             Button::South => Some(KeyCode::Enter),
             Button::East => Some(KeyCode::Escape),
             Button::West => Some(KeyCode::KeyE),
@@ -162,30 +246,84 @@ pub fn key_for(button: Button, panel: bool) -> Option<KeyCode> {
             Button::DPadLeft => Some(KeyCode::ArrowLeft),
             Button::DPadRight => Some(KeyCode::ArrowRight),
             Button::Start => Some(KeyCode::Enter),
+            // The bumpers scroll, which is what the terminal's backlog and
+            // any long roster want.
+            Button::LeftTrigger => Some(KeyCode::PageUp),
+            Button::RightTrigger => Some(KeyCode::PageDown),
+            // Withdraw at a vault, delete in the terminal: the one verb a
+            // pad could not reach at all, and the reason you could put money
+            // into a strongroom but never take it out.
+            Button::LeftThumb => Some(KeyCode::Backspace),
+            // Reset a tunable on the operator console.
+            Button::RightThumb => Some(KeyCode::KeyX),
             _ => None,
-        };
-    }
-    match button {
-        Button::South => Some(KeyCode::Space),
-        Button::East => Some(KeyCode::ShiftLeft),
-        Button::West => Some(KeyCode::KeyE),
-        Button::North => Some(KeyCode::KeyV),
-        Button::LeftTrigger => Some(KeyCode::KeyC),
-        Button::RightTrigger => Some(KeyCode::Tab),
-        Button::LeftThumb => Some(KeyCode::ControlLeft),
-        Button::RightThumb => Some(KeyCode::KeyL),
-        Button::DPadUp => Some(KeyCode::KeyM),
-        Button::DPadDown => Some(KeyCode::KeyN),
-        Button::DPadLeft => Some(KeyCode::KeyG),
-        Button::DPadRight => Some(KeyCode::KeyF),
-        Button::Start => Some(KeyCode::Enter),
-        _ => None,
+        },
+        Context::Feed => match button {
+            // The fix this enum was written for: a feed is not a panel, so
+            // the pad was in world context and east was *crouch*. There was
+            // no button that hung up.
+            Button::East => Some(KeyCode::Escape),
+            Button::North => Some(KeyCode::KeyR),
+            Button::West => Some(KeyCode::KeyV),
+            // A flier climbs and descends on the same axes a body does.
+            Button::South => Some(KeyCode::Space),
+            Button::DPadUp => Some(KeyCode::Space),
+            Button::DPadDown => Some(KeyCode::ShiftLeft),
+            Button::LeftThumb => Some(KeyCode::ShiftLeft),
+            Button::RightThumb => Some(KeyCode::KeyL),
+            Button::RightTrigger => Some(KeyCode::Tab),
+            Button::Start => Some(KeyCode::Enter),
+            _ => None,
+        },
     }
 }
 
+/// Keys the pad reaches through no button on any layer, and why.
+///
+/// An explicit list rather than an absence, so
+/// [`tests::every_binding_the_game_has_is_reachable_from_the_pad`] can hold
+/// the door shut: a new keyboard binding with no pad path fails the build
+/// unless somebody writes down here that it is deliberate.
+/// What the two modifiers do when *tapped* rather than held.
+///
+/// `main` produces these on release, never `key_for`: whether a hold was a
+/// hold is only knowable once the button comes back up, so the mapping
+/// cannot answer for them. Declared here so the reachability test can see
+/// the whole surface rather than only the half that resolves to a key.
+pub const TAPS: [(Button, Option<KeyCode>, &str); 2] = [
+    (Button::Select, None, "shows the control scheme"),
+    (Button::LeftTrigger, Some(KeyCode::KeyC), "first or third person"),
+];
+
+// Read by the reachability test rather than by the game: it is a statement
+// about the mapping, and the mapping is what it guards.
+#[allow(dead_code)]
+pub const NOT_ON_THE_PAD: [(KeyCode, &str); 4] = [
+    (KeyCode::Escape, "world context: the pad never captures the mouse, so it has nothing to release"),
+    (KeyCode::Home, "terminal caret: the on-screen keyboard carries it"),
+    (KeyCode::End, "terminal caret: the on-screen keyboard carries it"),
+    (KeyCode::Delete, "terminal edit: backspace is the pad's delete, on the left stick's click"),
+];
+
+/// How far the stick must lean to walk a panel's cursor. Higher than the
+/// walk threshold: a menu should not scroll because a thumb rested.
+pub const CURSOR_TILT: f32 = 0.5;
+
+/// Seconds before a held stick repeats the first time, and after.
+pub const REPEAT_FIRST: f32 = 0.35;
+pub const REPEAT_AGAIN: f32 = 0.09;
+
+/// How far the help overlay is blown up on screen.
+///
+/// Its own number rather than the shop's: the scheme grew from sixteen rows
+/// to thirty-eight when the pad learned to reach everything, and at the
+/// shop's doubling it stood a thousand pixels tall on a seven-hundred-pixel
+/// screen — the top of the list off the top of the world.
+pub const PAD_SCALE: f32 = 1.4;
+
 /// The help overlay's size in texture pixels.
-pub const PAD_WIDTH: u32 = 300;
-pub const PAD_HEIGHT: u32 = 232;
+pub const PAD_WIDTH: u32 = 320;
+pub const PAD_HEIGHT: u32 = 500;
 
 const TEXT: [u8; 4] = [235, 235, 235, 255];
 const DIM: [u8; 4] = [150, 150, 155, 255];
@@ -193,24 +331,52 @@ const ACCENT: [u8; 4] = [255, 170, 60, 255];
 const BACKGROUND: [u8; 4] = [10, 12, 16, 240];
 
 /// The control scheme, written for the player. One row per physical
-/// control, in the order a hand finds them. Tested drawable.
-pub const SCHEME: [(&str, &str); 16] = [
+/// control, in the order a hand finds them, grouped by layer. A row whose
+/// control is empty is a heading. Tested drawable.
+pub const SCHEME: [(&str, &str); 34] = [
+    ("", "ON FOOT"),
     ("LEFT STICK", "MOVE, CLICK TO SPRINT"),
     ("RIGHT STICK", "LOOK, CLICK FOR OPTICS"),
     ("RT", "DRILL, OR FIRE"),
     ("LT", "PLACE THE SELECTED BLOCK"),
-    ("A", "JUMP - IN PANELS, CONFIRM"),
-    ("B", "CROUCH - IN PANELS, BACK OUT"),
+    ("A", "JUMP"),
+    ("B", "CROUCH"),
     ("X", "USE, TRADE, TALK"),
     ("Y", "THE HANDHELD UPLINK"),
-    ("LB", "FIRST OR THIRD PERSON"),
-    ("RB", "TURN THE PAGE, CYCLE THE METHOD"),
+    ("LB", "TAP: FIRST OR THIRD PERSON"),
+    ("RB", "CYCLE THE MINING METHOD"),
     ("D-PAD UP", "MARK AN ORE CORNER"),
     ("D-PAD DOWN", "THE MINIMAP"),
+    ("D-PAD L/R", "ZOOM THE MAP"),
+    ("START", "DISPATCH, OR PICK A LOCK"),
+    ("", "HOLD LB - THE PALETTE"),
+    ("D-PAD", "SLOTS ONE TO FOUR"),
+    ("FACE", "SLOTS FIVE TO EIGHT"),
+    ("RB, R-STICK", "SLOT NINE, SLOT TEN"),
+    ("", "HOLD SELECT - THE SECOND LAYER"),
+    ("Y", "THE TERMINAL"),
+    ("A", "GO PRONE"),
+    ("B", "WITHDRAW AT A VAULT"),
     ("D-PAD LEFT", "SCAN THIS SECTOR"),
     ("D-PAD RIGHT", "WALK OR FLY"),
-    ("START", "CONFIRM, DISPATCH, PICK"),
-    ("SELECT", "THIS PANEL"),
+    ("D-PAD UP", "THE DEBUG READOUT"),
+    ("D-PAD DOWN", "SAVE THE WORLD"),
+    ("SELECT", "TAP: THIS PANEL"),
+    ("", "IN A PANEL"),
+    ("A, B", "CONFIRM, BACK OUT"),
+    ("D-PAD", "MOVE THE CURSOR"),
+    ("Y", "TURN THE PAGE"),
+    ("LB, RB", "SCROLL THE BACKLOG"),
+    ("", "LOOKING THROUGH A MACHINE"),
+];
+
+/// The feed layer's rows, kept out of [`SCHEME`] only because the array is
+/// already the height of the panel. Drawn under it.
+pub const FEED_SCHEME: [(&str, &str); 4] = [
+    ("B", "HANG UP"),
+    ("Y", "TAKE OR HAND BACK THE WHEEL"),
+    ("X", "BACK TO THE ROSTER"),
+    ("A, L-STICK", "CLIMB, DESCEND"),
 ];
 
 /// Draw the control scheme. Pure, like every panel here.
@@ -225,9 +391,15 @@ pub fn render_pad_help() -> Vec<u8> {
     font::draw_text(&mut pixels, PAD_WIDTH, margin, y, 1, ACCENT, "CONTROLLER");
     y += LINE_HEIGHT as i32 + 4;
 
-    for (control, does) in SCHEME {
-        font::draw_text(&mut pixels, PAD_WIDTH, margin, y, 1, DIM, control);
-        font::draw_text(&mut pixels, PAD_WIDTH, margin + 76, y, 1, TEXT, does);
+    for (control, does) in SCHEME.iter().chain(FEED_SCHEME.iter()) {
+        if control.is_empty() {
+            // A heading: the layer this block of rows belongs to.
+            y += 4;
+            font::draw_text(&mut pixels, PAD_WIDTH, margin, y, 1, ACCENT, does);
+        } else {
+            font::draw_text(&mut pixels, PAD_WIDTH, margin, y, 1, DIM, control);
+            font::draw_text(&mut pixels, PAD_WIDTH, margin + 84, y, 1, TEXT, does);
+        }
         y += LINE_HEIGHT as i32;
     }
     pixels
@@ -262,56 +434,143 @@ mod tests {
     fn confirm_and_back_out_swap_when_a_panel_opens() {
         // The console convention, pinned: in the world south is jump; with
         // a panel up it is confirm, and east is the way out.
-        assert_eq!(key_for(Button::South, false), Some(KeyCode::Space));
-        assert_eq!(key_for(Button::South, true), Some(KeyCode::Enter));
-        assert_eq!(key_for(Button::East, true), Some(KeyCode::Escape));
+        assert_eq!(key_for(Button::South, Context::World), Some(KeyCode::Space));
+        assert_eq!(key_for(Button::South, Context::Panel), Some(KeyCode::Enter));
+        assert_eq!(key_for(Button::East, Context::Panel), Some(KeyCode::Escape));
         // The d-pad turns into the arrows every panel lists with.
-        assert_eq!(key_for(Button::DPadUp, true), Some(KeyCode::ArrowUp));
+        assert_eq!(key_for(Button::DPadUp, Context::Panel), Some(KeyCode::ArrowUp));
+    }
+
+    /// **A feed can be hung up.** Stage 24's mapping had one bit of context,
+    /// and a live machine feed is neither a panel nor the world: the pad sat
+    /// in world context, east was *crouch*, and no button on the pad ended
+    /// the feed. You could fly a drone and never get your own eyes back.
+    #[test]
+    fn a_machine_feed_can_be_hung_up_from_the_pad() {
+        assert_eq!(key_for(Button::East, Context::Feed), Some(KeyCode::Escape));
+        assert_ne!(key_for(Button::East, Context::Feed), key_for(Button::East, Context::World));
+        // And the wheel is takeable, which was the other feed-only verb no
+        // button produced.
+        assert_eq!(key_for(Button::North, Context::Feed), Some(KeyCode::KeyR));
     }
 
     #[test]
-    fn every_mapped_button_resolves_in_both_contexts_or_neither_deliberately() {
-        // Buttons that act in the world keep acting in panels (possibly as
-        // something else) except the deliberate exceptions — a button that
-        // silently dies when a panel opens reads as a broken pad.
-        let world_only = [
-            Button::LeftTrigger,
-            Button::RightTrigger,
-            Button::LeftThumb,
-            Button::RightThumb,
+    fn the_modifier_layers_do_not_collide_with_the_layer_under_them() {
+        // A held modifier must change what a button means, or holding it
+        // is a lie. Every button the palette and the second layer claim
+        // reads differently from the world layer beneath.
+        for button in [Button::DPadUp, Button::DPadDown, Button::DPadLeft, Button::DPadRight] {
+            let world = key_for(button, Context::World);
+            assert_ne!(key_for(button, Context::Palette), world, "{button:?} unchanged on the palette");
+            assert_ne!(key_for(button, Context::Second), world, "{button:?} unchanged on the second layer");
+        }
+        // Ten palette slots, ten distinct keys.
+        let slots: Vec<KeyCode> = [
+            Button::DPadUp, Button::DPadRight, Button::DPadDown, Button::DPadLeft,
+            Button::North, Button::East, Button::South, Button::West,
+            Button::RightTrigger, Button::RightThumb,
+        ]
+        .into_iter()
+        .filter_map(|button| key_for(button, Context::Palette))
+        .collect();
+        assert_eq!(slots.len(), 10, "the palette lost a slot");
+        let unique: std::collections::BTreeSet<_> = slots.iter().collect();
+        assert_eq!(unique.len(), 10, "two palette slots pick the same block");
+    }
+
+    /// **Every key the game binds is reachable from the pad.** The round's
+    /// whole claim, as a list: a keyboard binding with no pad path fails
+    /// here unless somebody writes it into [`NOT_ON_THE_PAD`] with a reason.
+    #[test]
+    fn every_binding_the_game_has_is_reachable_from_the_pad() {
+        // Every `KeyCode` `handle_press` and the movement sampler act on.
+        let bound = [
+            KeyCode::KeyE, KeyCode::KeyF, KeyCode::KeyV, KeyCode::KeyC, KeyCode::KeyT,
+            KeyCode::KeyL, KeyCode::KeyM, KeyCode::KeyN, KeyCode::KeyG, KeyCode::KeyR,
+            KeyCode::KeyX, KeyCode::KeyZ, KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA,
+            KeyCode::KeyD, KeyCode::KeyQ,
+            KeyCode::Space, KeyCode::ShiftLeft, KeyCode::ControlLeft,
+            KeyCode::Tab, KeyCode::Enter, KeyCode::Escape, KeyCode::Backspace,
+            KeyCode::Delete, KeyCode::Home, KeyCode::End,
+            KeyCode::PageUp, KeyCode::PageDown,
+            KeyCode::ArrowUp, KeyCode::ArrowDown, KeyCode::ArrowLeft, KeyCode::ArrowRight,
+            KeyCode::BracketLeft, KeyCode::BracketRight,
+            KeyCode::F3, KeyCode::F5, KeyCode::F10,
+            KeyCode::Digit0, KeyCode::Digit1, KeyCode::Digit2, KeyCode::Digit3,
+            KeyCode::Digit4, KeyCode::Digit5, KeyCode::Digit6, KeyCode::Digit7,
+            KeyCode::Digit8, KeyCode::Digit9,
         ];
+        // The four movement keys and the arcade's strafe are the stick's,
+        // not a button's: `WalkController::sample` and the arcade read the
+        // axes directly, so they are reachable without resolving to a key.
+        let on_the_stick = [
+            KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA, KeyCode::KeyD, KeyCode::KeyQ,
+        ];
+        let every_context = [
+            Context::World, Context::Second, Context::Palette, Context::Panel, Context::Feed,
+        ];
+        let every_button = [
+            Button::South, Button::East, Button::West, Button::North,
+            Button::LeftTrigger, Button::RightTrigger,
+            Button::LeftThumb, Button::RightThumb,
+            Button::DPadUp, Button::DPadDown, Button::DPadLeft, Button::DPadRight,
+            Button::Start, Button::Select,
+        ];
+        for key in bound {
+            if on_the_stick.contains(&key) {
+                continue;
+            }
+            if NOT_ON_THE_PAD.iter().any(|(excused, _)| *excused == key) {
+                continue;
+            }
+            let reachable = every_context.iter().any(|context| {
+                every_button
+                    .iter()
+                    .any(|button| key_for(*button, *context) == Some(key))
+            }) || TAPS.iter().any(|(_, tap, _)| *tap == Some(key));
+            assert!(reachable, "{key:?} is bound but no pad button reaches it");
+        }
+        // And the excuses are real: nothing in the list is secretly mapped.
+        for (excused, reason) in NOT_ON_THE_PAD {
+            assert!(!reason.is_empty(), "{excused:?} is excused without a reason");
+        }
+    }
+
+    #[test]
+    fn every_mapped_button_resolves_in_the_world_and_in_panels() {
+        // A button that silently dies when a panel opens reads as a broken
+        // pad. The two modifiers are `main`'s own and resolve to no key.
         for button in [
-            Button::South,
-            Button::East,
-            Button::West,
-            Button::North,
-            Button::DPadUp,
-            Button::DPadDown,
-            Button::DPadLeft,
-            Button::DPadRight,
+            Button::South, Button::East, Button::West, Button::North,
+            Button::DPadUp, Button::DPadDown, Button::DPadLeft, Button::DPadRight,
             Button::Start,
         ] {
-            assert!(key_for(button, false).is_some(), "{button:?} dead in the world");
-            assert!(key_for(button, true).is_some(), "{button:?} dead in panels");
+            assert!(key_for(button, Context::World).is_some(), "{button:?} dead in the world");
+            assert!(key_for(button, Context::Panel).is_some(), "{button:?} dead in panels");
         }
-        for button in world_only {
-            assert!(key_for(button, false).is_some());
+        // Select is main's own: tapped it is the help panel, held it is the
+        // second layer. It is never a key itself.
+        for context in [Context::World, Context::Panel, Context::Feed, Context::Second] {
+            assert_eq!(key_for(Button::Select, context), None);
         }
-        // Select is main's own: the help toggle, never a key.
-        assert_eq!(key_for(Button::Select, false), None);
-        assert_eq!(key_for(Button::Select, true), None);
+        // And LB is the palette modifier, so it is not a key in the world.
+        assert_eq!(key_for(Button::LeftTrigger, Context::World), None);
     }
 
     #[test]
     fn the_help_panel_is_drawable_and_deterministic() {
-        for (control, does) in SCHEME {
+        for (control, does) in SCHEME.iter().chain(FEED_SCHEME.iter()) {
             for character in control.chars().chain(does.chars()) {
                 assert!(font::knows(character), "undrawable {character:?}");
             }
         }
         assert_eq!(render_pad_help(), render_pad_help());
         // Every row fits the panel: the last row's baseline stays inside.
-        let rows = SCHEME.len() as u32 + 1;
-        assert!(rows * LINE_HEIGHT + 12 + 4 <= PAD_HEIGHT, "the scheme overflows the panel");
+        let rows = (SCHEME.len() + FEED_SCHEME.len()) as u32 + 1;
+        let headings = SCHEME.iter().filter(|(control, _)| control.is_empty()).count() as u32;
+        assert!(
+            rows * LINE_HEIGHT + headings * 4 + 12 + 4 <= PAD_HEIGHT,
+            "the scheme overflows the panel"
+        );
     }
 }

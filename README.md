@@ -224,7 +224,7 @@ build in it, and it survives quitting — skills included.
   motion sick, so they want individual toggles rather than arriving on by
   default.
 - Toggle-versus-hold for sprint, crouch and prone is not configurable, and input
-  is not remappable. There are no gamepad bindings at all.
+  is not remappable.
 - The third-person camera does not swing clear of the body during a slide, so a
   slide into a wall can fill the frame with your own back. An existing rough
   edge, now reachable at higher speed.
@@ -322,7 +322,7 @@ build in it, and it survives quitting — skills included.
 - One flier. The fleet is shaped for more; nothing exercises it.
 - No combat, health or hostiles. Piloting and NPC senses are the
   foundation they will stand on; neither is exercised by anything yet.
-- No inventory, no audio, and no gamepad support.
+- No inventory.
 
 ## Design notes
 
@@ -1422,21 +1422,41 @@ rule, so every panel, the shop, the map and the handheld all answer to the
 pad. The terminal still wants a keyboard for *typing*, but scrolls and
 closes from the pad.
 
-| Pad | Action |
+**Every binding is reachable, and there is a test that says so.** Thirteen
+buttons cannot name twenty actions, so two of them are *layers*: hold `LB`
+for the block palette, hold `SELECT` for everything a hand does not need in
+a hurry. Tap either and it does its own thing instead — `LB` swaps first and
+third person, `SELECT` raises the scheme. A test walks every `KeyCode` the
+game binds and fails the build if no button on any layer produces it, so a
+control added without a pad path cannot ship.
+
+| On foot | Action |
 |---|---|
 | Left stick | Move; click it to sprint |
 | Right stick | Look; click it to turn the optics dial |
 | `RT` | Drill / fire (hold) |
 | `LT` | Place the selected block |
-| `A` | Jump — with a panel open, confirm |
-| `B` | Crouch / descend — with a panel open, back out |
-| `X` | Use: trade, read, talk |
-| `Y` | The handheld uplink |
-| `LB` | First or third person |
-| `RB` | Turn the page / cycle the mining method |
-| D-pad | Mark ore, minimap, scan the sector, walk-or-fly — with a panel open, the arrows |
-| `Start` | Confirm / dispatch / hold to pick a lock |
-| `Select` | The control scheme overlay |
+| `A` `B` | Jump, crouch |
+| `X` `Y` | Use (trade, read, talk); the handheld uplink |
+| `LB` (tap) | First or third person |
+| `RB` | Cycle the mining method |
+| D-pad ↑↓ | Mark an ore corner; the minimap |
+| D-pad ←→ | Zoom the map |
+| `Start` | Dispatch / hold to pick a lock |
+
+| Hold `LB` — the palette | Hold `SELECT` — the second layer |
+|---|---|
+| D-pad: slots one to four | `Y` the terminal, `A` go prone |
+| Face buttons: slots five to eight | `B` withdraw at a vault |
+| `RB`, right stick: slots nine and ten | D-pad: scan, walk-or-fly, debug, save |
+
+| In a panel | Looking through a machine |
+|---|---|
+| `A` confirm, `B` back out | `B` **hang up** |
+| D-pad or left stick: the cursor | `Y` take or hand back the wheel |
+| `Y` turn the page | `X` back to the roster |
+| `LB` `RB` scroll the backlog | `A`, left stick: climb, descend |
+| Left stick click: withdraw, delete | |
 
 Building from source on Linux needs `libudev` headers for the pad backend
 (`libudev-dev` on Debian/Ubuntu, `systemd-devel` on Fedora).

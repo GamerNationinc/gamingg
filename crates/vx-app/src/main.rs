@@ -3922,8 +3922,8 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // The scheme panel, exactly as SELECT raises it in play — same
         // renderer, same table the tests hold drawable.
         let pixels = gamepad::render_pad_help();
-        let panel_width = gamepad::PAD_WIDTH as f32 * shop::SHOP_SCALE;
-        let panel_height = gamepad::PAD_HEIGHT as f32 * shop::SHOP_SCALE;
+        let panel_width = gamepad::PAD_WIDTH as f32 * gamepad::PAD_SCALE;
+        let panel_height = gamepad::PAD_HEIGHT as f32 * gamepad::PAD_SCALE;
         renderer.set_overlay(
             PAD_SLOT,
             &context.device,
@@ -4838,20 +4838,25 @@ impl App {
         }
 
         // The toy. Its controls are held keys read straight off the input
-        // state — the panel has released the pointer, and the pad's own
-        // panel mapping already turns buttons into these codes, so the Deck
-        // plays it without a line of new input code.
+        // state — plus the pad's sticks, because walk and strafe are `KeyW`,
+        // `KeyS` and `KeyQ`, and no button on a pad produces those. Stage 24
+        // claimed the panel mapping already reached the arcade; it did not,
+        // and the toy was unplayable on a Deck.
         if active.device.open && active.device.page == device::Page::Arcade {
+            let stick = self.input.pad_axes();
+            const TILT: f32 = 0.35;
             let held = arcade::Buttons {
-                forward: self.input.is_down(KeyCode::KeyW),
-                back: self.input.is_down(KeyCode::KeyS),
+                forward: self.input.is_down(KeyCode::KeyW) || stick.z > TILT,
+                back: self.input.is_down(KeyCode::KeyS) || stick.z < -TILT,
                 turn_left: self.input.is_down(KeyCode::KeyA)
-                    || self.input.is_down(KeyCode::ArrowLeft),
+                    || self.input.is_down(KeyCode::ArrowLeft)
+                    || self.pad.right_stick().0 < -TILT,
                 turn_right: self.input.is_down(KeyCode::KeyD)
-                    || self.input.is_down(KeyCode::ArrowRight),
-                strafe_left: self.input.is_down(KeyCode::KeyQ),
-                strafe_right: self.input.is_down(KeyCode::KeyE),
-                fire: self.input.is_down(KeyCode::Space),
+                    || self.input.is_down(KeyCode::ArrowRight)
+                    || self.pad.right_stick().0 > TILT,
+                strafe_left: self.input.is_down(KeyCode::KeyQ) || stick.x < -TILT,
+                strafe_right: self.input.is_down(KeyCode::KeyE) || stick.x > TILT,
+                fire: self.input.is_down(KeyCode::Space) || self.drill_held,
                 start: self.input.is_down(KeyCode::Enter)
                     || self.input.is_down(KeyCode::NumpadEnter),
             };
@@ -8852,9 +8857,39 @@ impl App {
     }
 
     /// React to a key going down, ignoring auto-repeat.
-    /// Is any panel holding the screen? The one bit of context the pad's
-    /// button mapping needs — everything finer is already routed by the
-    /// same per-panel key dispatch the keyboard uses.
+    /// Which layer the pad is on this frame.
+    ///
+    /// Stage 24 asked one question — is a panel open — which was not enough
+    /// to play from. A live machine feed is neither a panel nor the world,
+    /// and while the pad thought it was the world there was no button that
+    /// hung up; and the two held modifiers are layers of their own, because
+    /// thirteen buttons cannot name twenty actions without one.
+    fn pad_context(&self) -> gamepad::Context {
+        // A held modifier outranks everything: it is the player's thumb
+        // saying which layer they mean, and it is checked first so that
+        // opening a panel mid-hold cannot swap the mapping under them.
+        if self.pad.held.contains(&gilrs::Button::Select) {
+            return gamepad::Context::Second;
+        }
+        if self.pad.held.contains(&gilrs::Button::LeftTrigger) {
+            return gamepad::Context::Palette;
+        }
+        if self.a_panel_is_open() {
+            return gamepad::Context::Panel;
+        }
+        // A feed with no panel over it: looking through a machine.
+        if self
+            .active
+            .as_ref()
+            .is_some_and(|active| active.device.feed().is_some())
+        {
+            return gamepad::Context::Feed;
+        }
+        gamepad::Context::World
+    }
+
+    /// Is any panel holding the screen? One input to [`App::pad_context`],
+    /// and the same set the keyboard's own per-panel dispatch routes by.
     fn a_panel_is_open(&self) -> bool {
         self.active.as_ref().is_some_and(|active| {
             active.shop.open
@@ -8890,7 +8925,6 @@ impl App {
     /// downstream knows a pad exists.
     fn poll_pad(&mut self, dt: f32) {
         let changes = self.pad.poll();
-        let panel = self.a_panel_is_open();
         for change in changes {
             match change {
                 gamepad::Change::Connected => {
@@ -8900,10 +8934,14 @@ impl App {
                     }
                 }
                 gamepad::Change::Disconnected => {
-                    // Nothing a vanished pad was holding may stay held.
+                    // Nothing a vanished pad was holding may stay held —
+                    // the modifiers included, or the next pad plugged in
+                    // arrives already on the second layer.
                     for (_, code) in self.pad.down.drain() {
                         self.input.release(code);
                     }
+                    self.pad.held.clear();
+                    self.pad.used.clear();
                     self.drill_held = false;
                     if let Some(active) = &mut self.active {
                         active.greeting = Some(("CONTROLLER GONE".into(), Instant::now()));
@@ -8916,15 +8954,41 @@ impl App {
                     if !self.input.mouse_captured {
                         self.set_capture(true);
                     }
+                    // Read the layer per button rather than per frame: a
+                    // modifier pressed earlier in this very batch has to be
+                    // in force for the button that follows it.
+                    let context = self.pad_context();
                     match button {
-                        gilrs::Button::Select => {
-                            self.pad.help = !self.pad.help;
-                            self.refresh_pad_help();
+                        // The two modifiers. Neither acts on the way down —
+                        // what a tap meant is only knowable on release, and
+                        // a hold means the layer, so both wait.
+                        gilrs::Button::Select | gilrs::Button::LeftTrigger => {
+                            self.pad.held.insert(button);
+                            self.pad.used.remove(&button);
                         }
-                        gilrs::Button::RightTrigger2 => self.drill_held = true,
-                        gilrs::Button::LeftTrigger2 => self.place_at_target(),
+                        // The analog triggers mirror the mouse buttons, and
+                        // a mouse button does not dig through an open panel.
+                        gilrs::Button::RightTrigger2 => {
+                            if !matches!(context, gamepad::Context::Panel) {
+                                self.drill_held = true;
+                            }
+                        }
+                        gilrs::Button::LeftTrigger2 => {
+                            if !matches!(context, gamepad::Context::Panel) {
+                                self.place_at_target();
+                            }
+                        }
                         _ => {
-                            if let Some(code) = gamepad::key_for(button, panel) {
+                            // Anything pressed while a modifier is held is
+                            // what that modifier was held *for*, so its tap
+                            // action is cancelled.
+                            if matches!(context, gamepad::Context::Second) {
+                                self.pad.used.insert(gilrs::Button::Select);
+                            }
+                            if matches!(context, gamepad::Context::Palette) {
+                                self.pad.used.insert(gilrs::Button::LeftTrigger);
+                            }
+                            if let Some(code) = gamepad::key_for(button, context) {
                                 self.pad.down.insert(button, code);
                                 self.handle_press(code);
                                 self.input.press(code);
@@ -8934,6 +8998,29 @@ impl App {
                 }
                 gamepad::Change::Release(button) => match button {
                     gilrs::Button::RightTrigger2 => self.drill_held = false,
+                    // A modifier let go without having been used was a tap,
+                    // and a tap is its own action: SELECT shows the scheme,
+                    // LB swaps first and third person.
+                    gilrs::Button::Select | gilrs::Button::LeftTrigger => {
+                        self.pad.held.remove(&button);
+                        // Used as a layer: the buttons under it already did
+                        // the work, and the tap action is not owed.
+                        if self.pad.used.remove(&button) {
+                            continue;
+                        }
+                        // What a tap means is declared once, in `gamepad`,
+                        // so the reachability test sees the same surface the
+                        // player does. `None` is the help panel, which is
+                        // `main`'s own and resolves to no key at all.
+                        match gamepad::TAPS.iter().find(|(tapped, _, _)| *tapped == button) {
+                            Some((_, Some(code), _)) => self.handle_press(*code),
+                            Some((_, None, _)) => {
+                                self.pad.help = !self.pad.help;
+                                self.refresh_pad_help();
+                            }
+                            None => {}
+                        }
+                    }
                     _ => {
                         if let Some(code) = self.pad.down.remove(&button) {
                             // The same Enter release rule the keyboard has:
@@ -8955,6 +9042,29 @@ impl App {
         let (move_x, move_forward) = self.pad.left_stick();
         self.input
             .set_pad_axes(glam::Vec3::new(move_x, 0.0, move_forward));
+        // A held tilt walks a panel's cursor. Before this the stick was
+        // dead in every menu and the d-pad was the only way to move — which
+        // is not how any console game reads.
+        if matches!(self.pad_context(), gamepad::Context::Panel) {
+            let tilt = self.pad.left_stick().1;
+            if tilt.abs() > gamepad::CURSOR_TILT {
+                self.pad.repeat -= dt;
+                if self.pad.repeat <= 0.0 {
+                    let code = if tilt > 0.0 { KeyCode::ArrowUp } else { KeyCode::ArrowDown };
+                    self.handle_press(code);
+                    self.pad.repeat = if self.pad.fresh {
+                        gamepad::REPEAT_FIRST
+                    } else {
+                        gamepad::REPEAT_AGAIN
+                    };
+                    self.pad.fresh = false;
+                }
+            } else {
+                self.pad.repeat = 0.0;
+                self.pad.fresh = true;
+            }
+        }
+
         let (look_x, look_up) = self.pad.right_stick();
         if look_x != 0.0 || look_up != 0.0 {
             if !self.input.mouse_captured {
@@ -8978,8 +9088,8 @@ impl App {
         }
         let pixels = gamepad::render_pad_help();
         let (width, height) = active.renderer.size();
-        let panel_width = gamepad::PAD_WIDTH as f32 * shop::SHOP_SCALE;
-        let panel_height = gamepad::PAD_HEIGHT as f32 * shop::SHOP_SCALE;
+        let panel_width = gamepad::PAD_WIDTH as f32 * gamepad::PAD_SCALE;
+        let panel_height = gamepad::PAD_HEIGHT as f32 * gamepad::PAD_SCALE;
         active.renderer.set_overlay(
             PAD_SLOT,
             &active.context.device,

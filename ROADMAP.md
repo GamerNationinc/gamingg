@@ -120,7 +120,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 42 | `7beb30b` | The floating origin: the renderer draws relative to the chunk the camera stands in — the camera's corner and every chunk's corner are exact integers, subtracted in the vertex shader before anything reaches a float multiply — and the player's body, its physics, the camera and the aim ray move to `f64`, so the millimetre skin the collision sweep runs on means what it says everywhere. Proved the only way it can be: the same scene renders byte-identical sixteen hundred kilometres out, and the same journal walks the same walk at spawn and at three thousand |
 | 43 | `2c2df23` | Founding a town, and taking one — the civic note's other two routes into office. Print a charter, stand on flat dry ground a lattice cell clear of anybody, and `FOUND IRON REACH`: the whole town is raised out of the ground by the same generator that draws every other one — plateau, tower, shed, clinic, bank, dwellings, lockboxes, the mini star, three settlers with the market already open — with you in both chairs and a founder's due that keeps you there through the quiet first terms. Or get a warrant, break the posse it sends, and `TAKE` at the console: both chairs are yours, the Compact hates it, every neighbouring mayor signs paper on you and the residents trust you nothing, so the town votes on you at its next poll and a town you took is a town you have to keep |
 | 44 | `c90ecea` | Snow that settles, and ice — the half of a winter stage 41 deliberately left out, because it is the half that edits blocks. Four cold blocks: snowed grass, sand and sphagnum, each the bare block's twin at the same height, and ice, a solid translucent block. The cold is named in one place (`FREEZING`, a threshold on a temperature the place mostly decides and the year leans on), and a frost automaton shaped like the rain's source term — sixteen hashed columns within twenty-four blocks of the player every sixty-four ticks — snows open ground when it is snowing, freezes full still water at or below sea level when it is freezing, and gives both back exactly when it is not. It runs inside `Command::Advance` on both sides of the journal, so a winter replays to the same snow and the same ice. Everything else is an existing system reading a new block: you and the drones and the deputies walk across the lake, a pump on it lifts nothing, an electrolyser beside it finds no water, and fire finds no fuel |
-| 45 | _this_ | Entities in `f64` — the line stage 42 drew at the things that travel, moved out to everything that carries a position. Villagers, deputies, holders, the stalker, shots, sweeps, falling stems, marks, sightings, the belief board, caravans and crashes all run at the body's width; directions, headings, ranges and rig geometry stay `f32` and the difference is taken wide first. Every body is drawn in the camera's frame and marked so, the per-object lighting pass adds the origin back before reading a column, the muzzle crosses the journal's wire at `f64` (VERSION 29) and `arsenal.dat` widens its crash columns (VERSION 2, v1 read). Proved by the stage-42 tests' siblings: the same posse walks the same walk, the same townsfolk stroll the same stroll, the same rounds leave the same craters, and the same rig draws the same bytes, at spawn and three thousand kilometres out |
+| 45 | `0130222` | Entities in `f64` — the line stage 42 drew at the things that travel, moved out to everything that carries a position. Villagers, deputies, holders, the stalker, shots, sweeps, falling stems, marks, sightings, the belief board, caravans and crashes all run at the body's width; directions, headings, ranges and rig geometry stay `f32` and the difference is taken wide first. Every body is drawn in the camera's frame and marked so, the per-object lighting pass adds the origin back before reading a column, the muzzle crosses the journal's wire at `f64` (VERSION 29) and `arsenal.dat` widens its crash columns (VERSION 2, v1 read). Proved by the stage-42 tests' siblings: the same posse walks the same walk, the same townsfolk stroll the same stroll, the same rounds leave the same craters, and the same rig draws the same bytes, at spawn and three thousand kilometres out |
+| 46a | _this_ | The pad is the game — every control reachable from a controller and every panel escapable from one. Stage 24's single bit of context becomes five layers: the world, a held `LB` for the block palette, a held `SELECT` for the second layer, a panel, and — the one that did not exist — looking through a machine, where the pad had been in *world* context with no button that hung up. About twenty bindings that no button could reach get homes, the sticks drive panel cursors and the arcade, the triggers stop digging through an open panel, and a table-driven test walks every `KeyCode` the game binds and fails the build if the pad cannot produce it |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -2800,6 +2801,57 @@ overhead: every body on its feet in both.
 that says why stands); a world fence; persisting any entity that is not
 persisted now; the single dynamic-offset origin buffer; widening headings,
 ranges, speeds or rig geometry.
+
+## Shipped — Stage 46a: the pad is the game
+
+**Stage 24 shipped a pad you could hold. This is a pad you can play with.**
+The mapping asked one question — is a panel open — which was enough to reach
+the things a hand finds without looking, and not enough to finish a session
+with. About twenty bound keys had no button on any context: the terminal,
+the block palette entire, taking a machine's wheel, *withdrawing from a
+vault* (you could put money in a strongroom and never take it out), map
+zoom, prone, the debug readout, saving, and every control the arcade has.
+
+**The trap.** `device.feed()` was not in `a_panel_is_open`, so while
+looking through a drone the pad was in **world** context: east was crouch,
+not back out, and **no button on the pad ended the feed**. You could take a
+machine up and never get your own eyes back. That is what the context enum
+exists for — a feed is neither a panel nor the world, and now it is its own
+layer where `B` hangs up and `Y` takes or hands back the wheel.
+
+**Thirteen buttons, twenty actions, two layers.** `LB` held is the block
+palette — ten slots on the d-pad, the face buttons, `RB` and the right
+stick, no cursor, because a palette is muscle memory or it is nothing.
+`SELECT` held is the second layer: the terminal, prone, vault withdrawal,
+scan, walk-or-fly, the debug readout, the save. Neither acts on the way
+down, because whether a hold was a hold is only knowable when it comes back
+up; released unused, `LB` swaps first and third person and `SELECT` raises
+the scheme, exactly as they did before. What a tap means is declared once in
+`gamepad::TAPS` and read by `main`, so the mapping and the game cannot
+drift.
+
+**The sticks reach the menus.** Before this the left stick was invisible to
+every panel — the d-pad's four arrows were the only cursor — and the arcade,
+whose controls are `KeyW`, `KeyS` and `KeyQ`, was unplayable on a pad
+despite stage 34 claiming otherwise. A held tilt now walks a cursor on the
+keyboard's own repeat shape, and both sticks drive the toy. The analog
+triggers stopped firing through open panels, which is what a mouse button
+would never do.
+
+**`every_binding_the_game_has_is_reachable_from_the_pad`.** The round's
+claim as a test: every `KeyCode` `handle_press` and the movement sampler act
+on, checked against every button on every layer. A binding with no pad path
+fails the build unless somebody writes it into `NOT_ON_THE_PAD` with a
+reason — there are four, and three of them are the terminal caret keys the
+on-screen keyboard carries in 46b.
+
+**Two documents were lying.** `README.md`'s own rough-edge list still said
+"There are no gamepad bindings at all" and "no gamepad support", twenty-two
+stages after the pad shipped.
+
+**Deliberately not in 46a:** text entry, which is 46b — typing arrives on
+`event.text` from a `WindowEvent` that `poll_pad` never synthesises, so a
+pad cannot enter a character however it is bound.
 
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
