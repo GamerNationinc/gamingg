@@ -1412,8 +1412,11 @@ saves stay.
 
 **The controller works out of the box.** Steam Input's default Gamepad
 layout presents the Deck as an ordinary pad, and the game reads pads
-natively: left stick moves (analog — tilt gently to creep), right stick
-looks, and press `SELECT` any time for the full scheme on screen. Buttons
+natively: left stick moves, right stick looks, and press `SELECT` any time
+for the full scheme on screen. On foot the stick walks in eight directions
+at one speed — a gentle tilt is still a walk, not a creep, because the
+command the simulation replays carries a direction and no magnitude. Flying
+and piloting a machine *are* analog, and read the tilt itself. Buttons
 drive the very same bindings as the keyboard — one implementation of every
 rule, so every panel, the shop, the map and the handheld all answer to the
 pad. The terminal still wants a keyboard for *typing*, but scrolls and

@@ -4,9 +4,10 @@
 //!
 //! Buttons resolve to the [`KeyCode`] the same action is already bound to
 //! and go through the very same `handle_press` / `InputState` path the
-//! keyboard uses; the left stick feeds the movement axes, the right stick
-//! feeds the mouse-look accumulator, and the triggers mirror the mouse
-//! buttons. Nothing downstream knows a pad exists — which is why every
+//! keyboard uses; the left stick feeds the movement axes and the walk
+//! sampler's direction bits, the right stick feeds the mouse-look
+//! accumulator, and the triggers mirror the mouse buttons. Nothing
+//! downstream knows a pad exists — which is why every
 //! panel, the map, the shop and the handheld gained pad support the moment
 //! this module compiled, and why there is exactly one implementation of
 //! every rule input can reach.

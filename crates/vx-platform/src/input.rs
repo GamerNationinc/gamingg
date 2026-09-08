@@ -54,6 +54,15 @@ impl InputState {
         self.pad_axes = axes;
     }
 
+    /// The pad's stick as last written, undeadzoned and unmerged.
+    ///
+    /// [`InputState::movement_axes`] is the wrong thing for the walk
+    /// sampler: it merges the keys in and normalises, and the sampler needs
+    /// the stick on its own to turn into bits.
+    pub fn pad_axes(&self) -> Vec3 {
+        self.pad_axes
+    }
+
     pub fn add_mouse_delta(&mut self, dx: f32, dy: f32) {
         self.mouse_delta.0 += dx;
         self.mouse_delta.1 += dy;

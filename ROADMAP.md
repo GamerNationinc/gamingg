@@ -1245,6 +1245,13 @@ threshold, and the live range re-spans from zero so a barely-tilted stick
 is a genuine creep rather than a dead spot followed by a lurch. Tested
 monotonic. Disconnecting a pad mid-stride releases everything it held.
 
+*Scoped later.* The rescaled magnitude reaches flying and piloting, which
+read the axes directly. Walking consumes a `MoveCommand`, which carries
+direction bits and no magnitude, so on foot the stick gives eight
+directions at one speed — see the arc's analog round, which is the journal
+change that would lift it. (The stick did not walk **at all** until the pad
+fix after stage 45: the walk sampler read the keys and never the axes.)
+
 **SELECT is the manual.** The control scheme renders on the bitmap font as
 a panel in the game, from the same table the tests hold drawable — not a
 wiki page. A pad connecting says so in a toast and points at it.
@@ -3139,8 +3146,15 @@ office — founding a town, and taking one — in 43; the ground half of a winte
 — snow that settles, and ice — in 44; and in 45 the line stage 42 drew at the
 things that travel moved out to every body in the game.
 
-**Nothing named is left on the arc.** What the board holds is the
-outstanding engineering below, and whatever the next note says.
+One thing is named on the arc, put there by a bug found on a Deck rather
+than by a note.
+
+| Stage | What | Why here |
+|---|---|---|
+| 46 | Analog movement on foot | The pad's stick walks in eight directions at one speed, because `MoveCommand` carries direction bits and no magnitude. A gentle tilt should be a gentle walk — but the speed has to reach the simulation, and the simulation replays commands from the journal, so the magnitude must be quantised and versioned like the look angles already are. A journal bump, and its own round |
+
+Beyond that the board holds the outstanding engineering below, and whatever
+the next note says.
 
 ## The feature map
 

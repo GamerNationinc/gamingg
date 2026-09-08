@@ -95,8 +95,9 @@ impl FlyController {
 
 /// Walking controls.
 ///
-/// This is a *sampler*, not an integrator. It reads the held keys once per
-/// frame and hands back a [`MoveCommand`]; the simulation then consumes one
+/// This is a *sampler*, not an integrator. It reads the held keys and the
+/// pad's stick once per frame and hands back a [`MoveCommand`], which is a
+/// bitfield either can set; the simulation then consumes one
 /// command per movement tick. Nothing here touches the body, and nothing here
 /// sees a `dt` — that is the whole point of the movement round. See
 /// [`crate::movement`] for why.
@@ -134,6 +135,27 @@ impl WalkController {
         set(KeyCode::ControlLeft, movement::SPRINT);
         set(KeyCode::ShiftLeft, movement::CROUCH);
         set(KeyCode::KeyZ, movement::PRONE);
+
+        // The pad walks too. `MoveCommand` is a bitfield, so a tilt becomes
+        // the same bits a key press would: eight directions, no analog. The
+        // stick is already radially deadzoned and rescaled in
+        // `gamepad::deadzoned`, so this threshold is dead travel on top of
+        // that rather than a second deadzone. Sign convention is the one
+        // `poll_pad` packs: `x` right, `z` forward, matching W/S and A/D.
+        const TILT: f32 = 0.35;
+        let pad = input.pad_axes();
+        if pad.z > TILT {
+            bits |= movement::FWD;
+        }
+        if pad.z < -TILT {
+            bits |= movement::BACK;
+        }
+        if pad.x > TILT {
+            bits |= movement::RIGHT;
+        }
+        if pad.x < -TILT {
+            bits |= movement::LEFT;
+        }
 
         MoveCommand::looking(bits, camera.yaw, camera.pitch)
     }
@@ -342,6 +364,66 @@ mod tests {
             let command = controller.sample(&mut camera, &mut input);
             assert_eq!(command.bits, bit, "{key:?} did not sample to its own bit");
         }
+    }
+
+    /// The whole of the pad bug in one test: a tilted stick has to sample
+    /// into the same bit the key would, or the pad can look around and open
+    /// every panel while the player stands still.
+    #[test]
+    fn the_pads_stick_walks() {
+        let (mut camera, mut input, controller) = sampler();
+        input.set_pad_axes(glam::Vec3::new(0.0, 0.0, 1.0));
+
+        let command = controller.sample(&mut camera, &mut input);
+
+        assert_eq!(command.bits, movement::FWD, "the stick did not walk");
+    }
+
+    #[test]
+    fn a_diagonal_tilt_sets_both_of_its_bits() {
+        let (mut camera, mut input, controller) = sampler();
+        input.set_pad_axes(glam::Vec3::new(-0.8, 0.0, -0.8));
+
+        let command = controller.sample(&mut camera, &mut input);
+
+        assert_eq!(command.bits, movement::BACK | movement::LEFT);
+    }
+
+    #[test]
+    fn a_stick_at_rest_leaves_the_keys_exactly_as_they_were() {
+        let (mut camera, mut input, controller) = sampler();
+        input.press(KeyCode::KeyW);
+        input.set_pad_axes(glam::Vec3::ZERO);
+
+        let command = controller.sample(&mut camera, &mut input);
+
+        assert_eq!(command.bits, movement::FWD, "the stick added a bit at rest");
+    }
+
+    #[test]
+    fn a_key_and_the_stick_together_set_one_bit_not_two() {
+        // `bits` is a bitfield, so agreeing twice about forward is still
+        // forward — there is no double count to be had, and this is the
+        // test that says so.
+        let (mut camera, mut input, controller) = sampler();
+        input.press(KeyCode::KeyW);
+        input.set_pad_axes(glam::Vec3::new(0.0, 0.0, 1.0));
+
+        let command = controller.sample(&mut camera, &mut input);
+
+        assert_eq!(command.bits, movement::FWD);
+    }
+
+    #[test]
+    fn a_tilt_under_the_threshold_walks_nowhere() {
+        // Dead travel above `gamepad::deadzoned`'s own rescale, so a stick
+        // barely off centre does not creep the player across the room.
+        let (mut camera, mut input, controller) = sampler();
+        input.set_pad_axes(glam::Vec3::new(0.34, 0.0, 0.34));
+
+        let command = controller.sample(&mut camera, &mut input);
+
+        assert_eq!(command.bits, 0, "a resting stick walked");
     }
 
     #[test]

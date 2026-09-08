@@ -9960,7 +9960,8 @@ impl App {
         }
     }
 
-    /// Turn this frame's held keys into one tick of pilot intent.
+    /// Turn this frame's movement intent — keys or the pad's stick, through
+    /// the axes both feed — into one tick of pilot intent.
     ///
     /// Movement is camera-relative, exactly like walking: forward is where the
     /// machine is looking, strafe is that rotated a quarter turn. The result
