@@ -117,6 +117,7 @@ const VERBS: &[Verb] = &[
     Verb { name: "survey", help: "SWEEP THE SECTOR YOU STAND IN" },
     Verb { name: "lights", help: "TURN THE OPTICS DIAL" },
     Verb { name: "drill", help: "THE DRILL MOD: DRILL HOLO, DRILL PING" },
+    Verb { name: "pack", help: "WHAT YOU ARE CARRYING, AND WHAT IT WEIGHS" },
     Verb { name: "save", help: "WRITE THE WORLD OUT" },
     Verb { name: "clear", help: "EMPTY THE SCROLLBACK" },
     Verb { name: "exit", help: "CLOSE THE TERMINAL" },
@@ -173,6 +174,7 @@ pub fn parse(line: &str) -> Parsed {
         // `P` because a player on a pad who never finds SELECT and a stick
         // click should not be locked out of a feature that is free.
         "drill" | "holo" | "sonar" | "ping" => Parsed::Ask("drill".into(), rest),
+        "pack" | "carrying" | "inventory" => Parsed::Ask("pack".into(), rest),
         "weather" | "sky" | "forecast" => Parsed::Ask("weather".into(), rest),
         "town" | "hall" | "council" => Parsed::Ask("town".into(), rest),
         "found" | "charter" => Parsed::Ask("found".into(), rest),

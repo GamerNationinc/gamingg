@@ -123,13 +123,24 @@ pub struct Session {
     pub drillmod: crate::drillmod::Switches,
     /// The last sonar reading, so a fixture can photograph one.
     pub ping: Option<crate::sonar::Reading>,
+    /// What the player is carrying. Stage 55: the pack the load byte has
+    /// always been describing and never actually held.
+    pub pack: crate::pack::Pack,
+    /// What would not fit, lying on the ground where it came out.
+    pub drops: crate::drops::Drops,
+    /// The capacity last put on the wire, so `Carry` is recorded on change
+    /// rather than on every tick.
+    carried: Option<u64>,
     /// Which save this session is on, for the manifest.
     pub generation: u64,
     /// Ticks the session has advanced.
     pub tick: u64,
-    /// Blocks that came out of the ground with nowhere to go. The bug this
-    /// round found, counted rather than assumed.
-    pub lost: u64,
+    /// Blocks that would not fit in the pack and are lying on the floor.
+    ///
+    /// Until stage 55 this counted blocks *lost* — mined with no container
+    /// declared, and destroyed. Nothing is destroyed any more, so it counts
+    /// what is waiting to be walked back to instead.
+    pub left: u64,
     last_move: Option<MoveCommand>,
     loaded: Option<vx_core::ChunkPos>,
     /// The save this session was opened from, if any. Held so ground the
@@ -176,9 +187,12 @@ impl Session {
             digging: None,
             drillmod: crate::drillmod::Switches::default(),
             ping: None,
+            pack: crate::pack::Pack::new(),
+            drops: crate::drops::Drops::new(),
+            carried: None,
             generation: 0,
             tick: 0,
-            lost: 0,
+            left: 0,
             last_move: None,
             loaded: Some(chunk),
             save: None,
@@ -207,6 +221,8 @@ impl Session {
         crate::dig::save(&self.mining, root)?;
         self.garage.save(root)?;
         self.drillmod.save(root)?;
+        crate::pack::save(&self.pack, root)?;
+        crate::drops::save(&self.drops, root)?;
         crate::pumps::save(&[], root)?;
         crate::whereabouts::save(
             crate::whereabouts::Whereabouts {
@@ -299,6 +315,12 @@ impl Session {
         // one came to drop the goods a broken container was holding. See
         // `keeping::restore_the_fleet`.
         crate::keeping::restore_the_fleet(&mut session.mining, &mut session.world, root);
+        // And what the player themselves is carrying, plus whatever they left
+        // on the floor. Through one function for the same reason as above:
+        // two hand-written copies of a restore is how the last one drifted.
+        let (pack, drops) = crate::keeping::restore_the_pack(root);
+        session.pack = pack;
+        session.drops = drops;
         Ok(session)
     }
 
@@ -312,20 +334,47 @@ impl Session {
         self.mining.fleet.base.as_ref().map(|base| &base.stockpile)
     }
 
+    /// Put the current carrying capacity on the wire, if it has moved.
+    ///
+    /// Replay has no wallet and no skill sheet — the shop counter and the
+    /// fabricator's upgrade rows are live-only — so the size of the pack has
+    /// to be *told* to it or replay would fill a stock-sized pack and drop
+    /// what a fitted player kept. Recorded on change rather than per tick,
+    /// which for most sessions means exactly once. See [`Command::Carry`].
+    pub fn note_capacity(&mut self) {
+        let now = self.capacity();
+        if self.carried == Some(now) {
+            return;
+        }
+        self.carried = Some(now);
+        self.journal.record(Command::Carry {
+            capacity: now.min(u64::from(u32::MAX)) as u32,
+        });
+    }
+
+    /// What the player can carry, in `pack::UNIT`s.
+    ///
+    /// One helper, called from here and from `App::frame` alike. It used to be
+    /// two copies of the same arithmetic a thousand lines apart, which is
+    /// precisely how the live game and the headless one drifted.
+    pub fn capacity(&self) -> u64 {
+        crate::pack::capacity(
+            self.skills.level(skills::LOGISTICS),
+            self.wallet.upgrade(wallet::PACK),
+            self.wallet.upgrade(wallet::EXO),
+        )
+    }
+
     /// What the pack weighs, as the byte the journal carries.
     ///
-    /// The same sum `App::frame` makes: the pile *is* the load, because there
-    /// is no player inventory and everything routes through the base.
+    /// The pack on your back, at last — not the pile in a container somewhere
+    /// across the map, which is what this measured for fifty-four stages.
     pub fn load_byte(&self) -> u8 {
-        let carried = self.pile().map_or(0, |pile| pile.total());
-        let capacity = wallet::pack_capacity(
-            skills::capacity(
-                vx_agent::DEFAULT_CAPACITY,
-                self.skills.level(skills::LOGISTICS),
-            ),
-            self.wallet.upgrade(wallet::PACK),
-        );
-        movement::load_byte(carried, capacity)
+        crate::pack::load_byte(
+            &self.pack,
+            self.capacity(),
+            self.wallet.upgrade(wallet::EXO),
+        )
     }
 
     /// The command a held bitfield makes right now, looking where the head is
@@ -1157,24 +1206,44 @@ impl Session {
             }
             self.journal.record(Command::Break { at: hit.block });
 
+            self.note_capacity();
+            let capacity = self.capacity();
             let landed = drill::deposit(
-                self.mining
-                    .fleet
-                    .base
-                    .as_mut()
-                    .map(|base| &mut base.stockpile),
-                self.world.registry(),
+                &mut self.pack,
+                &mut self.drops,
+                capacity,
+                &self.world,
                 hit.id,
+                hit.block,
                 false,
             );
-            if landed == Deposited::NoBase {
-                self.lost += 1;
+            if matches!(landed, Deposited::Dropped(_)) {
+                self.left += 1;
             }
             let xp = (hardness * skills::MINING_XP_PER_HARDNESS) as u64;
             self.skills.add_xp(skills::MINING, xp);
             return Some(landed);
         }
         None
+    }
+
+    /// Tip the pack into the fleet's pile, and say how many things moved.
+    ///
+    /// The other half of a pack: something has to empty it, or a carrying
+    /// limit is just a shorter game. `None` means there is nowhere to tip it —
+    /// no container has declared a base yet — which is the one place
+    /// [`drill::NO_BASE`] still has a job.
+    ///
+    /// Journalled, because it moves the pile the fleet burns fuel out of and
+    /// the shop sells from, and both of those change what ground gets cut.
+    /// **Payload-free** on purpose: replay re-derives the manifest from its
+    /// own pack rather than trusting a number written in a file, so a
+    /// hand-edited log cannot conjure goods. See [`crate::journal`].
+    pub fn stow(&mut self) -> Option<u64> {
+        self.mining.fleet.base.as_ref()?;
+        self.note_capacity();
+        self.journal.record(Command::Stow);
+        Some(crate::pack::tip(&mut self.pack, &mut self.mining.fleet))
     }
 
     /// Read the four metres of ground round a block, exactly as the live
@@ -1371,8 +1440,10 @@ mod tests {
             }
             let hash = vx_world::world_hash(&session.world);
             let orders = format!("{:?}", session.journal.entries());
-            let pile = session.pile().map(|pile| pile.total()).unwrap_or(0);
-            (hash, orders, pile)
+            // What you cut goes in your pack now, not into a container across
+            // the map — see `pack`.
+            let carried = session.pack.total();
+            (hash, orders, carried)
         };
 
         let lit = played(true, true);
@@ -1383,6 +1454,115 @@ mod tests {
         // And it really did dig something, or the three assertions above
         // are three ways of comparing nothing to nothing.
         assert!(lit.2 > 0, "nothing was mined, so nothing was proved");
+    }
+
+    /// **The oracle now agrees about the goods, not just the ground.**
+    ///
+    /// An assertion that could not have been written yesterday.
+    /// `Command::Break`'s replay arm broke the block and banked nothing, from
+    /// stage 6 to stage 55 — so replay's pile was short every rock the player
+    /// had ever cut by hand, and nothing noticed because nothing downstream
+    /// looked. It matters: the pile is what the fleet's fuel burns out of,
+    /// and a fleet that stops cuts different ground.
+    ///
+    /// So this sinks a real shaft by hand and tips the haul into a container,
+    /// then replays the log over a fresh world and asks for the same four
+    /// things: the same ground, the same pack, the same floor, and the same
+    /// pile. It found two live bugs on the way in, both of which are now
+    /// fixed and neither of which anything else was looking at:
+    /// `Command::Break` banking nothing, and `Command::Place` of a container
+    /// not declaring the base — so every replayed `Stow` tipped into nowhere.
+    ///
+    /// The *full* pack half of the rule is proved at the wire in
+    /// `journal::tests::a_small_frame_drops_what_it_cannot_hold`, where the
+    /// frame can be made small without digging sixty-four blocks first.
+    #[test]
+    fn a_session_that_mines_and_stows_replays_to_the_same_goods() {
+        // `ready` rather than `dug_in`: a base container and nothing else, so
+        // every edit to the world is an order in the log. A crew would bring
+        // fuel with it, and fuel is *not* journalled — the pile it burns out
+        // of is restored from `pile.dat`, not replayed — which is a separate
+        // hole and not this test's business.
+        let mut session = ready();
+        session.note_capacity();
+
+        let start = session.player.position;
+        // Off the doorstep first: the house stands on `engine:footing`, which
+        // is fortified and cannot be cut, so a shaft sunk where you spawn is
+        // one catwalk deep and then nothing.
+        let away = start + DVec3::new(9.0, 0.0, 0.0);
+        assert!(
+            session.walk_to(away, seconds(30.0)).reached(),
+            "could not step off the doorstep"
+        );
+        let mut cut = 0;
+        // Straight down, one block at a time, letting the body fall into each
+        // hole before cutting the next — the shaft a player actually digs.
+        for _ in 0..24 {
+            let under = BlockPos::new(
+                session.player.position.x.floor() as i32,
+                session.player.position.y.floor() as i32 - 1,
+                session.player.position.z.floor() as i32,
+            );
+            session.look_at(under);
+            if session.drill_through(seconds(6.0)).is_some() {
+                cut += 1;
+            }
+            session.advance(seconds(1.0), MoveCommand::default());
+        }
+        assert!(cut >= 8, "only {cut} blocks were cut, so little is proved");
+        let tipped = session.stow().expect("no container to tip into");
+
+        let ground = vx_world::world_hash(&session.world);
+        let pack = session.pack.clone();
+        let floor = session.drops.clone();
+        let pile: Vec<(String, u64)> = session
+            .pile()
+            .map(|pile| {
+                pile.entries()
+                    .map(|(name, count)| (name.to_string(), count))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        // Replay the orders over a world generated from the same seed, from
+        // where the player actually stood.
+        let mut fresh = vx_world::World::new(session.world.seed());
+        fresh.load_around(
+            BlockPos::new(
+                start.x.floor() as i32,
+                start.y.floor() as i32,
+                start.z.floor() as i32,
+            )
+            .chunk(),
+            KEEP_LOADED,
+        );
+        let events = vx_core::EventBus::new();
+        let rebuilt = crate::journal::replay_from(&session.journal, &mut fresh, &events, start);
+
+        assert_eq!(
+            vx_world::world_hash(&fresh),
+            ground,
+            "the replay dug a different hole"
+        );
+        assert_eq!(rebuilt.pack, pack, "the replay is carrying something else");
+        assert_eq!(rebuilt.drops, floor, "the replay left a different floor");
+        let replayed: Vec<(String, u64)> = rebuilt
+            .mining
+            .fleet
+            .base
+            .as_ref()
+            .map(|base| {
+                base.stockpile
+                    .entries()
+                    .map(|(name, count)| (name.to_string(), count))
+                    .collect()
+            })
+            .unwrap_or_default();
+        assert_eq!(
+            replayed, pile,
+            "the replay tipped a different pile ({tipped} moved live)"
+        );
     }
 
     /// The other half: with the ping on, a played session really does come
@@ -1452,16 +1632,18 @@ mod tests {
         assert!(walk < 20.0, "the counter is {walk} blocks from the door");
     }
 
-    /// The bug the round was for. Mine with no container down and the ore is
-    /// gone — but now it is *reported* gone, which is the difference between
-    /// a rule and a hole.
+    /// What stage 48 fixed, and what stage 55 made moot.
+    ///
+    /// This used to assert that mining with no container declared reported
+    /// `NoBase` and yielded nothing — the best answer available while the only
+    /// pile in the game stood in a box across the map. There is a pack now, so
+    /// a new player who walks out of the door and mines *keeps what they cut*,
+    /// container or no container.
     #[test]
-    fn mining_without_a_base_says_so_instead_of_eating_the_ore() {
+    fn mining_before_you_own_anything_still_fills_your_pack() {
         let mut session = Session::open(SEED);
         assert!(session.pile().is_none(), "a new player already has a pile");
 
-        // Any solid block underfoot will do; the rule is about the pile, not
-        // about what was mined.
         let under = BlockPos::new(
             session.player.position.x.floor() as i32,
             session.player.position.y.floor() as i32 - 1,
@@ -1470,14 +1652,16 @@ mod tests {
         session.look_at(under);
         let landed = session.drill_through(600);
 
-        assert_eq!(
-            landed,
-            Some(Deposited::NoBase),
-            "the drill did not report where the block went"
+        assert!(
+            matches!(landed, Some(Deposited::Packed(_))),
+            "a block mined with no container went somewhere else: {landed:?}"
         );
-        assert_eq!(session.lost, 1, "the loss went uncounted");
+        assert_eq!(session.pack.total(), 1, "the block did not reach the pack");
+        assert_eq!(session.left, 0, "nothing should have hit the floor");
+        assert!(session.pile().is_none(), "a pile appeared out of nowhere");
 
-        // And with a container down, the very same dig lands on the pile.
+        // And a container standing changes nothing about the swing: what you
+        // break is yours until you tip it in.
         let mut kept = ready();
         let under = BlockPos::new(
             kept.player.position.x.floor() as i32,
@@ -1487,11 +1671,12 @@ mod tests {
         kept.look_at(under);
         let landed = kept.drill_through(600);
         assert!(
-            matches!(landed, Some(Deposited::Piled(_))),
-            "a block mined over a declared pile did not land on it: {landed:?}"
+            matches!(landed, Some(Deposited::Packed(_))),
+            "a block mined over a declared pile did not land in the pack: {landed:?}"
         );
-        assert_eq!(kept.pile().map(|pile| pile.total()), Some(1));
-        assert_eq!(kept.lost, 0);
+        assert_eq!(kept.pile().map(|pile| pile.total()), Some(0));
+
+        assert_eq!(kept.left, 0);
     }
 
     /// The drill's pace, felt rather than calculated: a block of stone under
@@ -1551,34 +1736,58 @@ mod tests {
         );
     }
 
-    /// A loaded pack is slower. The whole shape of the loop — go out light,
-    /// come back heavy — depends on it, and it had never been measured end to
-    /// end.
+    /// The rough edge this round exists to delete, as one test.
+    ///
+    /// It has been in the README since stage 16: *"mining sixty blocks makes
+    /// you walk at 0.55x until you sell, with the pack sat in a container
+    /// somewhere else entirely."* So the assertion has two halves, and the
+    /// first one is the one that would have failed yesterday — a container
+    /// full of ore across the map must not slow you down at all, and what is
+    /// actually on your back must.
     #[test]
-    fn a_loaded_pack_walks_slower_than_an_empty_one() {
-        let run = |load: u64| {
+    fn what_you_are_carrying_is_what_slows_you_down() {
+        let stroll = |set: &dyn Fn(&mut Session)| {
             let mut session = ready();
-            let chest = vx_world::town::chest_position(&session.home());
-            if load > 0 {
-                if let Some(base) = session.mining.fleet.base.as_mut() {
-                    base.stockpile.add("engine:copper_ore".to_string(), load);
-                }
-            }
-            let _ = chest;
+            set(&mut session);
             let start = session.player.position;
             // Straight down the path, well short of anything to climb.
             let target = start + DVec3::new(10.0, 0.0, 0.0);
             let arrival = session.walk_to(target, seconds(20.0));
-            (arrival, (session.player.position - start).length())
+            (arrival, session.load_byte())
         };
 
-        let (light, _) = run(0);
-        let (heavy, _) = run(64);
-        assert!(light.reached() && heavy.reached(), "the stroll did not finish");
+        let (light, light_load) = stroll(&|_| {});
+        let (in_a_box, box_load) = stroll(&|session| {
+            // Sixty-four ore in a container standing somewhere else entirely.
+            if let Some(base) = session.mining.fleet.base.as_mut() {
+                base.stockpile.add("engine:copper_ore".to_string(), 64);
+            }
+        });
+        let (on_your_back, back_load) = stroll(&|session| {
+            for _ in 0..64 {
+                session.pack.stow("engine:copper_ore", session.capacity());
+            }
+        });
+
         assert!(
-            heavy.ticks() > light.ticks(),
+            light.reached() && in_a_box.reached() && on_your_back.reached(),
+            "the stroll did not finish"
+        );
+        assert_eq!(light_load, 0, "an empty pack is not an empty load");
+        assert_eq!(
+            box_load, 0,
+            "a pile in a container across the map still weighed on the player"
+        );
+        assert_eq!(
+            in_a_box.ticks(),
+            light.ticks(),
+            "goods you are nowhere near changed how fast you walk"
+        );
+        assert!(back_load > 0, "sixty-four ore on your back weighed nothing");
+        assert!(
+            on_your_back.ticks() > light.ticks(),
             "a full pack ({} ticks) was no slower than an empty one ({} ticks)",
-            heavy.ticks(),
+            on_your_back.ticks(),
             light.ticks()
         );
     }
@@ -1714,12 +1923,13 @@ mod tests {
                 }
             }
             match landed {
-                Some(Deposited::Piled(_)) => mined += 1,
+                Some(Deposited::Packed(_)) => mined += 1,
+                Some(Deposited::Dropped(_)) => break,
                 Some(other) => panic!("a mined block went nowhere good: {other:?}"),
                 None => break,
             }
         }
-        let carried = session.pile().map_or(0, |pile| pile.total());
+        let carried = session.pack.total();
         eprintln!(
             "mined {mined} blocks in {:.1}s of holding; pack now {carried} \
              (load byte {})",
@@ -1727,7 +1937,7 @@ mod tests {
             session.load_byte()
         );
         assert!(mined > 0, "stood at an outcrop and could not cut any of it");
-        assert_eq!(session.lost, 0, "{} blocks were thrown away", session.lost);
+        assert_eq!(session.left, 0, "{} blocks would not fit", session.left);
 
         // --- Coming home -----------------------------------------------
         let back = session.walk_route(&session.counter_route(&home), seconds(300.0));
@@ -1751,6 +1961,23 @@ mod tests {
             back.ticks(),
             session.load_byte()
         );
+
+        // --- Tipping the pack ------------------------------------------
+        // New in stage 55, and the reason the walk home means anything: what
+        // you cut is on your back until you put it down. The counter sells
+        // out of the fleet's pile, so nothing can be sold until the pack has
+        // been emptied into a container.
+        let carrying = session.pack.total();
+        let tipped = session.stow().expect("no container to tip into");
+        eprintln!("tipped {tipped} of {carrying} into the container");
+        assert_eq!(tipped, carrying, "the pack did not empty");
+        assert!(session.pack.is_empty(), "the pack kept something back");
+        assert_eq!(
+            session.pile().map_or(0, |pile| pile.total()),
+            carrying,
+            "the goods did not reach the pile"
+        );
+        assert_eq!(session.load_byte(), 0, "an emptied pack still weighed");
 
         // --- The trade -------------------------------------------------
         let site = session.home();
@@ -2221,7 +2448,7 @@ mod tests {
     /// module docs is the human-readable half of the same promise.
     #[test]
     fn the_census_covers_every_saved_subsystem() {
-        const EXPECTED: [&str; 13] = [
+        const EXPECTED: [&str; 15] = [
             "log.dat",
             "wallet.dat",
             "player.dat",
@@ -2233,6 +2460,8 @@ mod tests {
             "garage.dat",
             "whereabouts.dat",
             "drillmod.dat",
+            "pack.dat",
+            "drops.dat",
             "pumps.dat",
             "manifest.dat",
         ];
@@ -2483,10 +2712,10 @@ mod tests {
         session.look_at(under);
         let landed = session.drill_through(600);
         assert!(
-            matches!(landed, Some(Deposited::Piled(_))),
+            matches!(landed, Some(Deposited::Packed(_))),
             "a block mined after a reload went nowhere: {landed:?}"
         );
-        assert_eq!(session.lost, 0);
+        assert_eq!(session.left, 0);
     }
 
     /// The things that already worked, so the fix cannot quietly break them.

@@ -33,9 +33,13 @@ pub const LAMP: &str = "lamp";
 /// Lead in the suit: what makes a uranium face somewhere you can work
 /// rather than somewhere you can visit.
 pub const SHIELD: &str = "shield";
+/// The powered frame. Unlike [`PACK`], which only raises the ceiling, the
+/// exoskeleton also takes the weight off your legs for most of the way up to
+/// it — see [`crate::pack::comfortable`].
+pub const EXO: &str = "exo";
 
 /// Every line, in the order panels list them.
-pub const LINES: [&str; 7] = [DRILL, CARGO, CELL, PACK, PRESS, LAMP, SHIELD];
+pub const LINES: [&str; 8] = [DRILL, CARGO, CELL, PACK, PRESS, LAMP, SHIELD, EXO];
 
 /// What each line does, for the panels and the terminal's `kit`.
 pub fn describes(line: &str) -> &'static str {
@@ -47,6 +51,7 @@ pub fn describes(line: &str) -> &'static str {
         PRESS => "THE FABRICATOR PRINTS FASTER",
         LAMP => "THE LAMP THROWS FURTHER",
         SHIELD => "THE SUIT KEEPS MORE OF THE DOSE OUT",
+        EXO => "A POWERED FRAME TAKES THE WEIGHT OFF YOUR LEGS",
         _ => "",
     }
 }
@@ -194,6 +199,16 @@ pub fn pack_capacity(base: u64, level: u32) -> u64 {
     base + base * 3 * level as u64 / 10
 }
 
+/// What the exoskeleton adds on top of [`pack_capacity`]: +20% of base per
+/// mark, so a fully fitted frame doubles what the rest of the kit allows.
+///
+/// The line's other half is not here: it also widens the stretch you can
+/// carry without feeling it at all, which lives in [`crate::pack::comfortable`]
+/// because it is a rule about the pack rather than about credits.
+pub fn exo_capacity(base: u64, level: u32) -> u64 {
+    base + base * level.min(MAX_UPGRADE) as u64 / 5
+}
+
 /// How much of a print's time the rollers save: -15% per mark, compounding
 /// no faster than that. Print *timing* is live-only — the journal records
 /// the order, and its replay arm moves the pile in one go — so this can
@@ -233,17 +248,23 @@ mod tests {
         assert_eq!(drill_multiplier(0), 1.0);
         assert_eq!(boosted_capacity(400, 0), 400);
         assert_eq!(recharge_ticks(0), vx_agent::kestrel::COOLDOWN);
+        assert_eq!(exo_capacity(400, 0), 400);
     }
 
     #[test]
     fn every_new_line_improves_monotonically_and_caps() {
         let mut carry = 0;
+        let mut frame = 0;
         let mut time = f32::MAX;
         let mut throw = 0.0;
         for level in 0..=MAX_UPGRADE {
             let next_carry = pack_capacity(400, level);
             assert!(next_carry >= carry, "the pack shrank at {level}");
             carry = next_carry;
+
+            let next_frame = exo_capacity(400, level);
+            assert!(next_frame >= frame, "the frame shrank at {level}");
+            frame = next_frame;
 
             let next_time = press_multiplier(level);
             assert!(next_time <= time, "the press slowed at {level}");
@@ -258,6 +279,10 @@ mod tests {
         assert_eq!(
             boosted_beam(1.5, 16.0, MAX_UPGRADE + 3),
             boosted_beam(1.5, 16.0, MAX_UPGRADE)
+        );
+        assert_eq!(
+            exo_capacity(400, MAX_UPGRADE + 3),
+            exo_capacity(400, MAX_UPGRADE)
         );
     }
 

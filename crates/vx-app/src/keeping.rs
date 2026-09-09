@@ -142,7 +142,7 @@ pub fn begin(directory: &Path, name: &str) -> std::io::Result<Writing> {
 /// the loads bind to locals named `rads`, `sightings`, `bath`, `eyes`, `press`,
 /// `rack`, `cabinet`, `holes` and `vaults`, and matching those to their files
 /// was, until now, a job for whoever was reading.
-pub const FILES: [(&str, &str); 36] = [
+pub const FILES: [(&str, &str); 38] = [
     ("log.dat", "journal"),
     ("explored.dat", "map"),
     ("player.dat", "skills"),
@@ -163,6 +163,8 @@ pub const FILES: [(&str, &str); 36] = [
     ("marks.dat", "scout"),
     ("dose.dat", "dose"),
     ("drillmod.dat", "drillmod"),
+    ("pack.dat", "pack"),
+    ("drops.dat", "drops"),
     ("garrisons.dat", "garrison"),
     ("pumps.dat", "pumps"),
     ("arsenal.dat", "arsenal"),
@@ -260,7 +262,11 @@ pub fn worth_saving_now(command: &crate::journal::Command) -> bool {
         | Command::Repair { .. }
         | Command::Spud { .. }
         | Command::Gift { .. }
-        | Command::Salvage { .. } => true,
+        | Command::Salvage { .. }
+        // Emptying the pack moves an afternoon's mining from your back into a
+        // container. Doing that twice is exactly the kind of thing this list
+        // is for.
+        | Command::Stow => true,
         // A crew sent out, and the civic acts that only happen once.
         Command::Dispatch { .. }
         | Command::Found { .. }
@@ -281,6 +287,9 @@ pub fn worth_saving_now(command: &crate::journal::Command) -> bool {
         | Command::Talk { .. }
         | Command::Wheel { .. }
         | Command::Pilot { .. }
+        // A capability being re-stated, which costs nothing to re-derive on
+        // the next boot from the wallet and the skill sheet that *are* saved.
+        | Command::Carry { .. }
         | Command::Admin(_) => false,
     }
 }
@@ -600,6 +609,17 @@ pub fn restore_the_fleet(mining: &mut Mining, world: &mut vx_world::World, root:
     crate::pile::load(&mut mining.fleet, root);
     crate::fleet::load(&mut mining.fleet, root);
     crate::dig::load(mining, world, root);
+}
+
+/// What the player is carrying, and what they left on the floor.
+///
+/// Beside [`restore_the_fleet`] and for the same reason: two boots, one
+/// sequence. The pack and the drops are one concern — a drop is what did not
+/// fit in the pack — so a boot that restored one and forgot the other would
+/// hand the player a full pack over an empty floor, or an empty pack over a
+/// floor of ore they could pick up twice.
+pub fn restore_the_pack(root: &Path) -> (crate::pack::Pack, crate::drops::Drops) {
+    (crate::pack::load(root), crate::drops::load(root))
 }
 
 #[cfg(test)]

@@ -272,10 +272,17 @@ build in it, and it survives quitting — skills included.
   blocks deep with a two-block mantle available, which is the point of a ditch
   — but it also means a player who drops into one has to walk it round to a
   gate, and nothing on the screen says that is what has happened.
-- There is no player inventory, so everything routes through the fleet's base
-  pile — which is also what the movement system weighs you down by. Mining
-  sixty blocks makes you walk at 0.55× until you sell, with the "pack" sat in a
-  container somewhere else entirely.
+- Drops do not fall while you watch. A block cut out of a ceiling settles onto
+  the floor under it the moment it is shed, which is the part that matters, but
+  it arrives there rather than tumbling — and a block cut out over a shaft it
+  cannot find a floor in within twelve blocks simply stays where it was cut.
+- The pack panel lists at most twelve kinds and says how many more there are.
+  A pack with more kinds than that in it is a pack you should have tipped, but
+  the panel still cannot show you all of it.
+- Selling still sells out of the *base pile*, not the pack, so a haul is two
+  actions: tip it into a container, then trade. That is the right shape for a
+  container you own and the wrong one for a counter in another town, where you
+  have to be carrying it and there is nowhere to put it down.
 - Saves store a full chunk snapshot per modified chunk — about 24 KiB whether
   one block changed or ten thousand. An edit journal would cost bytes instead.
   Harmless until worlds get large.
@@ -1071,6 +1078,56 @@ blocks cut and 25 goods on the pile; save, drop the whole session, load it back
 — **25 goods still on it**; then 206 blocks over the hills to a depot that has
 no ore of its own and pays **405 credits** for yours. Four pictures come out of
 it, one per beat.
+
+### You are carrying it now
+
+Here's a thing nobody's said out loud in fifty-four rounds. **You have never
+actually been carrying anything.** You swing the drill, the rock breaks, and the
+copper teleports straight into a container that might be three hundred metres
+away behind a hill. And then the game slows you down — for carrying it. The box.
+That you aren't touching. That's been sitting in the known-problems list since
+round sixteen like a mug nobody's picked up.
+
+So: pockets. You mine a thing, it goes on you, and the screen tells you what
+you've got — COPPER ORE 12 — on every single swing. Hit **I** and there's the
+whole list, heaviest first, with a bar showing how loaded you are and where the
+line is.
+
+**Ore's heavy. Leaves are nothing.** A block of plain stone is the yardstick;
+copper's about twice that, uranium three times, and a whole tree's worth of
+leaves is barely worth noticing. So what you choose to haul home is an actual
+decision now instead of a number going up. A fresh pack takes sixty-four stone —
+exactly what it always did, so nothing you're used to got smaller — or twenty-one
+of uranium.
+
+The first stretch is free: under about a third full you walk normally. Past that
+you feel it, and it gets worse the fuller you get, on exactly the same curve the
+game has always used — it's just finally attached to something you can see. And
+when it's completely full, the next rock you break **falls on the floor**. Little
+block sitting there, turning slowly. Nothing is destroyed, nothing is wasted; go
+back lighter and walk over it and it hops into your pockets. A block you knock
+out of a ceiling lands on the ground underneath it rather than hanging in the
+air at head height.
+
+Get to a container, press **E**, and the whole lot tips in. And when your legs
+have had enough there's an **exoskeleton** at the counter — five marks, a hundred
+credits up to sixteen hundred, or print one at the fabricator — which carries
+more *and* moves the "you're feeling it" line up so most of the pack is free.
+
+Two things fell out of the floorboards on the way through. The status panel has
+been quietly drawing rows off the bottom edge where nobody can see them, and one
+of the bars on it was one bad afternoon away from **crashing the game outright**
+— it wrote past the end of its own picture, and nothing had ever asked it to draw
+everything at once. Fixed, with a test that lights every row.
+
+And the replay check — the thing that proves a saved game plays back to the exact
+same world — **has never once counted a rock you broke by hand.** Since round six.
+It hid because nothing downstream looked, except that the pile it was short of is
+the pile your drones burn fuel out of, and a fleet that stops digs a different
+hole. While proving that one, the same test found a second: putting a container
+down in a replay never *declared* it, so a replayed session had a box standing
+there with nothing in it. Both fixed. The check is stricter than it has ever
+been, and it now agrees with the game about the goods and not just the ground.
 
 ### Nothing you did is lost
 
@@ -2394,6 +2451,11 @@ cargo run --release -p vx-app -- --screenshot haul.ppm --haul --seed 2024 --at 1
 # mid-dig and reload with it still cutting, sell up and buy a second, and print
 # the books. Writes payroll-01-byhand.ppm through payroll-04-books.ppm
 cargo run --release -p vx-app -- --screenshot payroll.ppm --payroll --seed 2024 --at 146,30
+
+# the pack: cut a real adit until it will hold no more, leave what would not
+# fit on the floor of the drift, tip the lot into a container and walk the
+# drops back up. Writes pack-01-dropped.ppm through pack-04-adit.ppm
+cargo run --release -p vx-app -- --screenshot pack.ppm --pack --seed 2024 --at 146,30
 
 # put a bigger crew on the next dispatch
 cargo run --release -p vx-app -- --drones 8

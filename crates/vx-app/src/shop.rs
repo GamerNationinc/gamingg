@@ -197,6 +197,7 @@ impl Shop {
             wallet::CARGO,
             wallet::CELL,
             wallet::PACK,
+            wallet::EXO,
             wallet::LAMP,
         ] {
             // The cell line only means anything to a kestrel owner.
@@ -660,6 +661,7 @@ mod tests {
                 // press is not, and its absence here is the point — the
                 // workshop is the only place that sells rollers for itself.
                 Row::Buy(wallet::PACK),
+                Row::Buy(wallet::EXO),
                 Row::Buy(wallet::LAMP),
             ],
             "the shelf should list every traded good in the pile and nothing else"

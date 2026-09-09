@@ -42,6 +42,8 @@
 //! | The kestrel's contact report | `marks.dat` |
 //! | What the deep ore has done to you | `dose.dat` |
 //! | Where you left the drill mod's two switches | `drillmod.dat` |
+//! | What you are carrying | `pack.dat` |
+//! | What you left lying on the ground | `drops.dat` |
 //! | Which shelters you have finished with | `garrisons.dat` |
 //! | Which pumps you left running | `pumps.dat` |
 //! | The stamp that makes the set one save | `manifest.dat` |
@@ -105,6 +107,7 @@ mod dig;
 mod fleet;
 mod disposition;
 mod drill;
+mod drops;
 mod drillmod;
 mod dose;
 mod economy;
@@ -127,6 +130,7 @@ mod keeping;
 mod map;
 mod mining;
 mod people;
+mod pack;
 mod payroll;
 mod permits;
 mod pile;
@@ -207,6 +211,8 @@ const WARD_SLOT: usize = 17;
 const OSK_SLOT: usize = 18;
 /// The drill sonar's scope, up for a few seconds after a ping.
 const SCOPE_SLOT: usize = 19;
+/// What you are carrying.
+const PACK_SLOT: usize = 20;
 use keeping::Kept;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
@@ -331,6 +337,7 @@ struct Options {
     /// The drill mod, in five beats: the cage, the cut, the ping, the dark
     /// and the same frame with both switches down.
     drillmod: bool,
+    pack: bool,
     /// Durability: save, snapshot, tear, fall back — and the first timings
     /// this game has ever taken of its own save.
     keeping: bool,
@@ -431,6 +438,7 @@ fn parse_args() -> Result<Options, String> {
         gimbal: false,
         haul: false,
         drillmod: false,
+        pack: false,
         keeping: false,
         terminal: false,
         people: false,
@@ -540,6 +548,7 @@ fn parse_args() -> Result<Options, String> {
             "--gimbal" => options.gimbal = true,
             "--haul" => options.haul = true,
             "--drillmod" => options.drillmod = true,
+            "--pack" => options.pack = true,
             "--keeping" => options.keeping = true,
             "--payroll" => options.payroll = true,
             "--terminal" => options.terminal = true,
@@ -984,6 +993,11 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     // sonar's answer through the rock around it.
     if options.drillmod {
         return photograph_the_drill_mod(&context, &mut renderer, &mut camera, options, path);
+    }
+
+    // The pack: what you cut on your back, and what would not fit on the floor.
+    if options.pack {
+        return photograph_the_pack(&context, &mut renderer, &mut camera, options, path);
     }
 
     // Durability: a save torn on purpose, and the world coming back from the
@@ -4746,6 +4760,205 @@ fn photograph_the_drill_mod(
     Ok(())
 }
 
+/// The pack, played: what you cut goes on your back, and what will not fit
+/// lies on the floor until you come back lighter.
+///
+/// Uses the same pinned outcrop and the same real `break_block` the drill mod's
+/// fixture does, and for the same reason: what the pictures show is a hole
+/// somebody dug, with a floor somebody actually over-mined.
+fn photograph_the_pack(
+    context: &GpuContext,
+    renderer: &mut Renderer,
+    camera: &mut Camera,
+    options: &Options,
+    path: &str,
+) -> Result<(), String> {
+    let stem = path.strip_suffix(".ppm").unwrap_or(path);
+    let at = (146, 30);
+    let (mut world, _) = build_scene(context, renderer, options.seed, 7, at);
+
+    // A stone face with air in front of it, the same search the drill mod's
+    // fixture makes — a face, not a hilltop, so the adit reads as a mine.
+    const SIDES: [[i32; 3]; 4] = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]];
+    let mut found: Option<(vx_core::BlockPos, [i32; 3])> = None;
+    'search: for dz in -20..=20 {
+        for dx in -20..=20 {
+            let (x, z) = (at.0 + dx, at.1 + dz);
+            let Some(surface) = world.surface_y(x, z) else { continue };
+            for y in (surface - 6)..(surface - 1) {
+                let block = vx_core::BlockPos::new(x, y, z);
+                if world.registry().get_or_air(world.block(block)).name != "engine:stone" {
+                    continue;
+                }
+                if let Some(side) = SIDES
+                    .into_iter()
+                    .find(|side| world.block(block.offset(*side)).is_air())
+                {
+                    found = Some((block, side));
+                    break 'search;
+                }
+            }
+        }
+    }
+    let (face, side) = found.ok_or("no drillable face near the outcrop")?;
+    let middle = glam::DVec3::new(
+        f64::from(face.x) + 0.5,
+        f64::from(face.y) + 0.5,
+        f64::from(face.z) + 0.5,
+    );
+    let out = glam::DVec3::new(f64::from(side[0]), 0.0, f64::from(side[2]));
+    let along = glam::DVec3::new(-out.z, 0.0, out.x);
+
+    // Cut the adit, three wide and three high, through the real break — and
+    // put every block that comes out through the real deposit rule, so the
+    // pack fills and the floor fills exactly as they would in play.
+    let events = vx_core::EventBus::new();
+    let capacity = pack::capacity(1, 0, 0);
+    let mut carried = pack::Pack::new();
+    let mut floor = drops::Drops::new();
+    let cross = [-1, 0, 1];
+    // Long enough to overfill a stock pack twice over, which is the point: the
+    // last stretch of the adit is the stretch with a floor.
+    for step in 1..=16i32 {
+        for lift in cross {
+            for wide_step in cross {
+                let where_at = middle
+                    + out * f64::from(step)
+                    + along * f64::from(wide_step)
+                    + glam::DVec3::Y * f64::from(lift);
+                let block = vx_core::BlockPos::new(
+                    where_at.x.floor() as i32,
+                    where_at.y.floor() as i32,
+                    where_at.z.floor() as i32,
+                );
+                let was = world.block(block);
+                if was.is_air() {
+                    continue;
+                }
+                if vx_world::break_block(&mut world, &events, block).is_err() {
+                    continue;
+                }
+                drill::deposit(
+                    &mut carried,
+                    &mut floor,
+                    capacity,
+                    &world,
+                    was,
+                    block,
+                    false,
+                );
+            }
+        }
+    }
+    remesh_all(context, renderer, &mut world);
+    println!(
+        "  cut an adit: carrying {} of {} in {} things, {} piles ({} blocks) left on the floor",
+        carried.load() / pack::UNIT,
+        capacity / pack::UNIT,
+        carried.total(),
+        floor.len(),
+        floor.count("engine:stone") + floor.count("engine:dirt")
+    );
+    if floor.is_empty() {
+        return Err("the adit did not fill the pack, so nothing was dropped".into());
+    }
+
+    // Standing part-way down the adit, looking at the *deep* end — because
+    // the deep end is where the pack filled up, and so it is where the floor
+    // is. Looking back at the face would be a picture of clean rock.
+    let eye = middle + out * 7.0 + glam::DVec3::Y * 0.9;
+    camera.position = eye;
+    look_at(camera, middle + out * 15.0);
+
+    let mut shot = 0;
+    let day = clock::sun_uniform(clock::sky_at(TimeOfDay::new(0.42)));
+    renderer.set_sun(&context.queue, day);
+
+    let mut photograph = |context: &GpuContext,
+                          renderer: &mut Renderer,
+                          camera: &Camera,
+                          objects: &[vx_render::Object],
+                          beat: &str|
+     -> Result<(), String> {
+        shot += 1;
+        renderer.update_camera(&context.queue, camera);
+        renderer.set_objects(&context.device, &context.queue, objects);
+        let out = format!("{stem}-{shot:02}-{beat}.ppm");
+        capture_frame(context, renderer, options.width, options.height)
+            .write_ppm(&out)
+            .map_err(|error| format!("could not write {out}: {error}"))?;
+        println!("  beat {shot}: {beat} -> {out}");
+        Ok(())
+    };
+
+    // The panel, over the adit it was filled in.
+    let show = |renderer: &mut Renderer, carried: &pack::Pack| {
+        let pixels = pack::render_pack(carried, capacity, 0);
+        let scale = 2.0;
+        let width = pack::PANEL_WIDTH as f32 * scale;
+        let height = pack::PANEL_HEIGHT as f32 * scale;
+        renderer.set_overlay(
+            PACK_SLOT,
+            &context.device,
+            &context.queue,
+            (pack::PANEL_WIDTH, pack::PANEL_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: options.width as f32 - width - 16.0,
+                y: 16.0,
+                width,
+                height,
+            },
+        );
+    };
+
+    // 1. A full pack, and the piles it could not take, lying where they fell.
+    //
+    // The camera goes to the GPU *first*: `render_origin` is the camera's own
+    // chunk, and the drops are built relative to it, so reading it before the
+    // move would put every pile a chunk away from where it fell.
+    renderer.update_camera(&context.queue, camera);
+    show(renderer, &carried);
+    let lying = drops::objects(&floor, world.registry(), 0.0, renderer.render_origin().as_dvec3());
+    photograph(context, renderer, camera, &lying, "dropped")?;
+
+    // 2. Closer, so the little blocks read as blocks.
+    let near = middle + out * 11.0 + glam::DVec3::Y * 0.55;
+    camera.position = near;
+    look_at(camera, middle + out * 13.5);
+    renderer.update_camera(&context.queue, camera);
+    let lying = drops::objects(&floor, world.registry(), 0.6, renderer.render_origin().as_dvec3());
+    photograph(context, renderer, camera, &lying, "close")?;
+
+    // 3. Tip the pack into a container and walk back over them: room again,
+    // and the floor comes up off the floor.
+    let mut fleet = vx_agent::Fleet::default();
+    fleet.set_base(vx_core::BlockPos::new(face.x, face.y + 4, face.z));
+    let tipped = pack::tip(&mut carried, &mut fleet);
+    let mut picked = 0u64;
+    for pile in floor.clone().iter() {
+        for (_, count) in floor.collect_near(pile.centre(), &mut carried, capacity) {
+            picked += count;
+        }
+    }
+    println!("  tipped {tipped} into the container, then walked {picked} back up");
+    show(renderer, &carried);
+    renderer.update_camera(&context.queue, camera);
+    let lying = drops::objects(&floor, world.registry(), 1.2, renderer.render_origin().as_dvec3());
+    photograph(context, renderer, camera, &lying, "collected")?;
+
+    // 4. The same adit with the panel down: nothing about the pack is drawn
+    // on the world except the piles themselves.
+    renderer.clear_overlay(PACK_SLOT);
+    camera.position = eye;
+    look_at(camera, middle + out * 15.0);
+    renderer.update_camera(&context.queue, camera);
+    let lying = drops::objects(&floor, world.registry(), 1.8, renderer.render_origin().as_dvec3());
+    photograph(context, renderer, camera, &lying, "adit")?;
+
+    Ok(())
+}
+
 /// Durability, played and measured: a save, a snapshot, a save torn on
 /// purpose, and the world coming back whole from the one before it.
 ///
@@ -5228,14 +5441,18 @@ fn play_the_loop(
             break;
         };
         session.look_at(next);
-        if matches!(session.drill_through(600), Some(drill::Deposited::Piled(_))) {
+        if matches!(session.drill_through(600), Some(drill::Deposited::Packed(_))) {
             cut += 1;
         } else {
             break;
         }
     }
-    let pack = session.pile().map_or(0, |pile| pile.total());
-    println!("  cut {cut} blocks; the pack holds {pack}");
+    // What you cut is on your back now, not in a container across town.
+    println!(
+        "  cut {cut} blocks; the pack holds {} at load byte {}",
+        session.pack.total(),
+        session.load_byte()
+    );
     // Leave the last one half-drilled so the face in shot is a worked face.
     if let Some(next) = body
         .blocks()
@@ -5265,9 +5482,14 @@ fn play_the_loop(
             session.player.position
         ));
     }
+    // Tip the pack in before trading. Since stage 55 what you cut by hand is
+    // on your back, and the counter sells out of the fleet's pile — so this
+    // is now a step of the loop rather than a formality.
+    let tipped = session.stow().unwrap_or(0);
     let earned = session.sell_everything();
     println!(
-        "  sold the haul for {earned} CR; the wallet holds {}",
+        "  tipped {tipped} into the container, sold the haul for {earned} CR; \
+         the wallet holds {}",
         session.wallet.credits()
     );
 
@@ -5279,10 +5501,10 @@ fn play_the_loop(
     photograph(context, renderer, camera, &mut session, "counter", till)?;
 
     println!(
-        "played {} ticks, {} journal entries, {} blocks lost to no pile",
+        "played {} ticks, {} journal entries, {} blocks left on the floor",
         session.tick,
         session.journal.entries().len(),
-        session.lost
+        session.left
     );
     Ok(())
 }
@@ -5443,7 +5665,7 @@ fn run_the_payroll(
                 break;
             };
             session.look_at(next);
-            if matches!(session.drill_through(600), Some(drill::Deposited::Piled(_))) {
+            if matches!(session.drill_through(600), Some(drill::Deposited::Packed(_))) {
                 by_hand += 1;
             } else {
                 break;
@@ -5464,9 +5686,11 @@ fn run_the_payroll(
     if !came.reached() {
         return Err(format!("could not get home to sell: {came:?}"));
     }
+    let tipped = session.stow().unwrap_or(0);
     let earned = session.sell_everything_at(&home);
     println!(
-        "  sold the first load for {earned} CR; the wallet holds {}",
+        "  tipped {tipped} in, sold the first load for {earned} CR; \
+         the wallet holds {}",
         session.wallet.credits()
     );
     // Selling "everything" sells the *fuel* too — HHO is a traded good and the
@@ -5848,15 +6072,18 @@ fn haul_it_somewhere(
                 break;
             };
             session.look_at(next);
-            if matches!(session.drill_through(600), Some(drill::Deposited::Piled(_))) {
+            if matches!(session.drill_through(600), Some(drill::Deposited::Packed(_))) {
                 cut += 1;
             } else {
                 break;
             }
         }
     }
-    let before = session.pile().map_or(0, |pile| pile.total());
-    println!("  cut {cut} blocks; the pile holds {before}");
+    let before = session.pack.total();
+    println!(
+        "  cut {cut} blocks; the pack holds {before} at load byte {}",
+        session.load_byte()
+    );
     let ahead = session.player.position + (session.forward() * 4.0).as_dvec3();
     photograph(context, renderer, camera, &mut session, "cut", ahead)?;
 
@@ -5896,14 +6123,16 @@ fn haul_it_somewhere(
     let mut session = session::Session::load_from(&root)
         .map_err(|error| format!("could not load the save back: {error}"))?;
     std::fs::remove_dir_all(&root).ok();
-    let after = session.pile().map_or(0, |pile| pile.total());
+    // The pack is the thing under test now: what you cut by hand rides on
+    // your back, so it is the pack that has to survive the save.
+    let after = session.pack.total();
     println!(
-        "  saved at home and reloaded: the pile holds {after} (was {before}), stood at {:?} (saved at {:?})",
+        "  saved at home and reloaded: the pack holds {after} (was {before}), stood at {:?} (saved at {:?})",
         session.player.position.round(),
         stood.round()
     );
     if after != before {
-        return Err(format!("the pile lost {} goods across a save", before - after));
+        return Err(format!("the pack lost {} goods across a save", before - after));
     }
     let doorstep = session.doorstep();
     photograph(context, renderer, camera, &mut session, "reloaded", doorstep)?;
@@ -5938,6 +6167,9 @@ fn haul_it_somewhere(
     let hauled = session.walk_route(&legs, 8 * 6_000);
     println!("  hauled it there: {hauled:?}");
     let earned = if hauled.reached() && session.at_the_counter(&elsewhere) {
+        // The pack goes in before the counter sees it, here as everywhere.
+        let tipped = session.stow().unwrap_or(0);
+        println!("  tipped {tipped} into the container");
         session.sell_everything_at(&elsewhere)
     } else {
         println!(
@@ -6177,6 +6409,17 @@ struct Active {
     ping: Option<(sonar::Reading, Instant)>,
     /// The tick the last ping went out on, for `drillmod::PING_REST`.
     pinged_at: u64,
+    /// The capacity last put on the wire, so `Carry` is recorded on change
+    /// rather than every frame.
+    carried: Option<u64>,
+    /// What the player is carrying. Stage 55: everything you break lands here
+    /// first, and this is what the load byte finally measures.
+    pack: pack::Pack,
+    /// What would not fit, lying in the cells it came out of.
+    drops: drops::Drops,
+    /// Whether the pack panel is up. Live-only: which panel you had open is
+    /// not a fact about the world.
+    pack_open: bool,
     /// Which save this world is on. Read off the manifest at boot and
     /// stepped by every save, so a torn generation can be named.
     generation: u64,
@@ -6556,32 +6799,16 @@ impl App {
             MovementMode::Walk => {
                 // Sample once, then run whole ticks of it. This is the seam the
                 // movement round exists for: nothing below this line sees `dt`.
-                let carried = active
-                    .mining
-                    .fleet
-                    .base
-                    .as_ref()
-                    .map(|base| base.stockpile.total())
-                    .unwrap_or(0)
-                    // The launcher weighs like cargo: folded into the load
-                    // *before* the command is journalled, so the weight
-                    // replays without the oracle learning what a weapon is.
-                    + if active.arsenal.owned {
-                        arsenal::LAUNCHER_HEFT
-                    } else {
-                        0
-                    };
-                // What you learned, then what you fitted. Safe against the
-                // oracle because the load reaches the journal as the byte
-                // computed below, not as something replay re-derives.
-                let capacity = wallet::pack_capacity(
-                    skills::capacity(
-                        vx_agent::DEFAULT_CAPACITY,
-                        active.skills.level(skills::LOGISTICS),
-                    ),
-                    active.wallet.upgrade(wallet::PACK),
-                );
-                let load = movement::load_byte(carried, capacity);
+                // What you are carrying, on your back, right now — not the
+                // total of a pile in a container across the map, which is
+                // what this measured until stage 55.
+                //
+                // The size of the frame goes on the wire first, when it has
+                // moved: replay has no wallet to read it off, and a stock-sized
+                // pack in replay would drop what a fitted player kept. Once a
+                // session, in practice.
+                Self::note_capacity(active);
+                let load = Self::pack_load(active);
                 let command = self
                     .walk
                     .sample(&mut active.camera, &mut self.input)
@@ -6890,6 +7117,7 @@ impl App {
         Self::advance_water(active, active.mining.last_ticks());
         Self::advance_weather(active, active.mining.last_ticks());
         Self::collect_crashes(active);
+        Self::collect_drops(active);
         Self::advance_scouts(active, active.mining.last_ticks());
         Self::advance_printing(active, active.mining.last_ticks());
         Self::advance_electrolysis(active, active.mining.last_ticks());
@@ -7366,6 +7594,16 @@ impl App {
                 objects.extend(hologram::scan_plane(hit.block, progress));
             }
         }
+        // What you dropped, turning on the spot on the floor. After the
+        // lighting loop for the same reason the cage is: a drop in a dark adit
+        // that got relit as ground would be invisible, and the whole point of
+        // it is that you can see it from across the hole.
+        objects.extend(drops::objects(
+            &active.drops,
+            active.world.registry(),
+            active.started.elapsed().as_secs_f32(),
+            origin,
+        ));
         if let Some((reading, when)) = &active.ping {
             let age = when.elapsed().as_secs_f32();
             objects.extend(hologram::rings(reading.centre, age));
@@ -7381,6 +7619,7 @@ impl App {
             .set_objects(&active.context.device, &active.context.queue, &objects);
         self.refresh_hud();
         self.refresh_scope();
+        self.refresh_pack();
         self.refresh_shop();
         self.refresh_home();
         self.refresh_permit();
@@ -8334,6 +8573,35 @@ impl App {
             // where you are stood, and which counter within reach would pay
             // more — ranked on what it can actually *pay*, not on the sticker
             // price, since stage 52 gave every town a till that runs dry.
+            // What you are carrying. A readout, not an order: the tipping is
+            // done at a container, where the goods actually go.
+            "pack" => {
+                let capacity = Self::pack_capacity(active);
+                let easy = pack::comfortable(capacity, active.wallet.upgrade(wallet::EXO));
+                let load = active.pack.load();
+                let mut lines = vec![format!(
+                    "PACK {}/{} IN {} THINGS - EASY TO {}",
+                    load / pack::UNIT,
+                    capacity / pack::UNIT,
+                    active.pack.total(),
+                    easy / pack::UNIT
+                )];
+                if active.pack.is_empty() {
+                    lines.push("EMPTY.".into());
+                }
+                for (name, count) in active.pack.entries() {
+                    lines.push(format!(
+                        "{count} {} - {}",
+                        shop::display_name(name),
+                        pack::weight_of(name) * count / pack::UNIT
+                    ));
+                }
+                let floor = active.drops.len();
+                if floor > 0 {
+                    lines.push(format!("AND {floor} PILES ON THE GROUND"));
+                }
+                lines
+            }
             // The drill mod. Bare, it reports; with an argument, it flips a
             // switch. Nothing here touches the world, so nothing here is an
             // order — see `drillmod`.
@@ -10104,6 +10372,52 @@ impl App {
         }
     }
 
+    /// Put the current carrying capacity on the wire, if it has moved.
+    ///
+    /// Replay has no wallet and no skill sheet — the counter's upgrade rows
+    /// and the fabricator's are both live-only — so the size of the pack must
+    /// be *told* to it. On change, not per tick: for most sessions that is
+    /// once at boot and once per upgrade bought. See `journal::Command::Carry`.
+    fn note_capacity(active: &mut Active) {
+        let now = Self::pack_capacity(active);
+        if active.carried == Some(now) {
+            return;
+        }
+        active.carried = Some(now);
+        record_order(
+            active,
+            journal::Command::Carry {
+                capacity: now.min(u64::from(u32::MAX)) as u32,
+            },
+        );
+    }
+
+    /// Walk near something you dropped and it hops back into the pack.
+    ///
+    /// Automatic and keyless on purpose: the pleasure of the thing is that it
+    /// comes to you. The same shape as `collect_crashes` above, which has been
+    /// the game's one walk-over-and-take-it rule since stage 13.
+    fn collect_drops(active: &mut Active) {
+        if active.drops.is_empty() {
+            return;
+        }
+        let capacity = Self::pack_capacity(active);
+        let feet = active.player.position;
+        let taken = active.drops.collect_near(feet, &mut active.pack, capacity);
+        let Some((good, _)) = taken.last() else {
+            return;
+        };
+        let total: u64 = taken.iter().map(|(_, count)| *count).sum();
+        active.greeting = Some((
+            format!(
+                "PICKED UP {total} - {} {}",
+                shop::display_name(good),
+                active.pack.count(good)
+            ),
+            Instant::now(),
+        ));
+    }
+
     /// Walk-up salvage: stand next to a downed load and it goes onto the
     /// base pile — the same pile everything else the fleet hauls lands on.
     /// No base means the wreck simply waits.
@@ -10173,6 +10487,50 @@ impl App {
     /// selection box on the aimed block: nothing outside those two methods
     /// could find out what the block was. One cast, one answer, read by all
     /// three — and one fewer traversal a frame than before.
+    /// What the player can carry, in `pack::UNIT`s.
+    ///
+    /// The one place the live game works this out, and its twin is
+    /// `Session::capacity`. It used to be two hand-written copies of the same
+    /// three curves a thousand lines apart, which is exactly how the headless
+    /// game and the windowed one came to disagree about anything at all.
+    fn pack_capacity(active: &Active) -> u64 {
+        pack::capacity(
+            active.skills.level(skills::LOGISTICS),
+            active.wallet.upgrade(wallet::PACK),
+            active.wallet.upgrade(wallet::EXO),
+        )
+    }
+
+    /// How full the pack is, as the byte the journal carries.
+    ///
+    /// The launcher rides along, and note *how*: it counts when it is in your
+    /// hands, not when you merely own one. `arsenal::LAUNCHER_HEFT` used to be
+    /// added on `owned`, which meant buying a launcher and leaving it slung
+    /// made you permanently slower — a tax on a purchase rather than on
+    /// carrying a heavy thing, which is what it was plainly trying to say.
+    ///
+    /// Safe against the oracle for the reason it always was: the load reaches
+    /// the journal as this byte, and replay re-installs the byte rather than
+    /// re-deriving it. What fills it is free to change.
+    fn pack_load(active: &Active) -> u8 {
+        let capacity = Self::pack_capacity(active);
+        let mut load = pack::load_byte(
+            &active.pack,
+            capacity,
+            active.wallet.upgrade(wallet::EXO),
+        );
+        if active.arsenal.equipped {
+            // A launcher in hand is a fixed share of the frame, not a share of
+            // the pack: it weighs the same whether you are empty or full.
+            let share = ((arsenal::LAUNCHER_HEFT * pack::UNIT) as f64
+                / capacity.max(1) as f64
+                * 255.0)
+                .round() as u16;
+            load = load.saturating_add(share.min(255) as u8);
+        }
+        load
+    }
+
     fn refresh_aim(&mut self) {
         let Some(active) = &mut self.active else { return };
         // Nothing is aimed at while a panel has the mouse: the camera is not
@@ -10406,29 +10764,41 @@ impl App {
                 // the order, so the replay wakes the same water on the same
                 // tick and the flood is re-derived rather than recorded.
                 journal::wake_water(&mut active.water, &mut active.world, hit.block);
-                // Everything you break is stock. Every block yields itself by
-                // name onto the same pile the drones haul into and the shop
-                // sells out of — one pile, no transfer minigame, and the
-                // fabricator's whole catalogue is fed by it. A hand-cut block
-                // used to simply vanish, which made the drill the one tool
-                // in the game that produced nothing.
+                // Everything you break is stock, and since stage 55 it is
+                // stock *you are carrying*. It used to go straight onto the
+                // fleet's pile — a container standing somewhere else entirely
+                // — which is why the movement system spent fifty-four stages
+                // slowing you down for the weight of goods you were nowhere
+                // near. Now it goes on your back, or on the floor if your back
+                // is full, and you walk it home yourself.
+                let capacity = Self::pack_capacity(active);
                 let landed = drill::deposit(
-                    active
-                        .mining
-                        .fleet
-                        .base
-                        .as_mut()
-                        .map(|base| &mut base.stockpile),
-                    active.world.registry(),
+                    &mut active.pack,
+                    &mut active.drops,
+                    capacity,
+                    &active.world,
                     hit.id,
+                    hit.block,
                     crate_here,
                 );
-                if landed == drill::Deposited::NoBase {
-                    // There is no base at boot, and this was the one system in
-                    // the game that produced goods and never said where they
-                    // went: the block broke, the ore evaporated, and nothing
-                    // was printed anywhere. Every sibling says this line.
-                    active.greeting = Some((drill::NO_BASE.to_string(), Instant::now()));
+                // The running count, on every swing — the "see the number of
+                // items in your inventory" half of what was asked for. The
+                // name in `Packed` had been computed and thrown away since
+                // stage 48; this is the first thing to read it.
+                match &landed {
+                    drill::Deposited::Packed(name) => {
+                        active.greeting = Some((
+                            format!("{} {}", shop::display_name(name), active.pack.count(name)),
+                            Instant::now(),
+                        ));
+                    }
+                    drill::Deposited::Dropped(name) => {
+                        active.greeting = Some((
+                            format!("PACK FULL - {} ON THE GROUND", shop::display_name(name)),
+                            Instant::now(),
+                        ));
+                    }
+                    _ => {}
                 }
                 let xp = (hardness * skills::MINING_XP_PER_HARDNESS) as u64;
                 if let Some(level) = active.skills.add_xp(skills::MINING, xp) {
@@ -10787,6 +11157,7 @@ impl App {
                 || active.banks.open
                 || active.intro.open
                 || active.terminal.open
+                || active.pack_open
                 || self.gold_is_open()
         })
     }
@@ -11632,6 +12003,16 @@ impl App {
                     active.greeting = Some((line.to_string(), Instant::now()));
                 }
             }
+            // What you are carrying. `I` for inventory, which is what every
+            // player who has ever held a pack will reach for first.
+            KeyCode::KeyI => {
+                if let Some(active) = &mut self.active {
+                    active.pack_open = !active.pack_open;
+                    if !active.pack_open {
+                        active.renderer.clear_overlay(PACK_SLOT);
+                    }
+                }
+            }
             KeyCode::F3 => {
                 if let Some(active) = &mut self.active {
                     active.debug_open = !active.debug_open;
@@ -12030,6 +12411,22 @@ impl App {
             }
             "engine:chest" => {
                 active.home_panel.open_at_chest();
+            }
+            // Tipping the pack. The other half of a carrying limit: something
+            // has to empty it, or a cap is just a shorter game. In place and
+            // with no panel, like the mailbox above — a stockpile is a
+            // stockpile, and there is nothing to choose between.
+            "engine:container" => {
+                let line = if active.pack.is_empty() {
+                    "YOUR PACK IS EMPTY".to_string()
+                } else if active.mining.fleet.base.is_none() {
+                    drill::NO_BASE.to_string()
+                } else {
+                    record_order(active, journal::Command::Stow);
+                    let moved = pack::tip(&mut active.pack, &mut active.mining.fleet);
+                    format!("TIPPED {moved} GOODS INTO THE CONTAINER")
+                };
+                active.greeting = Some((line, Instant::now()));
             }
             "engine:mailbox" => {
                 // Collect in place, no panel: everything moves into the chest,
@@ -13180,6 +13577,48 @@ impl App {
         );
     }
 
+    /// Draw the pack when it is up.
+    ///
+    /// The count the player asked to see, on a panel rather than in the HUD —
+    /// the HUD has fifteen conditional rows and room for ten, and adding a
+    /// sixteenth would push the drilling bar further off the bottom. See
+    /// `hud::draw_bar`, which this round also stopped indexing past its own
+    /// buffer.
+    fn refresh_pack(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if !active.pack_open {
+            active.renderer.clear_overlay(PACK_SLOT);
+            return;
+        }
+        let capacity = pack::capacity(
+            active.skills.level(skills::LOGISTICS),
+            active.wallet.upgrade(wallet::PACK),
+            active.wallet.upgrade(wallet::EXO),
+        );
+        let pixels = pack::render_pack(
+            &active.pack,
+            capacity,
+            active.wallet.upgrade(wallet::EXO),
+        );
+        let (screen_width, screen_height) = active.renderer.size();
+        let scale = 2.0;
+        let width = pack::PANEL_WIDTH as f32 * scale;
+        let height = pack::PANEL_HEIGHT as f32 * scale;
+        active.renderer.set_overlay(
+            PACK_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (pack::PANEL_WIDTH, pack::PANEL_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: (screen_width as f32 - width) * 0.5,
+                y: (screen_height as f32 - height) * 0.5,
+                width,
+                height,
+            },
+        );
+    }
+
     /// Draw the terminal when it is open.
     /// Assemble the F3 snapshot and draw it. The panel is a pure function
     /// of this struct; everything here only *reads*, which is the whole
@@ -13796,6 +14235,16 @@ impl App {
         // per file is the rule that stops a version bump on somebody else's
         // ledger silently erasing this one.
         note(&mut failed, "the drill mod", active.drillmod.save(save.root()));
+        // What is on your back, and what would not fit and is lying on the
+        // floor. Two files because they are two concerns that happen to be
+        // written together — and because a drop is a thing in the world, while
+        // a pack is a thing about you.
+        note(&mut failed, "your pack", pack::save(&active.pack, save.root()));
+        note(
+            &mut failed,
+            "what you dropped",
+            drops::save(&active.drops, save.root()),
+        );
         // Which shelters are finished with. Not the firefight — that is
         // genuinely mid-flight and re-musters from the bunker's own seed —
         // but the *outcome*, which nothing derived and nothing wrote down.
@@ -14180,6 +14629,8 @@ impl ApplicationHandler for App {
         let mut sightings = scout::Marks::default();
         let mut rads = dose::Dose::default();
         let mut drillmod = drillmod::Switches::default();
+        let mut pack = pack::Pack::new();
+        let mut drops = drops::Drops::new();
         let mut held = garrison::Garrisons::default();
         if let Some(save) = &save {
             map.load(save.root());
@@ -14304,6 +14755,11 @@ impl ApplicationHandler for App {
             // orphaned goods were written on every save, read back correctly,
             // and binned. Two copies of a restore is one copy too many.
             keeping::restore_the_fleet(&mut mining, &mut world, save.root());
+            // And what the player is carrying, through the same one function
+            // the session boots with, for exactly the reason above.
+            let (kept_pack, kept_drops) = keeping::restore_the_pack(save.root());
+            pack = kept_pack;
+            drops = kept_drops;
         }
         // Only *after* the fleet is back, or a restored flier is joined by a
         // free one every time the world opens.
@@ -14335,6 +14791,10 @@ impl ApplicationHandler for App {
             drillmod,
             ping: None,
             pinged_at: 0,
+            carried: None,
+            pack,
+            drops,
+            pack_open: false,
             generation: opening_generation,
             snapshotted: Instant::now(),
             saved_at: Instant::now(),

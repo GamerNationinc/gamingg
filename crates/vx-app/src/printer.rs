@@ -333,6 +333,26 @@ pub const CATALOGUE: &[Recipe] = &[
         seconds: 90.0,
         floor: 30,
     },
+    // The powered frame. Appended rather than filed at its own difficulty,
+    // and that is deliberate: `Command::Print` records a recipe by its
+    // **index into this array**, so slotting a row into the middle silently
+    // re-points every print order in every log ever written. Adding to the
+    // end costs nothing and breaks nothing. `the_optics_climb_the_ladder_in_order`
+    // is the test that makes that loud.
+    //
+    // It takes bar and a cell rather than plank, because the whole point of an
+    // exoskeleton is that the weight goes through metal instead of your legs.
+    Recipe {
+        label: "EXOSKELETON",
+        output: Output::Upgrade(crate::wallet::EXO),
+        inputs: &[
+            ("engine:copper_bar", 6),
+            ("engine:metal_wall", 2),
+            ("engine:hho_cell", 2),
+        ],
+        seconds: 42.0,
+        floor: 30,
+    },
 ];
 
 /// Look a recipe up by the index the journal records.
@@ -605,6 +625,8 @@ mod tests {
                 "KESTREL",
                 "GROUND DRONE",
                 "TOWN CHARTER",
+                // Appended, not filed by difficulty — see the row's own note.
+                "EXOSKELETON",
             ]
         );
         let mut floor = 0;

@@ -224,6 +224,9 @@ pub fn key_for(button: Button, context: Context) -> Option<KeyCode> {
             Button::DPadRight => Some(KeyCode::KeyF),
             Button::LeftThumb => Some(KeyCode::KeyH),
             Button::RightThumb => Some(KeyCode::KeyP),
+            // What you are carrying. On the second layer because it is a
+            // readout you check between swings, not a thing you do mid-cut.
+            Button::Start => Some(KeyCode::KeyI),
             _ => None,
         },
         // Ten slots, ten controls, no cursor: the palette is muscle memory
@@ -354,7 +357,7 @@ const BACKGROUND: [u8; 4] = [10, 12, 16, 240];
 /// The control scheme, written for the player. One row per physical
 /// control, in the order a hand finds them, grouped by layer. A row whose
 /// control is empty is a heading. Tested drawable.
-pub const SCHEME: [(&str, &str); 36] = [
+pub const SCHEME: [(&str, &str); 37] = [
     ("", "ON FOOT"),
     ("LEFT STICK", "MOVE, CLICK TO SPRINT"),
     ("RIGHT STICK", "LOOK, CLICK FOR OPTICS"),
@@ -384,6 +387,7 @@ pub const SCHEME: [(&str, &str); 36] = [
     ("D-PAD DOWN", "SAVE THE WORLD"),
     ("L-STICK", "THE DRILL HOLOGRAM"),
     ("R-STICK", "THE DRILL SONAR"),
+    ("START", "YOUR PACK"),
     ("SELECT", "TAP: THIS PANEL"),
     ("", "IN A PANEL"),
     ("A, B", "CONFIRM, BACK OUT"),
@@ -516,6 +520,7 @@ mod tests {
             KeyCode::KeyL, KeyCode::KeyM, KeyCode::KeyN, KeyCode::KeyG, KeyCode::KeyR,
             KeyCode::KeyX, KeyCode::KeyZ, KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA,
             KeyCode::KeyD, KeyCode::KeyQ, KeyCode::KeyH, KeyCode::KeyP,
+            KeyCode::KeyI,
             KeyCode::Space, KeyCode::ShiftLeft, KeyCode::ControlLeft,
             KeyCode::Tab, KeyCode::Enter, KeyCode::Escape, KeyCode::Backspace,
             KeyCode::Delete, KeyCode::Home, KeyCode::End,

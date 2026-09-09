@@ -22,8 +22,7 @@
 //! four functions the live game drills with**. A playthrough that re-implemented
 //! the drill would be a test of the test.
 
-use vx_agent::Stockpile;
-use vx_core::{BlockId, BlockRegistry, Face};
+use vx_core::{BlockId, BlockPos, Face};
 
 /// Quarters of the way through, each of which takes a layer of cells off the
 /// face being worked. Four is what makes a face being drilled *look* drilled
@@ -103,50 +102,62 @@ pub fn face_index(face: Face) -> usize {
 /// What became of a block that came out of the ground.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Deposited {
-    /// It went on the pile, by this name.
-    Piled(String),
+    /// It went on your back, by this name.
+    Packed(String),
+    /// The pack is full, so it is lying on the floor of the cell it came out
+    /// of, waiting for you to come back lighter. See [`crate::drops`].
+    Dropped(String),
     /// A supply cache pays out its own haul rather than yielding one
     /// crate-shaped block, so the crate itself is deliberately nothing.
     Crate,
-    /// There is nowhere to put it. **Say so** — see [`deposit`].
-    NoBase,
     /// The registry does not know this id, which should be impossible and is
     /// worth reporting rather than dropping: it would surface later as a
     /// conservation mismatch with no explanation.
     Unknown,
 }
 
-/// Bank a broken block on the fleet's pile, and name what happened.
+/// Take a broken block onto the player's back, or leave it on the floor.
 ///
-/// Everything you break is stock: every block yields itself by name onto the
-/// same pile the drones haul into and the shop sells out of.
+/// Everything you break is stock: every block yields itself by name. Until
+/// stage 55 it yielded itself onto the *fleet's* pile — a container standing
+/// somewhere else entirely — which is why the movement system spent fifty-four
+/// stages slowing you down for the weight of goods you were nowhere near. Now
+/// it goes where it obviously always should have: on you.
 ///
-/// The `NoBase` arm is stage 48's bug fix. There is no base at boot — the pile
-/// only exists once a container has been placed to declare it — and this was
-/// written as a bare `if let Some(base)` with no `else`, so a new player who
-/// walked out and mined got **nothing, silently**: the block broke, the ore
-/// evaporated, and no line was printed anywhere. Every sibling system in the
-/// game says so out loud ("NO BASE PILE. PLACE A CONTAINER.", "NO BASE PILE TO
-/// DRAW ON", "NO BASE CONTAINER SET"); the one that produces the goods was the
-/// only one that stayed quiet. Returning the outcome rather than a `bool` is
-/// what lets the caller say it.
+/// The `Dropped` arm is what a carrying limit needs in order not to be a
+/// punishment. A full pack does not refuse the swing and does not eat the
+/// block; the rock breaks, and what came out of it lies in the cell it came
+/// from until you have room. Nothing in this game is destroyed by
+/// carelessness, which is the same promise stage 54 spent a whole round
+/// making about saves.
+///
+/// Pure in its arguments on purpose: the replay oracle runs this exact
+/// function over its own pack and its own floor, so a session and its replay
+/// finish holding the same goods and standing at the same weight.
 pub fn deposit(
-    base: Option<&mut Stockpile>,
-    registry: &BlockRegistry,
+    pack: &mut crate::pack::Pack,
+    drops: &mut crate::drops::Drops,
+    capacity: u64,
+    world: &vx_world::World,
     block: BlockId,
+    at: BlockPos,
     crate_here: bool,
 ) -> Deposited {
     if crate_here {
         return Deposited::Crate;
     }
-    let Some(pile) = base else {
-        return Deposited::NoBase;
-    };
-    match registry.get(block) {
+    match world.registry().get(block) {
         Some(def) => {
             let name = def.name.clone();
-            pile.add(name.clone(), 1);
-            Deposited::Piled(name)
+            if pack.stow(&name, capacity) {
+                Deposited::Packed(name)
+            } else {
+                // Where it comes to rest, not where it was cut: a block taken
+                // out of a ceiling belongs on the floor under it. Resolved
+                // here, once, so both sides of a replay agree on the cell.
+                drops.shed(crate::drops::Drops::settle(world, at), &name, 1);
+                Deposited::Dropped(name)
+            }
         }
         None => Deposited::Unknown,
     }
@@ -254,26 +265,59 @@ mod tests {
         assert!(huge.through);
     }
 
-    /// The whole point of the round: an ore block with nowhere to go says so,
-    /// rather than evaporating.
+    /// The whole point of stage 55: what you break goes on *you*.
+    ///
+    /// This test used to assert the opposite — that mining with no container
+    /// declared reported `NoBase` and yielded nothing. It was stage 48's fix
+    /// for a block that evaporated silently, and it was the best answer
+    /// available while the only pile in the game stood in a box elsewhere.
+    /// Now there is a pack, so the answer is better: a new player who walks
+    /// out and mines before placing anything keeps what they cut.
     #[test]
-    fn mining_with_no_base_reports_it_instead_of_eating_the_block() {
+    fn what_you_break_goes_on_your_back() {
         let world = world();
-        let registry = world.registry();
-        let ore = registry.id_of("engine:copper_ore").expect("no copper ore");
+        let ore = world
+            .registry()
+            .id_of("engine:copper_ore")
+            .expect("no copper ore");
+        let at = BlockPos::new(3, 40, -2);
 
+        let capacity = crate::pack::capacity(1, 0, 0);
+        let mut pack = crate::pack::Pack::new();
+        let mut floor = crate::drops::Drops::new();
         assert_eq!(
-            deposit(None, registry, ore, false),
-            Deposited::NoBase,
-            "a block mined with no pile went quietly"
+            deposit(&mut pack, &mut floor, capacity, &world, ore, at, false),
+            Deposited::Packed("engine:copper_ore".into())
         );
+        assert_eq!(pack.count("engine:copper_ore"), 1);
+        assert!(floor.is_empty(), "something fell that should not have");
+    }
 
-        let mut pile = Stockpile::new();
+    /// A full pack drops rather than eats, and the count is conserved.
+    #[test]
+    fn a_full_pack_puts_it_on_the_floor() {
+        let world = world();
+        let ore = world
+            .registry()
+            .id_of("engine:copper_ore")
+            .expect("no copper ore");
+        // High in the air over nothing, so the settling rule has no floor to
+        // find and leaves the drop where it was cut — the documented answer.
+        let at = BlockPos::new(3, 200, -2);
+
+        let capacity = crate::pack::capacity(1, 0, 0);
+        let mut pack = crate::pack::Pack::new();
+        while pack.stow("engine:stone", capacity) {}
+        let carried = pack.total();
+
+        let mut floor = crate::drops::Drops::new();
         assert_eq!(
-            deposit(Some(&mut pile), registry, ore, false),
-            Deposited::Piled("engine:copper_ore".into())
+            deposit(&mut pack, &mut floor, capacity, &world, ore, at, false),
+            Deposited::Dropped("engine:copper_ore".into())
         );
-        assert_eq!(pile.count("engine:copper_ore"), 1);
+        assert_eq!(pack.total(), carried, "a full pack took it anyway");
+        assert_eq!(floor.count("engine:copper_ore"), 1, "the ore evaporated");
+        assert_eq!(floor.iter().next().unwrap().at, at, "it fell somewhere else");
     }
 
     /// A crate is prised open, not harvested: it pays out its haul elsewhere
@@ -281,11 +325,27 @@ mod tests {
     #[test]
     fn a_supply_cache_yields_its_haul_and_not_itself() {
         let world = world();
-        let registry = world.registry();
-        let cache = registry.id_of("engine:supply_cache").expect("no cache block");
-        let mut pile = Stockpile::new();
-        assert_eq!(deposit(Some(&mut pile), registry, cache, true), Deposited::Crate);
-        assert_eq!(pile.total(), 0, "the crate itself landed on the pile");
+        let cache = world
+            .registry()
+            .id_of("engine:supply_cache")
+            .expect("no cache block");
+        let capacity = crate::pack::capacity(1, 0, 0);
+        let mut pack = crate::pack::Pack::new();
+        let mut floor = crate::drops::Drops::new();
+        assert_eq!(
+            deposit(
+                &mut pack,
+                &mut floor,
+                capacity,
+                &world,
+                cache,
+                BlockPos::new(0, 40, 0),
+                true
+            ),
+            Deposited::Crate
+        );
+        assert_eq!(pack.total(), 0, "the crate itself landed in the pack");
+        assert!(floor.is_empty());
     }
 
     /// Every face the raycast can report has an index the carve shapes accept.

@@ -197,7 +197,7 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // demonstrated at two different hashes over the same orders before it was
 // fixed. `Wheel` and `Pilot` close it, and a log recorded under 30 replays a
 // session in which nobody ever took the controls.
-const VERSION: u32 = 31;
+const VERSION: u32 = 32;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -406,6 +406,31 @@ pub enum Command {
     /// drawn nose (`Mining::set_pilot_look`) and never a world edit, so it is
     /// presentation and stays off the wire.
     Pilot { bits: u8 },
+    /// The pack tipped into a container.
+    ///
+    /// **No payload at all**, and that is the whole design. Replay carries its
+    /// own pack — [`Rebuilt::pack`], filled by the same `drill::deposit` rule
+    /// the live game runs on every `Break` — so it can work out what moved
+    /// without being told. A recorded manifest would be a list of goods
+    /// sitting in a file, editable by anyone with a hex editor, conjuring ore
+    /// out of nothing on the next load. `Print` and `Salvage` already carry
+    /// amounts for want of a better answer; this one does not have to.
+    Stow,
+    /// How much the player can carry, in `pack::UNIT`s.
+    ///
+    /// Recorded when it *changes* — at boot, and after any upgrade that moves
+    /// it — and re-installed by replay rather than re-derived, which is the
+    /// same bargain [`MoveCommand`]'s load byte has had since stage 10b and
+    /// for the same reason. Replay has no wallet and no skill sheet: the shop
+    /// counter and the fabricator's upgrade rows are live-only, so the marks
+    /// that widen a pack simply are not on the wire. Without this, replay
+    /// would fill its pack at the stock size, drop what a fitted player kept,
+    /// and tip a different pile into the container.
+    ///
+    /// A capability, not a good. Forging a bigger number here changes what a
+    /// *replay* concludes and grants the live game nothing — nothing ever
+    /// reads `Rebuilt` back into a session.
+    Carry { capacity: u32 },
 }
 
 /// A machine tag on the wire: a kind byte and an index, fixed width so every
@@ -818,6 +843,22 @@ pub struct Rebuilt {
     /// Every town's strongroom. Carried because a deposit moves the pile,
     /// and the pile is what half the log's arithmetic runs over.
     pub banks: crate::bank::Bank,
+    /// What the player is carrying.
+    ///
+    /// New in stage 55, and it closes a hole that had been open since stage 6:
+    /// `Command::Break`'s replay arm broke the block and **deposited nothing**,
+    /// so replay's pile was short every rock the player had ever cut by hand.
+    /// It hid because the pack did not exist and the load byte is re-installed
+    /// off the wire rather than re-derived, so nothing downstream noticed —
+    /// except the fleet's fuel, which burns out of that pile, which moves
+    /// drones, which cut ground, which is the hash.
+    pub pack: crate::pack::Pack,
+    /// What would not fit and is lying on the floor. Carried for the same
+    /// reason: a drop is a rock that is *not* on your back, and what is on
+    /// your back is how fast you walk.
+    pub drops: crate::drops::Drops,
+    /// How much the pack holds, installed by [`Command::Carry`].
+    pub capacity: u64,
 }
 
 /// Replay a log over a world.
@@ -843,6 +884,11 @@ impl Default for Rebuilt {
             stands: crate::succession::Ledger::default(),
             tick: 0,
             banks: crate::bank::Bank::default(),
+            pack: crate::pack::Pack::new(),
+            drops: crate::drops::Drops::new(),
+            // The stock frame, until a `Carry` says otherwise — which is
+            // exactly what a log written before this round means.
+            capacity: crate::pack::capacity(1, 0, 0),
         }
     }
 }
@@ -879,16 +925,50 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
     let mining = &mut state.mining;
     match command {
         Command::Break { at } => {
+            // What the block *was*, before it stops being one. Read first
+            // because the deposit rule needs the id and `break_block` sets
+            // the cell to air.
+            let was = world.block(*at);
             let _ = vx_world::break_block(world, events, *at);
+            // Everything you break is stock, on both sides. This arm broke the
+            // block and banked nothing from stage 6 to stage 55, so replay's
+            // pile was short every rock the player cut by hand — and the pile
+            // is what the fleet burns fuel out of. Now it runs the same
+            // `drill::deposit` the live game runs, over its own pack and its
+            // own floor.
+            let _ = crate::drill::deposit(
+                &mut state.pack,
+                &mut state.drops,
+                state.capacity,
+                world,
+                was,
+                *at,
+                false,
+            );
             // Cut into a lake and the lake notices. No order of its own: the
             // break is already recorded, so both sides wake the same water on
             // the same tick and the flood that follows is re-derived rather
             // than replayed.
             wake_water(&mut state.water, world, *at);
         }
+        Command::Stow => {
+            crate::pack::tip(&mut state.pack, &mut state.mining.fleet);
+        }
+        Command::Carry { capacity } => state.capacity = u64::from(*capacity),
         Command::Place { at, block } => {
             if let Some(id) = world.registry().id_of(block) {
                 world.set_block(*at, id);
+                // Putting a container down *declares the base* — that is what
+                // the block is for, and `App::place_block` and
+                // `Session::place_base` have both done it since stage 6. This
+                // arm did not, so a replayed session had a container standing
+                // in the world and no pile in the fleet: every `Stow` tipped
+                // into nothing, and every drone delivery had nowhere to go.
+                // Found by the pack's own oracle test, which is what an oracle
+                // is for.
+                if block == "engine:container" {
+                    mining.fleet.set_base(*at);
+                }
             } else {
                 // A block whose mod is gone decodes to nothing rather than to
                 // whatever now occupies its number — the same rule the region
@@ -1480,6 +1560,12 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
             file.write_all(&[29u8])?;
             file.write_all(&[*bits])?;
         }
+        // One byte and nothing else — see the variant's own note.
+        Command::Stow => file.write_all(&[30u8])?,
+        Command::Carry { capacity } => {
+            file.write_all(&[31u8])?;
+            file.write_all(&capacity.to_le_bytes())?;
+        }
         Command::Gift { town, person, good } => {
             file.write_all(&[20u8])?;
             file.write_all(&town.0.to_le_bytes())?;
@@ -1796,6 +1882,10 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
             file.read_exact(&mut bits)?;
             Command::Pilot { bits: bits[0] }
         }
+        30 => Command::Stow,
+        31 => Command::Carry {
+            capacity: read_u32(file)?,
+        },
         21 => {
             let mut kind = [0u8; 1];
             file.read_exact(&mut kind)?;
@@ -1991,6 +2081,86 @@ mod tests {
             played,
             replay_to_hash(&journal, area),
             "replaying the session produced a different world"
+        );
+    }
+
+    /// A pack too small for the rock replays the same way, drops and all.
+    ///
+    /// The session-level oracle sinks a real shaft, which is honest but never
+    /// gets near the cap. Here the frame is set small on the wire — which is
+    /// exactly what [`Command::Carry`] is for — so the overflow, the floor it
+    /// leaves and the tip that follows are all exercised in a few orders.
+    #[test]
+    fn a_small_frame_drops_what_it_cannot_hold() {
+        let (mut world, area) = site();
+        let events = EventBus::new();
+        let mut rebuilt = Rebuilt::default();
+        let floor = area.min.y.max(1);
+
+        // A container, which both places the block and declares the base.
+        let base = BlockPos::new(area.min.x - 2, floor, area.min.z - 2);
+        apply(
+            &Command::Place {
+                at: base,
+                block: "engine:container".to_string(),
+            },
+            &mut world,
+            &events,
+            &mut rebuilt,
+        );
+        assert!(
+            rebuilt.mining.fleet.base.is_some(),
+            "placing a container did not declare the base"
+        );
+
+        // Room for two blocks of stone and no more.
+        apply(
+            &Command::Carry {
+                capacity: (crate::pack::weight_of("engine:stone") * 2) as u32,
+            },
+            &mut world,
+            &events,
+            &mut rebuilt,
+        );
+
+        let stone = world.registry().id_of("engine:stone").expect("no stone");
+        let cells: Vec<BlockPos> = (0..5)
+            .map(|step| BlockPos::new(area.min.x + step, floor, area.min.z))
+            .collect();
+        for at in &cells {
+            world.set_block(*at, stone);
+        }
+        for at in &cells {
+            apply(&Command::Break { at: *at }, &mut world, &events, &mut rebuilt);
+        }
+
+        assert_eq!(rebuilt.pack.count("engine:stone"), 2, "the frame stretched");
+        assert_eq!(
+            rebuilt.drops.count("engine:stone"),
+            3,
+            "the overflow was eaten instead of dropped"
+        );
+        // Nothing is destroyed by carelessness: five cut, five accounted for.
+        assert_eq!(
+            rebuilt.pack.count("engine:stone") + rebuilt.drops.count("engine:stone"),
+            cells.len() as u64
+        );
+
+        apply(&Command::Stow, &mut world, &events, &mut rebuilt);
+        assert!(rebuilt.pack.is_empty(), "the tip left something behind");
+        assert_eq!(
+            rebuilt
+                .mining
+                .fleet
+                .base
+                .as_ref()
+                .map(|base| base.stockpile.count("engine:stone")),
+            Some(2)
+        );
+        assert_eq!(
+            rebuilt.drops.count("engine:stone"),
+            3,
+            "tipping the pack swept the floor as well"
         );
     }
 

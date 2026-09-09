@@ -109,10 +109,26 @@ pub struct MovementReadout {
 }
 
 /// Paint a horizontal bar with a filled fraction.
+///
+/// Clipped to the panel, like [`font::draw_text`] has always been. It was not,
+/// and that was a live panic waiting to happen: fifteen rows can fire into ten
+/// rows of space, and the drilling bar at the bottom is drawn at `y + 1` with
+/// a height of five. Six optional rows lit at once — fuel, payroll, kestrel,
+/// optics, condition and a bounty, say — put it past the end of an 82,720-byte
+/// buffer, and `pixels[at..at + 4]` would take the game down mid-swing.
+///
+/// Found while looking for somewhere to put the pack's line, which is why the
+/// pack's line went on a panel instead.
 fn draw_bar(pixels: &mut [u8], x: u32, y: u32, width: u32, height: u32, fraction: f32, colour: [u8; 4]) {
     let filled = (width as f32 * fraction.clamp(0.0, 1.0)) as u32;
     for py in y..y + height {
+        if py >= HUD_HEIGHT {
+            break;
+        }
         for px in x..x + width {
+            if px >= HUD_WIDTH {
+                break;
+            }
             let at = ((py * HUD_WIDTH + px) * 4) as usize;
             let texel = if px < x + filled { colour } else { BAR_BACK };
             pixels[at..at + 4].copy_from_slice(&texel);
@@ -353,6 +369,45 @@ mod tests {
             deputies: 0,
             fuel: None,
         }
+    }
+
+    /// **Every row lit at once, and the panel survives it.**
+    ///
+    /// The HUD has fifteen conditional rows and room for ten. `draw_text`
+    /// clips; `draw_bar` did not, and the drilling bar is the last row of all.
+    /// Nothing had ever asked for the whole ladder at the same time — every
+    /// other test here sets one field against a bare `base_content` — so a
+    /// live panic sat in the file for thirty-odd stages. This is the test that
+    /// asks.
+    #[test]
+    fn a_hud_with_every_row_lit_does_not_run_off_the_end() {
+        let skills = Skills::new();
+        let mut everything = base_content(&skills);
+        everything.status = Some("MINING".into());
+        everything.payroll = Some("PAYROLL 40 CR/H".into());
+        everything.drilling = Some(0.5);
+        everything.level_up = Some(("MINING".into(), 4));
+        everything.greeting = Some("COPPER ORE 12".into());
+        everything.reconnecting = true;
+        everything.bounty = 40;
+        everything.watched = true;
+        everything.movement = MovementReadout {
+            stance: "WALK",
+            stamina: 0.5,
+            load: 0.9,
+        };
+        everything.ammo = Some(3);
+        everything.panicking = 2;
+        everything.kestrel = Some("KESTREL ORBITING 32S".into());
+        everything.optic = Some("THERMAL");
+        everything.condition = Some("HURT".into());
+        everything.dose = Some("DOSE 40%".into());
+        everything.dark = Some("DARK".into());
+        everything.deputies = 3;
+        everything.fuel = Some("FUEL DRY".into());
+
+        let pixels = render_hud(&everything);
+        assert_eq!(pixels.len(), (HUD_WIDTH * HUD_HEIGHT * 4) as usize);
     }
 
     #[test]
