@@ -227,6 +227,28 @@ impl World {
             .or_insert_with(|| self.generator.generate(pos))
     }
 
+    /// Drop every loaded chunk, whatever its state.
+    ///
+    /// The deliberate reset [`World::unload_beyond`] cannot express: that one
+    /// keeps modified and pinned chunks by design, because it is the
+    /// streamer's evictor and evicting an unsaved edit would lose it. This is
+    /// for the other case — a world about to be *re-read from disk*, where
+    /// keeping a generated chunk is exactly the harm.
+    ///
+    /// It exists because of a bug worth naming. `Session::load_from` opened a
+    /// world (generating terrain), then tried to clear it with
+    /// `unload_beyond(pos, i32::MAX)` — whose radius is squared into a limit
+    /// every chunk is inside, so it retained everything — and then asked the
+    /// save for each chunk, which returned early because the chunk was already
+    /// loaded. The result was a reload that quietly served **generated ground
+    /// in place of the ground on disk**: a dig came back filled in, and the
+    /// crew standing in it was entombed and reported stuck.
+    pub fn unload_all(&mut self) -> usize {
+        let dropped = self.chunks.len();
+        self.chunks.clear();
+        dropped
+    }
+
     /// Load every chunk within `radius` of `centre`, returning how many were
     /// newly generated.
     pub fn load_around(&mut self, centre: ChunkPos, radius: i32) -> usize {

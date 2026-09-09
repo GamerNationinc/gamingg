@@ -309,6 +309,60 @@ impl Mining {
         Some(plan.method)
     }
 
+    /// The running dispatch, as plain data a save file can hold. `None` when
+    /// nothing is being dug.
+    pub fn operation_snapshot(&self) -> Option<vx_agent::OperationSnapshot> {
+        self.operation.as_ref().map(Operation::snapshot)
+    }
+
+    /// Put a saved dispatch back to work, and **hold its ground again**.
+    ///
+    /// The pin is not an optimisation. A drone reads the world to decide what
+    /// to cut, an unloaded chunk reads as air, and a crew whose span is not
+    /// resident therefore digs a *different hole* depending on where the
+    /// player happens to be standing — which is exactly the class of
+    /// non-determinism `Mining::start` pins against in the first place
+    /// (`self.pinned = world.pin_span(..)`). A restore that forgot it would
+    /// hand the replay oracle a dispatch whose outcome depended on the camera.
+    ///
+    /// The span is derived rather than saved: the union of every job region
+    /// still on the board with the drop-off, through the same
+    /// `vx_agent::working_span` that sized it when the job was posted. Derived
+    /// beats stored here, because the board is what the crew is actually going
+    /// to read.
+    pub fn restore_operation(
+        &mut self,
+        world: &mut World,
+        snapshot: vx_agent::OperationSnapshot,
+    ) {
+        let operation = Operation::restore(snapshot);
+        // The reach is the work *and the crew*, not the work alone.
+        //
+        // Deriving it from the remaining job regions is the obvious thing and
+        // it is wrong: jobs complete, so the span shrinks as the dig goes on,
+        // and a drone part way down a ramp it has already cut ends up outside
+        // the ground its own route needs. Unloaded ground reads as air, air is
+        // not standable, and the drone gives its job back and reports Stuck —
+        // which is exactly what the first `--payroll` run did after a reload,
+        // eight blocks in.
+        let reach = operation
+            .drones
+            .iter()
+            .map(|drone| drone.position)
+            .chain(std::iter::once(operation.home))
+            .fold(VoxelAabb::single(operation.home), |span, at| {
+                span.including(at)
+            });
+        let reach = operation
+            .board
+            .jobs()
+            .fold(reach, |span, job| span.union(job.region));
+        let span = vx_agent::working_span(reach, operation.home);
+        self.release_ground(world);
+        self.pinned = world.pin_span(span.min, span.max);
+        self.operation = Some(operation);
+    }
+
     /// Release the ground an operation was holding. Safe to call with nothing
     /// pinned, which is what makes it safe to call from `cancel`.
     pub fn release_ground(&mut self, world: &mut World) {

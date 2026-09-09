@@ -11,14 +11,22 @@
 //! player has over it is a physical one. Cut and back off. Wall the face
 //! back up. Send a drone instead of standing there. Put lead in the suit.
 //!
-//! # Live-only, on purpose
+//! # Off the oracle, on the disk
 //!
-//! Dose spends health, and health has been live-only state since stage 28:
-//! nothing here touches the world, the pile, or how long the fleet turns, so
-//! the oracle never needs to hear about it. Two sessions with identical
-//! journals can end with different dose and the same world hash, which is
-//! exactly the line this game draws between what the log carries and what it
-//! does not.
+//! Dose spends health, and nothing here touches the world, the pile, or how
+//! long the fleet turns, so **the journal** never needs to hear about it. Two
+//! sessions with identical journals can end with different dose and the same
+//! world hash, which is exactly the line this game draws between what the log
+//! carries and what it does not.
+//!
+//! That argument was overreached for a long time into "so it need not be saved
+//! either", and it left a hole you could drive through: quitting and reloading
+//! **scrubbed you clean**. A free ward cot on the menu screen, available any
+//! time, no walk and no medkit — and quietly the strongest play available to
+//! anybody mining uranium, since the whole cost of the richest ore in the
+//! ground could be waved away by saving. Health has been on disk since it
+//! existed; from stage 52 the thing that spends it is too (`dose.dat`,
+//! `VXDO`), and the ward cot is once again the only thing that scrubs a body.
 //!
 //! # Why it counts blocks rather than tracing rays
 //!
@@ -28,6 +36,12 @@
 //! small box says that honestly for a fraction of the cost. The one piece of
 //! shielding that *is* modelled is the one a player controls — the lead in
 //! the suit.
+
+use std::io::{Read, Write};
+use std::path::Path;
+
+const MAGIC: &[u8; 4] = b"VXDO";
+const VERSION: u32 = 1;
 
 /// How far a bare face reaches, in blocks. Beyond this the sum is zero, so
 /// backing off a few steps really is the answer.
@@ -151,6 +165,31 @@ impl Dose {
         *self = Dose::default();
     }
 
+    /// Write the dose to `dose.dat`.
+    pub fn save(&self, directory: &Path) -> std::io::Result<()> {
+        let mut file =
+            std::io::BufWriter::new(std::fs::File::create(directory.join("dose.dat"))?);
+        file.write_all(MAGIC)?;
+        file.write_all(&VERSION.to_le_bytes())?;
+        file.write_all(&self.rads.to_le_bytes())?;
+        file.write_all(&self.since_burn.to_le_bytes())?;
+        file.flush()
+    }
+
+    /// Read it back, tolerating absence and damage.
+    ///
+    /// A negative or non-finite dose is refused rather than believed: below
+    /// zero it would read as cleaner than clean and bank against future
+    /// exposure, which is the same exploit by a different door.
+    pub fn load(&mut self, directory: &Path) {
+        let path = directory.join("dose.dat");
+        match read(&path) {
+            Ok(Some(dose)) => *self = dose,
+            Ok(None) => {}
+            Err(error) => log::warn!("ignoring damaged dose at {}: {error}", path.display()),
+        }
+    }
+
     /// Is this body carrying anything worth showing?
     pub fn showing(&self) -> bool {
         self.rads > 1.0
@@ -169,9 +208,121 @@ impl Dose {
     }
 }
 
+fn read(path: &Path) -> std::io::Result<Option<Dose>> {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => std::io::BufReader::new(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic)?;
+    if &magic != MAGIC {
+        return Err(std::io::Error::other("not a dose file"));
+    }
+    if read_u32(&mut file)? != VERSION {
+        return Ok(None);
+    }
+    let rads = read_f32(&mut file)?;
+    let since_burn = read_f32(&mut file)?;
+    if !rads.is_finite() || !since_burn.is_finite() || rads < 0.0 || since_burn < 0.0 {
+        return Err(std::io::Error::other("a dose that is not a dose"));
+    }
+    Ok(Some(Dose { rads, since_burn }))
+}
+
+fn read_u32(file: &mut impl Read) -> std::io::Result<u32> {
+    let mut word = [0u8; 4];
+    file.read_exact(&mut word)?;
+    Ok(u32::from_le_bytes(word))
+}
+
+fn read_f32(file: &mut impl Read) -> std::io::Result<f32> {
+    let mut word = [0u8; 4];
+    file.read_exact(&mut word)?;
+    Ok(f32::from_le_bytes(word))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let directory =
+            std::env::temp_dir().join(format!("vx-dose-{name}-{}", std::process::id()));
+        std::fs::remove_dir_all(&directory).ok();
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    /// The exploit, closed: quitting and reloading used to scrub you clean.
+    ///
+    /// A free ward cot on the menu screen, any time, no walk and no medkit —
+    /// which quietly made the cost of the richest ore in the ground optional.
+    #[test]
+    fn a_reload_no_longer_washes_the_dose_off() {
+        let directory = scratch("round");
+        let mut dose = Dose::default();
+        dose.tick(40.0, 3.0, 0);
+        let carried = dose.rads;
+        assert!(carried > 0.0, "the fixture never took a dose");
+        dose.save(&directory).unwrap();
+
+        let mut back = Dose::default();
+        back.load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(back.rads, carried, "the reload scrubbed the body clean");
+        assert!(back.showing());
+    }
+
+    /// The ward cot still works, and is once again the only thing that does.
+    #[test]
+    fn the_cot_is_the_only_scrub() {
+        let mut dose = Dose::default();
+        dose.tick(40.0, 3.0, 0);
+        assert!(dose.showing());
+        dose.flush();
+        assert!(!dose.showing());
+    }
+
+    /// A dose below zero would read as cleaner than clean and bank against
+    /// future exposure — the same exploit by a different door — so a file
+    /// asserting one is refused rather than believed.
+    #[test]
+    fn an_impossible_dose_is_refused() {
+        let directory = scratch("impossible");
+        for bad in [-1.0f32, f32::NAN, f32::INFINITY] {
+            std::fs::write(
+                directory.join("dose.dat"),
+                [
+                    MAGIC.as_slice(),
+                    &VERSION.to_le_bytes(),
+                    &bad.to_le_bytes(),
+                    &0.0f32.to_le_bytes(),
+                ]
+                .concat(),
+            )
+            .unwrap();
+            let mut dose = Dose::default();
+            dose.load(&directory);
+            assert_eq!(dose.rads, 0.0, "a dose of {bad} was accepted");
+        }
+        std::fs::remove_dir_all(&directory).ok();
+    }
+
+    #[test]
+    fn a_missing_or_damaged_dose_is_a_clean_body() {
+        let directory = scratch("damaged");
+        let mut dose = Dose::default();
+        dose.load(&directory);
+        assert_eq!(dose.rads, 0.0);
+
+        std::fs::write(directory.join("dose.dat"), b"NOPE and then some").unwrap();
+        let mut dose = Dose::default();
+        dose.load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(dose.rads, 0.0);
+    }
+
 
     #[test]
     fn distance_is_the_whole_defence() {

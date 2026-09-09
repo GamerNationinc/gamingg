@@ -267,6 +267,16 @@ build in it, and it survives quitting — skills included.
   translucent block; looks wrong the moment two transparent surfaces overlap.
 - Saving happens on quit and on demand, not periodically. A crash loses the
   session.
+- Selling "everything" at a counter sells your **fuel** too: HHO is a traded
+  good and the shop is glad to take it, and it is the same pile the fleet burns
+  out of. Sell up without thinking and your crew stops, with a full job board
+  and an empty tank. The played loop hit this on its first run.
+- A crew is fielded when a dispatch *starts*, so a drone bought while a job is
+  running joins the next one rather than that one. Nothing says so on screen.
+- A town's till refills on the same closed-form clock the stock does, so a
+  counter you drained recovers whether or not you are anywhere near it. That is
+  deliberate — a town trades when you are not watching — but it does mean
+  waiting is a strategy, and nothing tells you how long.
 - A save remembers where you were standing and which way you were facing, and
   deliberately not your stance or your speed — you always arrive upright and
   still. So a save taken mid-slide reloads as a stop, and one taken in a place
@@ -1045,6 +1055,66 @@ blocks cut and 25 goods on the pile; save, drop the whole session, load it back
 — **25 goods still on it**; then 206 blocks over the hills to a depot that has
 no ore of its own and pays **405 credits** for yours. Four pictures come out of
 it, one per beat.
+
+### The robots dig, and the books balance
+
+Then: the loop where you buy bots, they mine, and you get rich — with two rules
+attached. Everything has to save, and there must be no way to glitch the numbers
+upward. Both turned up more than the feature did.
+
+**Your crew didn't survive saving.** Buy the drones, mark out a patch, set them
+digging, save, quit — come back and they're gone. Not idle, gone; the hole still
+there with nothing in it. Third round running I've found the same daft thing in
+the same place: first the pile didn't survive a save, then *you* didn't, now the
+crew. This one's the worst of the three, because leaving a drone working is the
+entire point of owning one. They pick up where they stopped now — they don't dig
+while the game's off, because that would wreck the thing that lets me replay a
+session and prove it came out the same.
+
+**Three other things weren't being written down either.** Every sector you'd
+scanned — that you burned fuel to scan — forgotten. Everything the little scout
+bird had seen — forgotten. And the radiation you'd soaked up got wiped on every
+load, which was a free trip to the doctor's, available from the menu, any time
+you liked.
+
+So there's a **census** now: a list in the code of every single thing the game
+holds, and for each one either the file it lives in or the reason it's
+deliberately not saved — with a test that fails if something quietly stops
+saving *or* if something new turns up that nobody decided about. That's the
+fourth time this bug has cost a round; it shouldn't get a fifth.
+
+**And there was an infinite money glitch in it.** A town's price drops as you
+sell it more, but only so far — it bottoms out and never goes lower. Stone
+bottoms out at one credit a block. And nothing anywhere checked whether the town
+had any money. So the best strategy in the game was: point drones at any rock at
+all and sell the rubble to the nearest counter for ever. Mindless, unlimited, and
+better than every clever thing the economy offers.
+
+Towns have a **till** now. Real money in it, that fills back up from what the
+town actually trades — a place you've stripped bare earns slowly, a busy one
+earns fast — and a counter can only pay you what's in it. Turn up with a barrow
+worth two thousand credits at a shop holding a hundred and four, and you sell a
+hundred and four credits' worth and carry the rest back out. That kills the
+glitch, and it's what makes getting the maximum an actual puzzle: which town,
+which goods, how far, and when to come back.
+
+There's a **PAYROLL** readout for exactly that: what your crew cuts an hour,
+what's in your container, what this counter would give you, and which town would
+give you more — ranked on what they can actually *pay*, not on the price on the
+board.
+
+Two more things fell out on the way. Breaking your own container used to
+**destroy everything in it** — one stray click was the most expensive mistake in
+the game; the goods are held now and the next container picks them up. And the
+played run found the worst bug of the round: **loading a save was serving freshly
+generated ground on top of the ground on disk**, so a hole you'd dug came back
+filled in and the drone standing in it was walled up.
+
+The run, measured: 40 blocks by hand, sold for 1,124 credits; a drone for 250;
+one drone cutting 15,150 blocks an hour; saved mid-dig and reloaded with the crew
+still cutting and not a block lost or doubled; a second drone for 375; and two
+drones cutting **31,830 an hour — 2.1×** — on the same method and matching
+ground.
 
 ### Every load put you back in bed
 
@@ -2188,6 +2258,11 @@ cargo run --release -p vx-app -- --screenshot play.ppm --play --seed 2024 --at 1
 # the hills and sell it at a counter that is not yours. Writes haul-01-ping.ppm,
 # haul-02-cut.ppm, haul-03-home.ppm, haul-04-reloaded.ppm and haul-05-sold.ppm
 cargo run --release -p vx-app -- --screenshot haul.ppm --haul --seed 2024 --at 146,30
+
+# the crew loop, played and measured: earn a drone by hand, dispatch it, save
+# mid-dig and reload with it still cutting, sell up and buy a second, and print
+# the books. Writes payroll-01-byhand.ppm through payroll-04-books.ppm
+cargo run --release -p vx-app -- --screenshot payroll.ppm --payroll --seed 2024 --at 146,30
 
 # put a bigger crew on the next dispatch
 cargo run --release -p vx-app -- --drones 8

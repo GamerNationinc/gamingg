@@ -90,6 +90,25 @@ pub struct Drone {
     pub(crate) route: Option<CachedRoute>,
 }
 
+/// A drone's whole persistent state, as plain data.
+///
+/// Public fields and no behaviour: this exists so the app can serialise a
+/// crew, and every field on it is one the drone would otherwise keep private.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DroneSnapshot {
+    pub id: DroneId,
+    pub position: BlockPos,
+    pub previous_position: BlockPos,
+    pub state: DroneState,
+    pub cargo: Stockpile,
+    pub capacity: u64,
+    pub grade: i32,
+    pub job: Option<JobId>,
+    /// Sorted, so the same crew writes the same bytes twice.
+    pub denied: Vec<BlockPos>,
+    pub denied_job: Option<JobId>,
+}
+
 /// What a cached route leads to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RouteKey {
@@ -161,6 +180,58 @@ impl Drone {
             job: None,
             denied: std::collections::HashSet::new(),
             denied_job: None,
+            route: None,
+        }
+    }
+
+    /// Everything about this drone that outlives a session.
+    ///
+    /// A plain-data twin with public fields, so `vx-app` can write a drone to
+    /// disk without `vx-agent` ever hearing about a save directory — the same
+    /// line [`crate::flow`] holds by knowing nothing about the app that drives
+    /// it. Until stage 52 a crew simply evaporated at a save: `Mining` kept
+    /// its operation in a private field and no file anywhere named it, so you
+    /// could buy drones, set them cutting, quit, and come back to a half-dug
+    /// hole with nothing in it.
+    ///
+    /// **`route` is deliberately absent.** It caches a whole [`FlowField`]
+    /// keyed on the world's edit count, and any edit anywhere invalidates it —
+    /// so it is megabytes to save something the next block broken would throw
+    /// away regardless. A restored drone rebuilds it on its first step.
+    ///
+    /// `denied` comes out **sorted**: it is a `HashSet` in the drone and its
+    /// iteration order is not stable, and a save that wrote different bytes
+    /// for the same crew would make every quit a fresh write.
+    pub fn snapshot(&self) -> DroneSnapshot {
+        let mut denied: Vec<BlockPos> = self.denied.iter().copied().collect();
+        denied.sort_by_key(|pos| (pos.x, pos.y, pos.z));
+        DroneSnapshot {
+            id: self.id,
+            position: self.position,
+            previous_position: self.previous_position,
+            state: self.state,
+            cargo: self.cargo.clone(),
+            capacity: self.capacity,
+            grade: self.grade,
+            job: self.job,
+            denied,
+            denied_job: self.denied_job,
+        }
+    }
+
+    /// Build a drone back from one.
+    pub fn restore(snapshot: DroneSnapshot) -> Self {
+        Drone {
+            id: snapshot.id,
+            position: snapshot.position,
+            previous_position: snapshot.previous_position,
+            state: snapshot.state,
+            cargo: snapshot.cargo,
+            capacity: snapshot.capacity,
+            grade: snapshot.grade,
+            job: snapshot.job,
+            denied: snapshot.denied.into_iter().collect(),
+            denied_job: snapshot.denied_job,
             route: None,
         }
     }

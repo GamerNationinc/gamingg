@@ -66,9 +66,50 @@ pub struct JobBoard {
     next_id: u64,
 }
 
+/// A board's whole persistent state, as plain data.
+///
+/// The entries and the id counter are private to the board — a claim is not
+/// something a caller should be able to forge — but they have to survive a
+/// save, or a crew restored from disk comes back to work nobody posted and
+/// claims it has already made. Public fields, no behaviour; see
+/// [`crate::drone::DroneSnapshot`] for the argument.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BoardSnapshot {
+    /// Each job and who, if anybody, holds it.
+    pub entries: Vec<(Job, Option<DroneId>)>,
+    /// The next id to hand out. Ids are never reused, so this has to come
+    /// back with the board or a fresh job could be handed an id a stale
+    /// reference still points at.
+    pub next_id: u64,
+}
+
 impl JobBoard {
     pub fn new() -> Self {
         JobBoard::default()
+    }
+
+    /// Everything about this board that outlives a session.
+    pub fn snapshot(&self) -> BoardSnapshot {
+        BoardSnapshot {
+            entries: self
+                .entries
+                .iter()
+                .map(|entry| (entry.job.clone(), entry.claimed_by))
+                .collect(),
+            next_id: self.next_id,
+        }
+    }
+
+    /// Build a board back from one.
+    pub fn restore(snapshot: BoardSnapshot) -> Self {
+        JobBoard {
+            entries: snapshot
+                .entries
+                .into_iter()
+                .map(|(job, claimed_by)| Entry { job, claimed_by })
+                .collect(),
+            next_id: snapshot.next_id,
+        }
     }
 
     /// Add work, returning its id.

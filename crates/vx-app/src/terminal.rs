@@ -97,6 +97,7 @@ const VERBS: &[Verb] = &[
     Verb { name: "where", help: "YOUR POSITION AND THE NEAREST TOWN" },
     Verb { name: "bank", help: "WHAT THIS TOWN HOLDS FOR YOU" },
     Verb { name: "pile", help: "WHAT IS ON THE BASE PILE" },
+    Verb { name: "payroll", help: "WHAT THE CREW EARNS, AND WHERE TO SELL IT" },
     Verb { name: "kit", help: "EVERY UPGRADE LINE AND WHAT IS FITTED" },
     Verb { name: "repair", help: "MEND THE WORST MACHINE, OR REPAIR DIGGER 2" },
     Verb { name: "patch", help: "SPEND A MEDKIT ON YOURSELF, WHEREVER YOU ARE" },
@@ -163,6 +164,9 @@ pub fn parse(line: &str) -> Parsed {
         "save" => Parsed::Run(Order::Save),
         "status" | "fleet" | "where" | "bank" | "pile" | "who" | "talk" | "gift"
         | "kit" | "repair" | "law" | "standing" | "wells" | "patch" => Parsed::Ask(verb, rest),
+        // The books, in one place: what the crew cuts an hour, what the pile
+        // is worth here, and which counter would pay more — and can.
+        "payroll" | "books" | "wages" => Parsed::Ask("payroll".into(), rest),
         "weather" | "sky" | "forecast" => Parsed::Ask("weather".into(), rest),
         "town" | "hall" | "council" => Parsed::Ask("town".into(), rest),
         "found" | "charter" => Parsed::Ask("found".into(), rest),

@@ -37,14 +37,16 @@ pub mod prospect;
 pub mod stockpile;
 
 pub use aabb::VoxelAabb;
-pub use drone::{Drone, DroneState, DEFAULT_CAPACITY, DEFAULT_GRADE};
-pub use fleet::{Base, Fleet, FleetReport};
+pub use drone::{Drone, DroneSnapshot, DroneState, DEFAULT_CAPACITY, DEFAULT_GRADE};
+pub use fleet::{Base, Fleet, FleetReport, FleetSnapshot, SurveySnapshot};
 pub use flier::{Flier, FlierState, CLEARANCE, DEFAULT_FLIER_CAPACITY};
 pub use flow::{is_standable, settle, FlowField, STEP, UNREACHABLE};
-pub use job::{DroneId, Job, JobBoard, JobId, JobKind};
+pub use job::{BoardSnapshot, DroneId, Job, JobBoard, JobId, JobKind};
 pub use kestrel::{Kestrel, KestrelMode};
 pub use mine::{options, plan, propose, MineMethod, MinePlan, PIT_MAX_DEPTH};
-pub use operation::{working_span, Operation, RunOutcome, TickReport, WORK_MARGIN};
+pub use operation::{
+    working_span, Operation, OperationSnapshot, RunOutcome, TickReport, WORK_MARGIN,
+};
 pub use pilot::{Heading, PilotCommand, PilotReport};
 pub use prospect::{find_body, is_ore, scan_columns, Ping, Sector, SCAN_DEPTH, SECTOR_SIZE};
 pub use stockpile::Stockpile;

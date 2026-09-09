@@ -30,7 +30,7 @@ use crate::prospect::{column_hit, cluster_pings, Ping, Sector};
 use crate::stockpile::Stockpile;
 
 /// The base: a container block the player placed, and what has arrived in it.
-#[derive(Debug, Clone)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct Base {
     pub position: BlockPos,
     pub stockpile: Stockpile,
@@ -57,6 +57,30 @@ pub struct FleetReport {
     pub pings_found: u32,
 }
 
+/// One sector's survey, as plain data. Sorted on the way out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SurveySnapshot {
+    pub sector: Sector,
+    pub covered: Vec<(i32, i32)>,
+    /// `(column, (depth, hover_y))` for every covered column with ore in it.
+    pub hits: Vec<((i32, i32), (i32, i32))>,
+    pub complete: bool,
+}
+
+/// The air side's whole persistent state, as plain data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetSnapshot {
+    pub fliers: Vec<Flier>,
+    pub base: Option<Base>,
+    pub scan_depth: i32,
+    pub surveys: Vec<SurveySnapshot>,
+    pub controlled: Option<usize>,
+    /// Goods waiting for a container. Part of the *pile's* concern rather than
+    /// the air side's, so [`crate::Fleet::snapshot`] carries it but the app's
+    /// `fleet.dat` leaves it to `pile.dat`.
+    pub orphan: Stockpile,
+}
+
 /// The fleet: fliers, the base, and everything the scanner has learned.
 #[derive(Debug)]
 pub struct Fleet {
@@ -67,6 +91,9 @@ pub struct Fleet {
     /// Prospecting level does.
     pub scan_depth: i32,
     surveys: HashMap<Sector, Survey>,
+    /// Goods from a container that was broken, waiting for a new one. See
+    /// [`Fleet::clear_base`].
+    orphan: Stockpile,
     /// The flier the player is flying, if any.
     controlled: Option<usize>,
     /// What that flier was doing before the player took the stick.
@@ -84,6 +111,7 @@ impl Default for Fleet {
             base: None,
             scan_depth: crate::prospect::SCAN_DEPTH,
             surveys: HashMap::new(),
+            orphan: Stockpile::new(),
             controlled: None,
             suspended: None,
         }
@@ -104,12 +132,89 @@ impl Fleet {
     /// base but keeps nothing from it — the old pile lives in the old block's
     /// world position conceptually, and losing track of it on replace would
     /// be a conservation leak, so the pile transfers.
+    /// Everything about the air side that outlives a session.
+    ///
+    /// The fliers, how deep the scanner reaches, and — the one that matters —
+    /// **every sector already surveyed and what it found**. A sweep costs HHO
+    /// off the pile, and until stage 52 `pile.dat` wrote the base and nothing
+    /// else, so the fuel was spent and the pings it bought were thrown away at
+    /// the next save. The player was left re-scanning ground they had already
+    /// paid to scan, with no way of knowing they had.
+    ///
+    /// Surveys come out in sector order and each survey's columns in column
+    /// order: they live in `HashMap`s whose iteration order is not stable, and
+    /// the same fleet must write the same bytes twice.
+    pub fn snapshot(&self) -> FleetSnapshot {
+        let mut surveys: Vec<SurveySnapshot> = self
+            .surveys
+            .iter()
+            .map(|(sector, survey)| {
+                let mut covered: Vec<(i32, i32)> = survey.covered.iter().copied().collect();
+                covered.sort_unstable();
+                let mut hits: Vec<((i32, i32), (i32, i32))> =
+                    survey.hits.iter().map(|(at, hit)| (*at, *hit)).collect();
+                hits.sort_unstable();
+                SurveySnapshot {
+                    sector: *sector,
+                    covered,
+                    hits,
+                    complete: survey.complete,
+                }
+            })
+            .collect();
+        surveys.sort_unstable_by_key(|survey| (survey.sector.x, survey.sector.z));
+        FleetSnapshot {
+            fliers: self.fliers.clone(),
+            base: self.base.clone(),
+            scan_depth: self.scan_depth,
+            surveys,
+            controlled: self.controlled,
+            orphan: self.orphan.clone(),
+        }
+    }
+
+    /// Build a fleet back from one.
+    ///
+    /// `suspended` is not restored and cannot be: it is what a flier was doing
+    /// before the player took its stick, and a reload hands the stick back —
+    /// the flier arrives idle over the base and is re-tasked like any other.
+    pub fn restore(snapshot: FleetSnapshot) -> Self {
+        Fleet {
+            fliers: snapshot.fliers,
+            base: snapshot.base,
+            scan_depth: snapshot.scan_depth,
+            surveys: snapshot
+                .surveys
+                .into_iter()
+                .map(|survey| {
+                    (
+                        survey.sector,
+                        Survey {
+                            covered: survey.covered.into_iter().collect(),
+                            hits: survey.hits.into_iter().collect(),
+                            complete: survey.complete,
+                        },
+                    )
+                })
+                .collect(),
+            controlled: snapshot.controlled,
+            orphan: snapshot.orphan,
+            suspended: None,
+        }
+    }
+
     pub fn set_base(&mut self, position: BlockPos) {
-        let stockpile = self
+        let mut stockpile = self
             .base
             .take()
             .map(|base| base.stockpile)
             .unwrap_or_default();
+        // Anything left over from a container that was broken comes back.
+        // Goods do not evaporate because the box holding them did; see
+        // `clear_base`.
+        for (name, count) in std::mem::take(&mut self.orphan).drain() {
+            stockpile.add(name, count);
+        }
         self.base = Some(Base {
             position,
             stockpile,
@@ -117,8 +222,54 @@ impl Fleet {
     }
 
     /// The container was broken: no base until another is placed.
-    pub fn clear_base(&mut self) -> Option<Stockpile> {
-        self.base.take().map(|base| base.stockpile)
+    ///
+    /// **The goods are kept**, not returned to the caller to drop on the
+    /// floor. Breaking your own container used to destroy everything in it —
+    /// `main.rs` took the pile back, logged how much was "set aside", and let
+    /// it fall out of scope — so the single most expensive mistake available
+    /// to a player was mining one block by accident. Now the pile is held
+    /// undeclared and the next container you place picks it up.
+    ///
+    /// Returns how much went into holding, for the line the player is shown.
+    pub fn clear_base(&mut self) -> u64 {
+        let Some(mut base) = self.base.take() else {
+            return 0;
+        };
+        let held = base.stockpile.total();
+        for (name, count) in base.stockpile.drain() {
+            self.orphan.add(name, count);
+        }
+        held
+    }
+
+    /// Take the held goods out, leaving none. What a loader uses when it is
+    /// about to rebuild the fleet around them.
+    pub fn orphan_take(&mut self) -> Stockpile {
+        std::mem::take(&mut self.orphan)
+    }
+
+    /// Put goods into holding directly. What a loader uses to restore what a
+    /// broken container was carrying.
+    pub fn orphan_goods(&mut self, goods: impl IntoIterator<Item = (String, u64)>) {
+        for (name, count) in goods {
+            self.orphan.add(name, count);
+        }
+    }
+
+    /// Goods with no container to sit in, waiting for one.
+    pub fn orphaned(&self) -> &Stockpile {
+        &self.orphan
+    }
+
+    /// Everything the fleet is holding anywhere on the ground: the declared
+    /// pile plus whatever is waiting for a container. The number a
+    /// conservation check has to use, because a broken box moves goods
+    /// between the two without changing the total.
+    pub fn held(&self) -> u64 {
+        self.base
+            .as_ref()
+            .map_or(0, |base| base.stockpile.total())
+            .saturating_add(self.orphan.total())
     }
 
     /// Send an idle flier to sweep `sector`. Returns whether one was free.
@@ -379,6 +530,55 @@ mod tests {
         let mut fleet = Fleet::new();
         fleet.add_flier(BlockPos::new(0, clear + CLEARANCE, 0));
         fleet
+    }
+
+    /// The air side survives a snapshot — fliers, base, and every sector the
+    /// scanner has already covered.
+    ///
+    /// The surveys are the point. A sweep burns HHO off the pile, and until
+    /// stage 52 `pile.dat` wrote the base and nothing else: the fuel was spent
+    /// and the pings it bought were binned at the next save, so a player
+    /// re-scanned ground they had already paid for and had no way to know it.
+    #[test]
+    fn a_fleet_round_trips_through_a_snapshot() {
+        let mut world = flat(5, 60);
+        ore_body(&mut world, VoxelAabb::new(BlockPos::new(10, 55, 4), BlockPos::new(12, 60, 6)));
+        let mut fleet = fleet_over(&world);
+        fleet.set_base(BlockPos::new(-2, 61, 3));
+        if let Some(base) = fleet.base.as_mut() {
+            base.stockpile.add("engine:copper_ore", 12);
+        }
+        fleet.scan_depth = 41;
+        assert!(fleet.dispatch_scan(Sector { x: 0, z: 0 }));
+        // Part way through a sweep on purpose: a half-known sector is the
+        // interesting thing to save, because it is the state a player who
+        // quit mid-scan is actually in.
+        let mut ticks = 0;
+        while fleet.pings().is_empty() {
+            fleet.tick(&world, &mut []);
+            ticks += 1;
+            assert!(ticks < 5_000, "the sweep never found the body");
+        }
+        assert!(!fleet.is_surveyed(Sector { x: 0, z: 0 }));
+
+        let snapshot = fleet.snapshot();
+        let back = Fleet::restore(snapshot.clone());
+
+        assert_eq!(back.scan_depth, 41);
+        assert_eq!(
+            back.base.as_ref().map(|base| base.stockpile.total()),
+            Some(12)
+        );
+        assert_eq!(back.fliers.len(), fleet.fliers.len());
+        assert_eq!(back.pings(), fleet.pings(), "the pings did not come back");
+        assert_eq!(
+            back.is_surveyed(Sector { x: 0, z: 0 }),
+            fleet.is_surveyed(Sector { x: 0, z: 0 }),
+            "a half-finished sweep came back finished, or the other way round"
+        );
+        // Same snapshot out of the restored fleet: sorted on the way out, so
+        // the same fleet writes the same bytes however the maps hash today.
+        assert_eq!(back.snapshot(), snapshot);
     }
 
     /// Run the fleet until the flier idles or `limit` ticks pass.

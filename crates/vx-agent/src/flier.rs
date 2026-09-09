@@ -55,7 +55,7 @@ pub enum FlierState {
 }
 
 /// A single flying drone.
-#[derive(Debug, Clone)]
+#[derive(PartialEq, Eq, Debug, Clone)]
 pub struct Flier {
     pub position: BlockPos,
     /// Where it was last tick, for the renderer to interpolate from.

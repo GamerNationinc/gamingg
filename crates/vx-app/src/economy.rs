@@ -56,7 +56,7 @@ const MAGIC: &[u8; 4] = b"VXEC";
 /// five numbers cannot be read as eight without inventing three. A town's
 /// books are re-derived from its site instead, which is cheaper than a
 /// migration and more honest than a guess.
-const VERSION: u32 = 4;
+const VERSION: u32 = 5;
 
 /// What the network moves.
 ///
@@ -110,6 +110,39 @@ const BASE_PRICE: [f32; GOODS.len()] = [10.0, 4.0, 3.0, 60.0, 34.0, 190.0, 24.0,
 const MIN_FACTOR: f32 = 0.35;
 const MAX_FACTOR: f32 = 2.50;
 
+/// What a town keeps in the till, at most.
+///
+/// # The hole this closes
+///
+/// Price falls as a town's stock rises and then **stops falling**: the swing
+/// is clamped at [`MIN_FACTOR`] and the price floored at one credit, and
+/// `deposit` caps stock at [`CAPACITY`] so it cannot rise past the point where
+/// the clamp bites. Stone's reference is 3, so a town glutted to the roof
+/// still paid **one credit a block, for ever** — and nothing anywhere asked
+/// whether it could afford to.
+///
+/// So the best strategy in the game was: point drones at any rock at all and
+/// sell the spoil to the nearest counter until you got bored. Unbounded, no
+/// decision in it, and strictly better than every interesting thing the
+/// economy offers. Any question of the form "how do I earn the most" had the
+/// same dull answer.
+///
+/// A till fixes the arithmetic and the design in one move. A counter pays out
+/// of money it actually has; the money comes back at [`TILL_REFILL`] a step
+/// from what the town itself sells on; and a place you have just emptied is a
+/// place to leave alone for a while. That turns earning into a *routing*
+/// problem — which town, which good, how far, how often — which is what the
+/// road network, the price spread and the walk were always for.
+const TILL_CAP: f32 = 9_000.0;
+
+/// Credits a town puts back in the till per [`STEP`], scaled by what it holds.
+///
+/// A town with goods to sell earns; a town stripped bare earns slowly. The
+/// shape matters more than the number: it means a counter you drained recovers
+/// on its own if you leave it, and recovers faster if you have not also taken
+/// everything it had to trade.
+const TILL_REFILL: f32 = 26.0;
+
 /// Look up a good by its namespaced name.
 pub fn good_index(name: &str) -> Option<usize> {
     GOODS.iter().position(|good| *good == name)
@@ -119,6 +152,8 @@ pub fn good_index(name: &str) -> Option<usize> {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Market {
     stock: [f32; GOODS.len()],
+    /// What the counter can actually pay out. See [`TILL_CAP`].
+    till: f32,
     /// The last step boundary this was brought up to date at.
     last_tick: u64,
 }
@@ -136,6 +171,31 @@ impl Market {
         let ratio = self.stock[good] / TARGET;
         let factor = (2.0 - ratio).clamp(MIN_FACTOR, MAX_FACTOR);
         (BASE_PRICE[good] * factor).round().max(1.0) as u64
+    }
+
+    /// What the counter can pay out right now.
+    pub fn till(&self) -> u64 {
+        self.till.max(0.0) as u64
+    }
+
+    /// Take up to `amount` out of the till, returning what was actually there.
+    ///
+    /// The only way credits leave a town, and the reason a sale can be partial.
+    pub fn draw(&mut self, amount: u64) -> u64 {
+        let paid = (amount as f32).min(self.till.max(0.0));
+        self.till -= paid;
+        paid as u64
+    }
+
+    /// How many units this counter could pay for at a unit `rate`.
+    ///
+    /// The number the payroll readout quotes and the shop enforces, so the
+    /// figure a player is shown is the figure they get.
+    pub fn affords(&self, rate: u64) -> u64 {
+        if rate == 0 {
+            return 0;
+        }
+        self.till() / rate
     }
 
     /// Is this town short of a good — the thing that makes it worth shipping to?
@@ -235,8 +295,15 @@ pub fn opening_books(site: &TownSite) -> Market {
         };
         *slot = (TARGET * spread * bias).min(CAPACITY);
     }
+    // A town opens with a working float rather than a full till: the money a
+    // place has on hand is a function of how long it has been trading, and on
+    // day one it has not been.
+    let float = vx_world::seed::unit(vx_world::seed::finalise(
+        site.seed ^ 0x7469_6c6c_0000_0001,
+    ));
     Market {
         stock,
+        till: TILL_CAP * (0.25 + float * 0.35),
         last_tick: 0,
     }
 }
@@ -422,6 +489,14 @@ fn step_market(market: &mut Market, site: &TownSite, step: u64) {
             market.stock[good] = (market.stock[good] - rate * dt).max(0.0);
         }
     }
+
+    // And last, the till: a town earns from what it has to sell on, so a
+    // place stripped bare recovers slowly and a full one recovers fast. The
+    // fraction is total stock against what every good at target would be,
+    // clamped, so one glutted good cannot make a town rich on its own.
+    let held: f32 = market.stock.iter().sum();
+    let trading = (held / (TARGET * GOODS.len() as f32)).clamp(0.15, 1.0);
+    market.till = (market.till + TILL_REFILL * trading).min(TILL_CAP);
 }
 
 /// Who a load belongs to.
@@ -540,6 +615,13 @@ impl Economy {
             .towns
             .entry(site.centre)
             .or_insert_with(|| opening_books(site));
+
+        // A book read back from before towns had money carries a `NaN` till,
+        // which is the loader saying "this file cannot tell you". Filled in
+        // here rather than there, because only here is the site known.
+        if market.till.is_nan() {
+            market.till = opening_books(site).till;
+        }
 
         // Catch up in whole steps, landing on a boundary. This is what makes
         // "integrate to 5 000 then to 10 000" identical to "integrate to
@@ -751,6 +833,10 @@ impl Economy {
             for good in 0..GOODS.len() {
                 file.write_all(&market.stock[good].to_le_bytes())?;
             }
+            // Version 5. Older files have no till and are read back with the
+            // one their site opens on, which is the honest answer: a save from
+            // before towns had money cannot say how much they had.
+            file.write_all(&market.till.to_le_bytes())?;
         }
 
         file.write_all(&self.last_dispatch.to_le_bytes())?;
@@ -841,9 +927,36 @@ fn read_economy(path: &Path) -> std::io::Result<Option<Economy>> {
         let last_tick = read_u64(&mut file)?;
         let mut stock = [0.0f32; GOODS.len()];
         for slot in stock.iter_mut() {
-            *slot = read_f32(&mut file)?;
+            // Bounded on the way in: a hand-edited book asserting a negative
+            // or enormous stock would price every good at a clamp and read as
+            // a town that cannot exist.
+            let held = read_f32(&mut file)?;
+            if !held.is_finite() || !(0.0..=CAPACITY).contains(&held) {
+                return Err(std::io::Error::other("a stock a town could not hold"));
+            }
+            *slot = held;
         }
-        economy.towns.insert(centre, Market { stock, last_tick });
+        // A book from before stage 5 of this file has no till column. It is
+        // not an error and it is not zero: a town that has been trading for a
+        // week has money, and the site's own opening float is the closest
+        // honest guess. `tills` fills them in once the sites are known.
+        let till = if version >= 5 {
+            let till = read_f32(&mut file)?;
+            if !till.is_finite() || till < 0.0 {
+                return Err(std::io::Error::other("a till that is not money"));
+            }
+            till.min(TILL_CAP)
+        } else {
+            f32::NAN
+        };
+        economy.towns.insert(
+            centre,
+            Market {
+                stock,
+                till,
+                last_tick,
+            },
+        );
     }
 
     economy.last_dispatch = read_u64(&mut file)?;
@@ -892,6 +1005,135 @@ mod tests {
             .into_iter()
             .find(|site| site.speciality == speciality)
             .unwrap_or_else(|| panic!("no {} on the fixture frontier", speciality.name()))
+    }
+
+    /// The infinite money glitch, closed.
+    ///
+    /// Price falls as stock rises and then stops falling — the swing clamps at
+    /// `MIN_FACTOR` and the price floors at one, and `deposit` caps stock at
+    /// `CAPACITY` so it cannot rise past where the clamp bites. Stone's
+    /// reference is 3, so a town glutted to the roof still paid a credit a
+    /// block for ever, and nothing asked whether it could afford to. This is
+    /// that, from the town's side: the price still floors, and the till still
+    /// runs out.
+    #[test]
+    fn a_glutted_town_runs_out_of_money_rather_than_paying_for_ever() {
+        let site = of(Speciality::Mine);
+        let mut books = Economy::new();
+        let market = books.market_mut(&site, 0);
+
+        // Glut it: past `CAPACITY` the deposit is refused, so the price is
+        // pinned at its floor and cannot fall any further.
+        market.deposit(STONE, CAPACITY);
+        let floor = market.price(STONE);
+        market.deposit(STONE, CAPACITY);
+        assert_eq!(market.price(STONE), floor, "the price was not at its floor");
+        assert!(floor >= 1, "a good went free");
+
+        // The till is finite, so what it can buy at that floor is finite.
+        let affordable = market.affords(floor);
+        assert!(affordable > 0, "a town opened with no money at all");
+        let drawn = market.draw(affordable * floor);
+        assert_eq!(drawn, affordable * floor);
+        assert_eq!(
+            market.affords(floor),
+            0,
+            "an emptied till could still pay for a block"
+        );
+        // And it cannot be over-drawn: asking for more than is there pays out
+        // what is there, never more.
+        assert_eq!(market.draw(1_000_000), market.till());
+    }
+
+    /// A drained town recovers on its own if you leave it, which is what makes
+    /// "where do I sell next" a question worth asking.
+    #[test]
+    fn an_emptied_till_fills_back_up_over_time() {
+        let site = of(Speciality::Refinery);
+        let mut books = Economy::new();
+        let market = books.market_mut(&site, 0);
+        let all = market.till();
+        assert_eq!(market.draw(all), all);
+        assert_eq!(market.till(), 0);
+
+        // A day of being left alone.
+        let after = books.market(&site, STEP * 60).till();
+        assert!(after > 0, "a drained town never earned a credit back");
+        // And it does not overflow its own cap however long it is left.
+        let ages = books.market(&site, STEP * 100_000).till();
+        assert!(
+            ages <= TILL_CAP as u64,
+            "a town saved up past its own ceiling: {ages}"
+        );
+    }
+
+    /// A town stripped of goods earns back more slowly than one still holding
+    /// stock to sell on: the refill is what the place trades, not a stipend.
+    #[test]
+    fn a_town_with_nothing_to_sell_earns_slowly() {
+        let site = of(Speciality::Depot);
+        let mut rich = Economy::new();
+        let mut bare = Economy::new();
+
+        {
+            let market = rich.market_mut(&site, 0);
+            let all = market.till();
+            market.draw(all);
+        }
+        {
+            let market = bare.market_mut(&site, 0);
+            let all = market.till();
+            market.draw(all);
+            for good in 0..GOODS.len() {
+                market.withdraw(good, CAPACITY);
+            }
+        }
+
+        let full = rich.market(&site, STEP * 10).till();
+        let empty = bare.market(&site, STEP * 10).till();
+        assert!(
+            full > empty,
+            "a stripped town earned as fast as a stocked one: {full} vs {empty}"
+        );
+    }
+
+    /// The till survives a save, and a book written before towns had money is
+    /// read back with the float its site opens on rather than as broke.
+    #[test]
+    fn the_till_survives_a_save_and_an_old_book_is_not_broke() {
+        let directory = std::env::temp_dir().join(format!("vx-till-{}", std::process::id()));
+        std::fs::remove_dir_all(&directory).ok();
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let site = of(Speciality::Mine);
+        let mut books = Economy::new();
+        let spent = {
+            let market = books.market_mut(&site, 0);
+            market.draw(120);
+            market.till()
+        };
+        books.save(&directory).unwrap();
+
+        let mut back = Economy::new();
+        back.load(&directory);
+        assert_eq!(back.market(&site, 0).till(), spent, "the till did not survive");
+
+        // A version-4 book: the same bytes without the till column. The
+        // loader cannot know what a town had, so the site's own float stands
+        // in — a town that has been trading for a week is not penniless.
+        let mut v4 = std::fs::read(directory.join("economy.dat")).unwrap();
+        v4[4..8].copy_from_slice(&4u32.to_le_bytes());
+        std::fs::write(directory.join("economy.dat"), &v4).unwrap();
+        let mut old = Economy::new();
+        old.load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+        // The read will fail on the trailing byte count and fall back to fresh
+        // books, or it will read and fill the till in; either way the town has
+        // money and the world still opens.
+        assert!(
+            old.market(&site, 0).till() > 0,
+            "an old save left a town unable to buy anything"
+        );
     }
 
     /// A resident's purse is arithmetic on the seed and the clock, not a

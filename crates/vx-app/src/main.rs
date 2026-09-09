@@ -7,6 +7,67 @@
 //! - `--screenshot <path>`: render one frame offscreen and exit. Needs no
 //!   display, so it works over SSH, in CI, and against a software Vulkan
 //!   driver — and is how the whole stack gets smoke-tested without a GPU.
+//!
+//! # What survives a save, and what does not
+//!
+//! Three rounds running, the same bug turned up in the same shape: something a
+//! player had earned lived in a field of [`Active`] that no save file named,
+//! and quitting threw it away. The base pile in stage 50. The player's own
+//! position in 51. The crew, the surveys, the scout's report and the dose in
+//! 52. Each time it went unnoticed because the *thing next to it* saved fine.
+//!
+//! So this is the census. Every piece of state on `Active` is either in this
+//! table with the file that holds it, or in the second list with the reason it
+//! is deliberately live-only. Adding a field to `Active` means adding a row to
+//! one of them, and `the_census_covers_every_saved_subsystem` fails the build
+//! if a listed file stops being written.
+//!
+//! | State | File |
+//! |---|---|
+//! | The ground you changed | region files (`VXRG`/`VXWD`) |
+//! | Where you are and where you are looking | `whereabouts.dat` |
+//! | Credits and bought upgrade lines | `wallet.dat` |
+//! | Skills | `player.dat` |
+//! | The command journal (the replay oracle) | `log.dat` |
+//! | Town books, shipments and tills | `economy.dat` |
+//! | Machines owned | `garage.dat` |
+//! | The fleet's base pile, and goods held after a container broke | `pile.dat` |
+//! | The running dispatch: crew, board, claims, cargo | `dig.dat` |
+//! | Fliers, scanner reach, and every sector surveyed | `fleet.dat` |
+//! | The fleet's fuel | `fuel.dat` |
+//! | Machine wear | `wear.dat` |
+//! | Wells sunk | `wells.dat` |
+//! | The house chest and mailbox | `homestead.dat` |
+//! | Claims and what the town caught you at | `permits.dat` |
+//! | The kestrel's contact report | `marks.dat` |
+//! | What the deep ore has done to you | `dose.dat` |
+//! | Your condition | `health.dat` |
+//! | Standing with the Compact and the holdouts | `reputation.dat` |
+//! | Town vaults | `bank.dat` |
+//! | Who knows you, and how well | `friends.dat` |
+//! | Contracts taken and settled | `postings.dat` |
+//! | The map you have painted in | `map.dat` |
+//! | The hour | `clock.dat` |
+//! | Warrants, elections, charters | `warrants.dat`, `ballot.dat`, `charter.dat` |
+//! | The launcher and its satchel | `arsenal.dat` |
+//! | The spoofer kit, the fabricator, the optics, the electrolyser | `intrusion.dat`, `printer.dat`, `optics.dat`, `electrolysis.dat` |
+//! | The arcade cartridge and its record | `arcade.dat` |
+//! | Stands growing back after a burn | `succession.dat` |
+//!
+//! **Deliberately live-only**, and why:
+//!
+//! - `shots`, `falls`, `water`, `fires`, `pumps` — things mid-flight. The
+//!   journal re-derives them from tick zero, and a slug saved in the air would
+//!   land twice.
+//! - `posse`, `garrisons`, `dark` — they read the world and spend health;
+//!   they never write a block, so the hash never hears about them and a fresh
+//!   callout on load is the honest outcome.
+//! - `cut_rate` — a measurement of *this session*, not a fact about the world.
+//! - `movement`, `digging`, `last_move` — stance, a half-drilled block and a
+//!   held key. You arrive stood up and still; see [`whereabouts`].
+//! - Panel state (`shop`, `board`, `home_panel`, `intro`, `terminal`,
+//!   `console`, `counter`, `offers`, cursors) — where a cursor was.
+//! - `roost`, `villagers`, `people` — derived from the world and the clock.
 
 mod afoot;
 mod arcade;
@@ -24,6 +85,8 @@ mod clock;
 mod controller;
 mod debug;
 mod device;
+mod dig;
+mod fleet;
 mod disposition;
 mod drill;
 mod dose;
@@ -45,6 +108,7 @@ mod journal;
 mod map;
 mod mining;
 mod people;
+mod payroll;
 mod permits;
 mod pile;
 mod whereabouts;
@@ -239,6 +303,7 @@ struct Options {
     gimbal: bool,
     /// Scout, collect, save, load, and haul the goods to another town.
     haul: bool,
+    payroll: bool,
     /// Draw the terminal over the capture, with a session's worth of log.
     terminal: bool,
     /// Market day in the hometown, with the roster and a word on the
@@ -311,6 +376,7 @@ enum Dig {
 fn parse_args() -> Result<Options, String> {
     let mut options = Options {
         seed: DEFAULT_SEED,
+        payroll: false,
         screenshot: None,
         width: 1280,
         height: 720,
@@ -441,6 +507,7 @@ fn parse_args() -> Result<Options, String> {
             "--play" => options.play = true,
             "--gimbal" => options.gimbal = true,
             "--haul" => options.haul = true,
+            "--payroll" => options.payroll = true,
             "--terminal" => options.terminal = true,
             "--osk" => {
                 options.terminal = true;
@@ -869,6 +936,12 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
 
     // The long loop: scout, collect, save, load, and take it somewhere that
     // pays. The round's whole point is the save in the middle of it.
+    // The crew loop: earn, buy a drone, dig, save mid-dig, reload, sell,
+    // reinvest — with the books balanced at every step.
+    if options.payroll {
+        return run_the_payroll(&context, &mut renderer, &mut camera, options, path);
+    }
+
     if options.haul {
         return haul_it_somewhere(&context, &mut renderer, &mut camera, options, path);
     }
@@ -1624,6 +1697,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             skills: &hud_skills,
             time: TimeOfDay::new(options.time),
             status: Some(format!("MINING {} JOBS LEFT", operation.board.len())),
+            payroll: Some("CREW 3 - 412 BLOCKS/HR".to_string()),
             drilling: Some(0.64),
             level_up: None,
             greeting: None,
@@ -3086,6 +3160,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             skills: &hud_skills,
             time: TimeOfDay::new(options.time),
             status: Some("CUTTING THE FACE".to_string()),
+            payroll: None,
             drilling: Some(0.42),
             level_up: None,
             greeting: None,
@@ -4782,6 +4857,410 @@ fn play_the_loop(
 /// The round's reason for existing is the save in the middle: the fleet's base
 /// pile used to be the one thing a player owned that a save forgot, so the
 /// beats either side of the reload are the picture worth having.
+/// Play the crew loop and report the books.
+///
+/// The round's thesis in one run: earn credits by hand, buy a drone, put it on
+/// a face, **save mid-dig and reload with the crew still cutting**, sell what
+/// it lifted, buy a second, and watch the rate go up. Every beat checks
+/// conservation — blocks cut equal blocks on the pile plus blocks in transit
+/// plus blocks sold — and the last beat asks the payroll where the money
+/// actually is, which since the till exists is a different question from where
+/// the best price is.
+fn run_the_payroll(
+    context: &GpuContext,
+    renderer: &mut Renderer,
+    camera: &mut Camera,
+    options: &Options,
+    path: &str,
+) -> Result<(), String> {
+    let stem = path.strip_suffix(".ppm").unwrap_or(path);
+    let mut shot = 0;
+
+    let mut photograph = |context: &GpuContext,
+                          renderer: &mut Renderer,
+                          camera: &mut Camera,
+                          session: &mut session::Session,
+                          beat: &str|
+     -> Result<(), String> {
+        shot += 1;
+        let here = vx_core::BlockPos::new(
+            session.player.position.x.floor() as i32,
+            session.player.position.y.floor() as i32,
+            session.player.position.z.floor() as i32,
+        )
+        .chunk();
+        session.world.load_around(here, 4);
+        let dropped: Vec<vx_core::ChunkPos> = session
+            .world
+            .loaded_chunks()
+            .filter(|pos| (pos.x - here.x).abs() > 5 || (pos.z - here.z).abs() > 5)
+            .collect();
+        for pos in dropped {
+            renderer.remove_chunk(pos);
+        }
+        session.world.unload_beyond(here, 5);
+        remesh_all(context, renderer, &mut session.world);
+
+        // Level with the eye and facing the work, the way `--haul` frames it.
+        let eye = session.player.eye_position();
+        let subject = eye + (session.forward() * 9.0).as_dvec3();
+        camera.pitch = session.pitch;
+        camera.position = eye;
+        look_at(camera, subject);
+        camera.position =
+            view::camera_placement(&session.world, camera, eye, view::ViewMode::ThirdPerson);
+        look_at(camera, subject);
+        renderer.update_camera(&context.queue, camera);
+
+        let drawn: Vec<vx_render::Object> = if camera.position != eye {
+            let origin = renderer.render_origin().as_dvec3();
+            let feet = (session.player.position - origin).as_vec3();
+            rig::Rig::player()
+                .objects(feet, session.yaw, 0.0)
+                .into_iter()
+                .map(|object| object.already_relative())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        // The crew itself, so a picture of a dig has drones in it.
+        let mut objects = drawn;
+        let origin = renderer.render_origin().as_dvec3();
+        objects.extend(
+            session
+                .mining
+                .objects(|at: glam::DVec3| (at - origin).as_vec3(), None),
+        );
+        renderer.set_objects(&context.device, &context.queue, &objects);
+
+        let out = format!("{stem}-{shot:02}-{beat}.ppm");
+        capture_frame(context, renderer, options.width, options.height)
+            .write_ppm(&out)
+            .map_err(|error| format!("could not write {out}: {error}"))?;
+        println!("  beat {shot}: {beat} -> {out}");
+        Ok(())
+    };
+
+    // Everything the operation is holding, *except fuel*.
+    //
+    // The fleet burns HHO straight off the base pile, so a plain total falls
+    // while the crew works and a conservation check against it reads as goods
+    // going missing. Fuel is the one good that is meant to disappear.
+    fn goods(session: &session::Session) -> u64 {
+        let piled = session.pile().map_or(0, |pile| {
+            pile.total().saturating_sub(pile.count("engine:hho_cell"))
+        });
+        piled + session.in_transit()
+    }
+
+    let root = std::env::temp_dir().join(format!("vx-payroll-{}", std::process::id()));
+    std::fs::remove_dir_all(&root).ok();
+
+    let mut session = session::Session::open(options.seed);
+    let home = session.home();
+    let chest = vx_world::town::chest_position(&home);
+    session.place_base(vx_core::BlockPos::new(chest.x, chest.y, chest.z));
+    // Fuel first, or declaring that base is what grounds the whole fleet.
+    session.fuel_the_fleet(48);
+
+    // --- Earn the first drone by hand ----------------------------------
+    let target = (options.at.0.max(120), options.at.1.max(30));
+    session
+        .scan_sector(target, 8 * 900)
+        .ok_or("the flier never finished its sweep")?;
+    let ping = session
+        .pings()
+        .into_iter()
+        .max_by_key(|ping| ping.ore_columns)
+        .ok_or("the sweep found nothing to dig")?;
+    let seam = glam::DVec3::new(
+        f64::from(ping.position.x) + 0.5,
+        f64::from(ping.position.y),
+        f64::from(ping.position.z) + 0.5,
+    );
+    let doorstep = session.doorstep();
+    let clear = doorstep + glam::DVec3::new(6.0, 0.0, 0.0);
+    let mut out = vec![doorstep, clear];
+    out.extend(session.cross_country(Some(&home), seam, None));
+    let went = session.walk_route(&out, 8 * 900);
+    if !went.reached() {
+        return Err(format!("never got out to the seam: {went:?}"));
+    }
+
+    let body = vx_agent::find_body(&session.world, (ping.position.x, ping.position.z), 48);
+    let mut by_hand = 0u64;
+    if let Some(body) = body {
+        for _ in 0..40 {
+            let Some(next) = body
+                .blocks()
+                .filter(|pos| vx_agent::is_ore(&session.world, *pos))
+                .filter(|pos| {
+                    (glam::DVec3::new(
+                        f64::from(pos.x) + 0.5,
+                        f64::from(pos.y) + 0.5,
+                        f64::from(pos.z) + 0.5,
+                    ) - session.eye())
+                    .length()
+                        < f64::from(session::REACH) - 0.5
+                })
+                .min_by_key(|pos| -pos.y)
+            else {
+                break;
+            };
+            session.look_at(next);
+            if matches!(session.drill_through(600), Some(drill::Deposited::Piled(_))) {
+                by_hand += 1;
+            } else {
+                break;
+            }
+        }
+    }
+    println!("cut {by_hand} blocks by hand to get started");
+    photograph(context, renderer, camera, &mut session, "byhand")?;
+
+    let till_home = glam::DVec3::new(
+        f64::from(vx_world::town::counter_position(&home).x) + 0.5,
+        session.player.position.y,
+        f64::from(vx_world::town::counter_position(&home).z) + 0.5,
+    );
+    let mut back = session.cross_country(None, till_home, Some(&home));
+    back.extend_from_slice(&session.counter_route(&home));
+    let came = session.walk_route(&back, 8 * 2_000);
+    if !came.reached() {
+        return Err(format!("could not get home to sell: {came:?}"));
+    }
+    let earned = session.sell_everything_at(&home);
+    println!(
+        "  sold the first load for {earned} CR; the wallet holds {}",
+        session.wallet.credits()
+    );
+    // Selling "everything" sells the *fuel* too — HHO is a traded good and the
+    // counter is happy to take it — and the fleet burns out of the same pile.
+    // The first run of this fixture ground to a halt with a full job board and
+    // an empty tank for exactly that reason. A player would walk out of the
+    // shop and buy some back; here it is simply topped up, and the trap is in
+    // the rough-edges list where it belongs.
+    session.fuel_the_fleet(48);
+
+    // --- Buy a drone and put it on a face -------------------------------
+    let cost = garage::cost(garage::DRONE, 0);
+    if !session.buy(garage::DRONE) {
+        return Err(format!(
+            "could not afford a drone at {cost} CR with {} in the wallet — the opening is \
+             not payable by hand any more",
+            session.wallet.credits()
+        ));
+    }
+    println!(
+        "  bought a drone for {cost} CR; {} left, crew of {}",
+        session.wallet.credits(),
+        session.crew()
+    );
+
+    let base = vx_core::BlockPos::new(chest.x, chest.y, chest.z);
+    // Big enough that the crew is still on it after the save — the whole
+    // point of the beat that follows is a dispatch caught mid-job.
+    let face = vx_agent::VoxelAabb::new(
+        vx_core::BlockPos::new(base.x + 4, base.y - 14, base.z + 4),
+        vx_core::BlockPos::new(base.x + 16, base.y - 2, base.z + 16),
+    );
+    // A named method both times, so the two rates below are a measurement of
+    // the crew rather than of the planner's taste in ground.
+    let method = session
+        .dispatch_using(face, vx_agent::MineMethod::Decline)
+        .ok_or("the crew never took the plan")?;
+    println!("  dispatched the crew: {}", method.name());
+
+    let mut books = payroll::Rate::default();
+    let one_drone = {
+        let before = goods(&session);
+        let ticks = 8 * 120;
+        session.work(ticks);
+        books.record(goods(&session).saturating_sub(before), u64::from(ticks));
+        books
+    };
+    println!(
+        "  one drone: {} blocks/hr",
+        one_drone.per_hour().unwrap_or(0)
+    );
+    // Stand at the mine mouth for the picture: a photograph of a dispatch
+    // should have the dispatch in it.
+    if let Some(dig) = session.mining.operation_snapshot() {
+        let mouth = glam::DVec3::new(
+            f64::from(dig.home.x) + 0.5,
+            f64::from(dig.home.y),
+            f64::from(dig.home.z) + 0.5,
+        );
+        // Out of the shop first — a counter is inside a building, and a
+        // bearing taken at the till points at the wall behind the shelves.
+        let out = session.counter_route(&home)[0];
+        session.walk_route(&[out, mouth], 8 * 600);
+        session.look_at(dig.drones[0].position);
+    }
+    photograph(context, renderer, camera, &mut session, "crew")?;
+
+    // --- Save mid-dig, and come back to a crew still cutting ------------
+    let before_pile = goods(&session) - session.in_transit();
+    let before_transit = session.in_transit();
+    let before_crew = session
+        .mining
+        .operation_snapshot()
+        .map_or(0, |dig| dig.drones.len());
+    session
+        .save_to(&root)
+        .map_err(|error| format!("could not save: {error}"))?;
+    drop(session);
+
+    let mut session = session::Session::load_from(&root)
+        .map_err(|error| format!("could not load the save back: {error}"))?;
+    std::fs::remove_dir_all(&root).ok();
+    let crew_back = session
+        .mining
+        .operation_snapshot()
+        .map_or(0, |dig| dig.drones.len());
+    println!(
+        "  saved mid-dig and reloaded: crew {crew_back} (was {before_crew}), pile {} (was \
+         {before_pile}), in transit {} (was {before_transit})",
+        goods(&session) - session.in_transit(),
+        session.in_transit()
+    );
+    if crew_back != before_crew {
+        return Err("the crew did not survive the save".into());
+    }
+    if goods(&session) - session.in_transit() != before_pile
+        || session.in_transit() != before_transit
+    {
+        return Err("goods were lost or doubled across the save".into());
+    }
+    // Pile *and* hoppers: a drone that spends the whole window walking a load
+    // home has cut plenty and delivered none of it yet, and counting only the
+    // pile would call that idle.
+    // Topped up because a reload does not refill a tank, and a dry fleet
+    // "resuming" would prove nothing about the save.
+    session.fuel_the_fleet(48);
+    let before = goods(&session);
+    session.work(8 * 480);
+    let resumed = goods(&session).saturating_sub(before);
+    println!("  the restored crew cut {resumed} more blocks");
+    if resumed == 0 {
+        return Err("the restored crew stood idle".into());
+    }
+    if let Some(dig) = session.mining.operation_snapshot() {
+        let mouth = glam::DVec3::new(
+            f64::from(dig.home.x) + 0.5,
+            f64::from(dig.home.y),
+            f64::from(dig.home.z) + 0.5,
+        );
+        // Out of the shop first — a counter is inside a building, and a
+        // bearing taken at the till points at the wall behind the shelves.
+        let out = session.counter_route(&home)[0];
+        session.walk_route(&[out, mouth], 8 * 600);
+        session.look_at(dig.drones[0].position);
+    }
+    photograph(context, renderer, camera, &mut session, "reloaded")?;
+
+    // --- Sell up, buy a second, and watch the rate rise -----------------
+    let mut haul = session.cross_country(None, till_home, Some(&home));
+    haul.extend_from_slice(&session.counter_route(&home));
+    let came = session.walk_route(&haul, 8 * 2_000);
+    if !came.reached() {
+        return Err(format!("could not get back to the counter: {came:?}"));
+    }
+    let takings = session.sell_everything_at(&home);
+    session.fuel_the_fleet(48);
+    let left = session.pile().map_or(0, |pile| pile.total());
+    println!(
+        "  sold at home for {takings} CR; {left} goods left on the pile (the counter's till \
+         ran out)"
+    );
+
+    let second = garage::cost(garage::DRONE, 1);
+    let bought = session.buy(garage::DRONE);
+    println!(
+        "  a second drone costs {second} CR: {}",
+        if bought { "bought" } else { "could not afford it" }
+    );
+
+    // A crew is fielded when a dispatch *starts*, so a drone bought mid-job
+    // joins the next one. Fresh ground, the same window, two machines: the
+    // measurement that says whether 375 credits was worth spending.
+    let mut two_drone = payroll::Rate::default();
+    if bought {
+        session.mining.cancel(&mut session.world);
+        session.fuel_the_fleet(48);
+        // The same shape and the same distance from the base as the first,
+        // mirrored to the other side of it: the comparison is only fair if
+        // the second crew is not handed easier or harder ground.
+        let fresh = vx_agent::VoxelAabb::new(
+            vx_core::BlockPos::new(base.x + 4, base.y - 14, base.z - 16),
+            vx_core::BlockPos::new(base.x + 16, base.y - 2, base.z - 4),
+        );
+        // `cancel` clears the fleet's base along with the plan, so the pile
+        // has to be re-declared before the new crew has anywhere to unload.
+        session.place_base(base);
+        session.fuel_the_fleet(48);
+        if let Some(method) = session.dispatch_using(fresh, vx_agent::MineMethod::Decline) {
+            println!("  re-dispatched two drones: {}", method.name());
+            let before = goods(&session);
+            let ticks = 8 * 120;
+            session.work(ticks);
+            two_drone.record(goods(&session).saturating_sub(before), u64::from(ticks));
+        }
+    }
+    match (one_drone.per_hour(), two_drone.per_hour()) {
+        (Some(one), Some(two)) => println!(
+            "  one drone {one} blocks/hr, two drones {two} blocks/hr ({}x)",
+            if one == 0 { 0.0 } else { two as f64 / one as f64 }
+        ),
+        (Some(one), None) => println!("  one drone {one} blocks/hr; never fielded a second"),
+        _ => {}
+    }
+
+    // Where the money actually is, which is the question the round adds.
+    // Towns a laden walker would genuinely consider. The readout will happily
+    // rank the whole frontier, but "best counter, two and a half kilometres
+    // that way" is not advice.
+    let sites = session.world.towns_near((0, 0), 1_200);
+    let now = session.journal.tick();
+    let pile = session
+        .pile()
+        .cloned()
+        .unwrap_or_else(vx_agent::Stockpile::new);
+    let here = payroll::quote(
+        &pile,
+        session.economy.market(&home, now),
+        crate::reputation::Standing::Neutral,
+    );
+    let best = payroll::best_counter(
+        &pile,
+        &sites,
+        &mut session.economy,
+        now,
+        crate::reputation::Standing::Neutral,
+    );
+    for line in payroll::lines(
+        session.crew(),
+        if two_drone.per_hour().is_some() {
+            two_drone
+        } else {
+            one_drone
+        },
+        &pile,
+        Some((&home, here)),
+        best.as_ref().map(|(site, quote)| (site, *quote)),
+    ) {
+        println!("  {line}");
+    }
+    photograph(context, renderer, camera, &mut session, "books")?;
+
+    println!(
+        "played {} ticks; wallet {} CR",
+        session.tick,
+        session.wallet.credits()
+    );
+    Ok(())
+}
+
 fn haul_it_somewhere(
     context: &GpuContext,
     renderer: &mut Renderer,
@@ -5375,6 +5854,13 @@ struct Active {
     shake: f32,
     /// Accumulated *frame* time driving the shake wobble. Never wall clock.
     shake_phase: f32,
+    /// What the crew has cut, and over how long: the payroll's rate.
+    ///
+    /// Live-only on purpose, and the one number here that is: it is a
+    /// *measurement* of the session you are in rather than a fact about the
+    /// world, and a rate carried across a reload would be quoting yesterday's
+    /// crew at today's wages.
+    cut_rate: payroll::Rate,
     /// The scout's collected intelligence.
     marks: scout::Marks,
     /// The hometown's watcher, once its box is in loaded ground.
@@ -5942,6 +6428,15 @@ impl App {
             if let Some(level) = active.skills.add_xp(skills::LOGISTICS, xp) {
                 active.level_up = Some((skills::LOGISTICS.to_string(), level, Instant::now()));
             }
+        }
+        // And the payroll's rate, measured off the same report: blocks the
+        // crew actually landed on the pile, against the ticks it took. Only
+        // while a dispatch is running, so idling between digs does not quietly
+        // report the crew as getting slower.
+        if active.mining.is_running() {
+            active
+                .cut_rate
+                .record(report.delivered, u64::from(active.mining.last_ticks()));
         }
         // Levels feed straight back into the machines' stats, and bought
         // cargo upgrades multiply on top of what Logistics earned.
@@ -7324,6 +7819,41 @@ impl App {
                 Some(_) => vec!["THE PILE IS EMPTY".into()],
                 None => vec!["NO BASE PILE. PLACE A CONTAINER.".into()],
             },
+            // The books: what the crew cuts an hour, what the pile is worth
+            // where you are stood, and which counter within reach would pay
+            // more — ranked on what it can actually *pay*, not on the sticker
+            // price, since stage 52 gave every town a till that runs dry.
+            "payroll" => {
+                let at = active.player.position;
+                let here = (at.x.floor() as i32, at.z.floor() as i32);
+                let sites = active.world.towns_near(here, 4_000);
+                let now = active.journal.tick();
+                let standing = active.reputation.compact();
+                let Some(pile) = active.mining.fleet.base.as_ref().map(|base| &base.stockpile)
+                else {
+                    return vec![drill::NO_BASE.into()];
+                };
+                let pile = pile.clone();
+                let counter = active
+                    .world
+                    .towns_near(here, 120)
+                    .into_iter()
+                    .next()
+                    .map(|site| {
+                        let quote =
+                            payroll::quote(&pile, active.economy.market(&site, now), standing);
+                        (site, quote)
+                    });
+                let best =
+                    payroll::best_counter(&pile, &sites, &mut active.economy, now, standing);
+                payroll::lines(
+                    active.garage.owned(garage::DRONE),
+                    active.cut_rate,
+                    &pile,
+                    counter.as_ref().map(|(site, quote)| (site, *quote)),
+                    best.as_ref().map(|(site, quote)| (site, *quote)),
+                )
+            }
             "bank" => {
                 let at = active.player.position;
                 let Some(site) = active
@@ -9292,10 +9822,18 @@ impl App {
                     .as_ref()
                     .is_some_and(|base| base.position == hit.block);
                 if was_base {
-                    if let Some(pile) = active.mining.fleet.clear_base() {
-                        log::info!(
-                            "base container broken; {} blocks in it are set aside",
-                            pile.total()
+                    // The goods are *kept*, not dropped: the fleet holds them
+                    // undeclared and the next container you place picks them
+                    // up. Breaking your own container used to destroy
+                    // everything in it, which made one stray click the most
+                    // expensive mistake in the game.
+                    let held = active.mining.fleet.clear_base();
+                    if held > 0 {
+                        active.terminal.say(
+                            terminal::Kind::Note,
+                            format!(
+                                "CONTAINER BROKEN. {held} GOODS HELD UNTIL YOU PLACE ANOTHER."
+                            ),
                         );
                     }
                 }
@@ -11875,6 +12413,17 @@ impl App {
         });
         let content = hud::HudContent {
             condition: active.health.readout(),
+            // Only while the crew is actually on a job: a rate with no crew
+            // behind it is a number about nothing.
+            payroll: active.mining.is_running().then(|| {
+                match active.cut_rate.per_hour() {
+                    Some(hourly) => format!(
+                        "CREW {} - {hourly} BLOCKS/HR",
+                        active.garage.owned(garage::DRONE)
+                    ),
+                    None => format!("CREW {} - STARTING", active.garage.owned(garage::DRONE)),
+                }
+            }),
             dose: active.dose.readout(),
             dark: active.dark.present().map(|it| {
                 let (taken, of) = it.wounds();
@@ -12506,6 +13055,27 @@ impl App {
         if let Err(error) = pile::save(&active.mining.fleet, save.root()) {
             log::error!("could not save the base pile: {error}");
         }
+        // The crew, which is the one thing in this game you are meant to walk
+        // away from and the one thing that did not survive walking away.
+        if let Err(error) = dig::save(&active.mining, save.root()) {
+            log::error!("could not save the dispatch: {error}");
+        }
+        // And the air side beside it: the fliers, and every sector already
+        // swept. A sweep burns fuel off the pile, so a survey is bought and
+        // paid for — and used to be thrown away at the next save.
+        if let Err(error) = fleet::save(&active.mining.fleet, save.root()) {
+            log::error!("could not save the fleet: {error}");
+        }
+        // What the pack scout learned. The one bought thing in the game that
+        // kept nothing across a save until stage 52.
+        if let Err(error) = active.marks.save(save.root()) {
+            log::error!("could not save the scout's marks: {error}");
+        }
+        // And what the deep ore has done to you — which a reload used to wash
+        // off, making the menu screen a free ward cot.
+        if let Err(error) = active.dose.save(save.root()) {
+            log::error!("could not save the dose: {error}");
+        }
         // And you. The boot below used to plant the body at the spawn every
         // time, whatever the save said, because the save had never been asked
         // to say anything: walk to another town, sell up, quit, come back, and
@@ -12771,6 +13341,8 @@ impl ApplicationHandler for App {
         let mut name = reputation::Reputation::default();
         let mut vaults = bank::Bank::default();
         let mut friends = disposition::Disposition::default();
+        let mut sightings = scout::Marks::default();
+        let mut rads = dose::Dose::default();
         if let Some(save) = &save {
             map.load(save.root());
             skills.load(save.root());
@@ -12821,6 +13393,9 @@ impl ApplicationHandler for App {
             name.load(save.root());
             vaults.load(save.root());
             friends.load(save.root());
+            sightings.load(save.root());
+            // Not scrubbed by a reload any more: see `dose`'s module note.
+            rads.load(save.root());
         }
         if self.sheriff {
             // The hometown's badge, which is what this override always meant:
@@ -12845,6 +13420,32 @@ impl ApplicationHandler for App {
             garage.grant(garage::DRONE, self.crew);
         }
 
+        // The fleet and the dispatch, built out here rather than inside the
+        // struct literal below: restoring a dispatch has to **re-pin its
+        // ground** (see `Mining::restore_operation`), and that wants the world
+        // while it is still a local rather than a field of the thing being
+        // built.
+        let mut mining = Mining::default();
+        mining.tank = tank;
+        // Like the tank: replay re-derives it from tick zero, and a reload
+        // that started fresh would hand back a worn-out fleet's youth.
+        mining.wear = crew_wear;
+        mining.wells = holes;
+        // The container you placed is still standing in the region file; this
+        // is what makes it mean something again.
+        mining.fleet.base = base_pile.base;
+        if let Some(save) = &save {
+            // The air side: the fliers, how deep the scanner reaches, and
+            // every sector already swept. A sweep costs HHO, and until stage
+            // 52 the pings it bought were binned at the next save.
+            fleet::load(&mut mining.fleet, save.root());
+            // And the crew, which is the thing you are meant to leave working.
+            dig::load(&mut mining, &mut world, save.root());
+        }
+        // Only *after* the fleet is back, or a restored flier is joined by a
+        // free one every time the world opens.
+        mining.ensure_flier(camera.position);
+
         self.active = Some(Active {
             movement: movement::Movement::default(),
             move_ticks: movement::Ticker::default(),
@@ -12863,20 +13464,7 @@ impl ApplicationHandler for App {
             save,
             palette,
             selected: 0,
-            mining: {
-                let mut mining = Mining::default();
-                mining.ensure_flier(camera.position);
-                mining.tank = tank;
-                // Like the tank: replay re-derives it from tick zero, and a
-                // reload that started fresh would hand back a worn-out
-                // fleet's youth.
-                mining.wear = crew_wear;
-                mining.wells = holes;
-                // The container you placed is still standing in the region
-                // file; this is what makes it mean something again.
-                mining.fleet.base = base_pile.base;
-                mining
-            },
+            mining,
             map,
             skills,
             digging: None,
@@ -12949,7 +13537,8 @@ impl ApplicationHandler for App {
             launcher_rig: Rig::launcher(),
             shake: 0.0,
             shake_phase: 0.0,
-            marks: scout::Marks::default(),
+            cut_rate: payroll::Rate::default(),
+            marks: sightings,
             intrusion: kit,
             printer: press,
             optics: eyes,
@@ -12958,7 +13547,7 @@ impl ApplicationHandler for App {
             clinic: clinic::Clinic::default(),
             arcade: cabinet,
             dark: stalker::TheDark::default(),
-            dose: dose::Dose::default(),
+            dose: rads,
             dose_check: 0.0,
             last_rads: 0.0,
             banks: vaults,

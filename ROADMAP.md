@@ -127,7 +127,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 48 | `ee5249a` | The loop you can actually play. Asked to play a round — leave, collect, trade — and found that nothing could: every verb in the loop is a method on `App`, which owns a window, and `main.rs` has no tests and `vx-app` no library target, so the walk, the drill and the counter had never once been joined up. The drill's arithmetic comes out into `drill.rs` and a `Session` plays the game headlessly through the game's own functions — and the join turns out to be where the bug was: a block mined with no base container declared **evaporated in silence**, the only system in the game that produced goods and never said where they went. Played end to end on the shipped seed: out the door, 170 blocks to the copper outcrop, sixteen blocks cut at two seconds each, home slower than you left because the pile is the weight, and 224 credits over the counter — with four captures, and three walking bugs found by walking |
 | 49a | `93a4cb6` | The machine you look through. Driving a machine by hand was never written down — not the wheel, not the controls — while `Operation::pilot_tick` calls `break_block`, so a hand-dug hole replayed as untouched ground. Demonstrated at two different hashes over the same orders, then closed: `Wheel` and `Pilot` on the wire, journal VERSION 31, and `MachineTag` gaining the kestrel its own doc comment said would be "a version bump, loudly". And the camera comes off the hull it was sitting inside — a gimbal under the nose, measured off each rig's real parts, with the subject machine culled from its own feed and machine *heading* interpolated between ticks for the first time, so a nose-mounted camera glides instead of snapping |
 | 50 | `f458008` | The ditch you cannot climb out of. Asked to play the loop through a save — scout, dig, save, reload, haul it to another village and sell it — and it broke twice. The fleet's **base pile was never written to disk**: `Fleet` has no `save` or `load` anywhere in `vx-agent`, so a reload came back with an empty pile *and no declared base*, which re-armed stage 48's silent ore loss on the very next block. It gets `pile.dat` (`VXBP`), beside the tank and the wear ledger. Then the haul itself could not finish, and the reason was in the world: **every town is ringed by a three-block ditch that ran straight across its own gateway**, and a body mantles 2.2 — so no player could enter any town, or re-enter the one they started in, from the day forts shipped in stage 21. The gate gets the uncut causeway a fort with no drawbridge is actually built with. And the walker learns to stop and look: `afoot.rs` sweeps the ground a *body* can cross — two blocks of headroom, a climb of two, a drop of six — where the drones' one-block field said a mountainside was unreachable. Played end to end on the shipped seed: 792 ticks of sector scan, two pings, 322 ore columns, 20 blocks cut, 25 goods on the pile **before and after the save**, 206 blocks to the next town, and 405 credits over a stranger's counter |
-| 51 | _this_ | Every load put you back in bed. Asked to play the whole loop — leave town, mine, **come back**, save, go to another town and trade — and the half nothing had ever walked broke it twice over. `App`'s boot builds the body at `town::spawn_position` unconditionally and nothing anywhere reads a saved position, because nothing anywhere writes one: the ground, the pile, the wallet, the skills, the books, the chest, the tank and the wear ledger all came back and **you** did not. Walk two hundred blocks, sell up, quit, come back — you are in your own kitchen with the walk to do again. It hid for the same reason the ditch did: every save/load test there had ever been ran at the spawn, where being put back at the spawn is indistinguishable from working. It gets `whereabouts.dat` (`VXYO`) — where you are and where you are looking, at `f64`, read *above* the pregen so the ground is prepared around where the body will actually be rather than dropping it through unloaded air. `Session::cross_country` names the shape every long walk has (out by your gate, over the hills in legs, in by theirs) after it had been written by hand three times, and `--haul` grows the beat it never had: the walk **home**, laden, in through your own gate |
+| 51 | `086a51c` | Every load put you back in bed. Asked to play the whole loop — leave town, mine, **come back**, save, go to another town and trade — and the half nothing had ever walked broke it twice over. `App`'s boot builds the body at `town::spawn_position` unconditionally and nothing anywhere reads a saved position, because nothing anywhere writes one: the ground, the pile, the wallet, the skills, the books, the chest, the tank and the wear ledger all came back and **you** did not. Walk two hundred blocks, sell up, quit, come back — you are in your own kitchen with the walk to do again. It hid for the same reason the ditch did: every save/load test there had ever been ran at the spawn, where being put back at the spawn is indistinguishable from working. It gets `whereabouts.dat` (`VXYO`) — where you are and where you are looking, at `f64`, read *above* the pregen so the ground is prepared around where the body will actually be rather than dropping it through unloaded air. `Session::cross_country` names the shape every long walk has (out by your gate, over the hills in legs, in by theirs) after it had been written by hand three times, and `--haul` grows the beat it never had: the walk **home**, laden, in through your own gate |
+| 52 | _this_ | The crew you leave working, and the books that balance. Asked for the loop where bots mine and you get rich, with two conditions: everything saves, and nothing can be glitched upward. Both had teeth. **A running dispatch was in no save file** — `Mining::operation` is private and nothing named it — so buying drones and setting them cutting was work you lost at every quit; the third round running that the same shape turned up (the pile in 50, the player in 51). Walking every field of `Active` against every `save(` call found three more: **every sector you burned fuel to survey**, the kestrel's whole report, and your radiation dose — the last of which made the menu screen a free ward cot. They get `dig.dat`, `fleet.dat`, `marks.dat` and `dose.dat`, and a **persistence census** in the module docs with a test that fails if a subsystem stops saving or a new one arrives unaccounted for. The integrity half found a working infinite-money glitch: price floors at one credit, stock caps so it cannot fall further, and **nothing checked whether the town could pay** — so selling rubble to one counter for ever beat every interesting decision the economy offers. Towns get a **till** that their own trade refills, which kills the faucet and turns earning into a routing problem. And the played run turned up the worst bug of the round: `Session::load_from`'s `unload_beyond(pos, i32::MAX)` retained every chunk instead of dropping them, so a reload served **generated ground over the ground on disk** — a dig came back filled in and the crew standing in it reported stuck. Measured: 40 blocks by hand for the first drone, one drone 15,150 blocks/hr, **two 31,830 (2.1×)** on the same method and matched ground, a dispatch saved mid-dig and resumed cutting, and every good conserved across the save |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -3270,6 +3271,112 @@ shipped seed: out to the ping the flier found (888 ticks), 20 blocks cut and 25
 goods on the pile, **home again laden** (424 ticks), saved and reloaded *at the
 counter where it was saved*, and 206 blocks to a Depot for **405 credits**.
 
+## Shipped — Stage 52: the crew you leave working, and the books that balance
+
+The ask was the automation loop — earn credits, buy bots, let them mine, get
+the maximum — with two conditions attached: **everything saves**, and **you
+cannot glitch or manipulate your way to bigger numbers.** Auditing those two
+turned up more than the feature did.
+
+### A running dispatch was in no save file
+
+`Mining::operation` is a private field holding the whole excavation — the job
+board with its claims, every drone with its cargo and its grudges, the
+mine-mouth pile — and it appeared in no save anywhere. Buy the drones, mark a
+body, set them cutting, quit: the hole stayed dug and nothing was in it.
+
+That is the third round running that the same shape has turned up in the same
+place, and the worst of the three, because a drone is the one part of this game
+you are *meant* to walk away from. `vx-agent` grew plain snapshot types
+(`OperationSnapshot`, `DroneSnapshot`, `BoardSnapshot`, `FleetSnapshot`) so the
+app can write them without the simulation crate learning what a directory is;
+`dig.dat` holds them. The flow-field cache is deliberately excluded — it is
+megabytes to save something the next broken block invalidates anyway.
+
+**Restoring re-pins the ground**, and the reach is the work *and the crew*: jobs
+complete, so a span derived from the remaining board shrinks as the dig goes on,
+and a drone part way down a ramp it has already cut ends up outside the ground
+its own route needs. Unloaded ground reads as air, air is not standable, and the
+drone gives its job back and reports stuck — which is exactly what the first
+played run did.
+
+**They resume; they do not run on.** Crediting elapsed wall-clock would put real
+time into a simulation whose whole correctness argument is that it is a function
+of the tick.
+
+### Three more things did not save
+
+Walking every field of `Active` against the thirty-odd `save(` calls in
+`App::save_world` found: **every sector already surveyed** — a sweep burns HHO
+off the pile, so the pings were bought and paid for and thrown away at the next
+save, leaving a player re-flying ground they had covered with no way to know;
+**the kestrel's whole contact report**, which had no save function of any kind;
+and **the radiation dose**, whose "live-only, on purpose" note had been
+overreached into "need not be written", making quit-and-reload a free ward cot
+and the cost of the richest ore in the ground optional.
+
+So this round also leaves a **census**: a table in `main.rs`'s module docs
+naming every field of `Active` and either its file or the reason it is
+deliberately live-only, and a test that fails both ways — a listed file that
+stops being written, and a file on disk nobody put in the table.
+
+### The infinite money glitch
+
+`Market::price` falls as stock rises and then **stops falling**: the swing
+clamps at `MIN_FACTOR` and the price floors at one, and `deposit` caps stock so
+it cannot rise past where the clamp bites. Stone's reference is 3, so a town
+glutted to the roof still paid a credit a block for ever — and `sell_all` called
+`wallet.earn` against no town money at all.
+
+The optimal strategy for "maximum credits" was therefore: point drones at any
+rock, sell the spoil to the nearest counter, repeat until bored. Unbounded, no
+decision in it, and strictly better than every interesting thing the economy
+offers.
+
+Towns now have a **till**. It refills from what the town itself trades — a place
+stripped bare earns slowly, a full one earns fast — and a counter pays out of
+money it actually has. A barrow bigger than the till leaves the shop half sold
+and the rest goes back on the pile. That kills the faucet and, more to the
+point, turns earning into a *routing* problem: which town, which goods, how far,
+how often, and when to come back. `payroll::best_counter` ranks on what a town
+can **pay**, not on its sticker price, which is the whole difference.
+
+Alongside it: `Stockpile::add`/`total` and `sell_all`'s multiply made
+saturating, and the new loaders range-check what they read — a `dig.dat` cannot
+assert a million drones, a `dose.dat` cannot assert a negative dose that banks
+against future exposure. Single-player, so this is corruption-resistance rather
+than DRM: the claim is that no reachable sequence of play and no damaged file
+produces an impossible state.
+
+### And breaking your own container no longer eats the pile
+
+`main.rs` took the stockpile back out of the fleet on a break, logged how much
+was "set aside", and let it fall out of scope. One stray click on your own
+container destroyed everything in it. The goods are held undeclared now, the
+next container picks them up, and `pile.dat` v2 carries them across a save —
+held, never doubled, with tests both ways.
+
+### The reload was serving generated ground
+
+The played run found the worst bug of the round, and it was mine, from stage 50.
+`Session::load_from` cleared its generated terrain with
+`unload_beyond(pos, i32::MAX)` — whose radius is squared into a limit no chunk
+is outside, so it retained everything. `load_or_generate` then returned early on
+chunks that were "already loaded", and **the reload served generated ground over
+the ground on disk**: a dig came back filled in, and the crew standing in it was
+entombed. `World::unload_all` exists now and says why.
+
+### `--payroll`
+
+The loop played and measured on the shipped seed: 40 blocks cut by hand and sold
+for 1,124 CR; a drone for 250; **one drone 15,150 blocks/hr**; saved mid-dig,
+reloaded — crew intact, pile and hoppers identical, and 1,600-odd more blocks
+cut; a second drone for 375; **two drones 31,830 blocks/hr, 2.1×**, on the same
+method and matched ground, because the first comparison put one drone on a
+decline against two on an adit and reported the pair as slower. And the books:
+the home counter can pay 104 of the 2,005 credits the pile is worth, and the
+Depot 206 blocks away would pay 3,743.
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -3632,6 +3739,11 @@ the two hundred blocks to the next village to sell, that no player has ever
 been able to walk into a town at all, because the ditch ran across the gate.
 And 51 walked the leg 50 had not — home again, laden, in through your own
 gate — and found the last thing in the game that did not survive a save: you.
+Then 52 took the automation loop and the two conditions on it — everything
+saves, nothing can be glitched upward — and found a crew that died at every
+quit, three more things nobody was writing down, a working infinite-money
+glitch, and a reload that had been serving generated ground over the ground on
+disk.
 
 One round is named now:
 
@@ -3644,7 +3756,7 @@ the next note says.
 
 ## The feature map
 
-The whole game at a glance, as of stage 51.
+The whole game at a glance, as of stage 52.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);

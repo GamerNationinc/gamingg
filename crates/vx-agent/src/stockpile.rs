@@ -24,11 +24,19 @@ impl Stockpile {
         Stockpile::default()
     }
 
+    /// Saturating on purpose.
+    ///
+    /// A pile has no ceiling of its own — a long enough dig keeps adding —
+    /// and a wrap here would turn a hoard into nothing, or nothing into a
+    /// hoard. Saturating is the honest end of the range: at `u64::MAX` blocks
+    /// the arithmetic simply stops moving, which is a bug nobody can reach
+    /// rather than a bug that pays out.
     pub fn add(&mut self, name: impl Into<String>, amount: u64) {
         if amount == 0 {
             return;
         }
-        *self.counts.entry(name.into()).or_insert(0) += amount;
+        let slot = self.counts.entry(name.into()).or_insert(0);
+        *slot = slot.saturating_add(amount);
     }
 
     /// Record a block by id, resolving its name through `registry`.
@@ -60,14 +68,28 @@ impl Stockpile {
         taken
     }
 
+    /// Empty the pile, handing out every row.
+    ///
+    /// Used where goods *move* rather than being consumed — a broken container
+    /// tipping into the fleet's holding, say — so the caller cannot forget to
+    /// clear what it took and double the goods by accident.
+    pub fn drain(&mut self) -> impl Iterator<Item = (String, u64)> {
+        std::mem::take(&mut self.counts).into_iter()
+    }
+
     pub fn count(&self, name: &str) -> u64 {
         self.counts.get(name).copied().unwrap_or(0)
     }
 
     /// Everything held, across all kinds. The conservation checks compare this
     /// against blocks actually removed from the world.
+    /// Saturating, like [`Stockpile::add`]: a total that wrapped would report
+    /// a hoard as nearly empty, which every conservation check in the game
+    /// would then agree with.
     pub fn total(&self) -> u64 {
-        self.counts.values().sum()
+        self.counts
+            .values()
+            .fold(0u64, |sum, held| sum.saturating_add(*held))
     }
 
     pub fn is_empty(&self) -> bool {

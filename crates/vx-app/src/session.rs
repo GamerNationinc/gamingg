@@ -110,6 +110,10 @@ pub struct Session {
     pub skills: Skills,
     pub economy: Economy,
     pub shop: Shop,
+    /// The machines the player actually owns. A `Session` had none until
+    /// stage 52, which is why nothing had ever played the loop this round is
+    /// about: you cannot buy a drone without a shed to put it in.
+    pub garage: crate::garage::Garage,
     pub journal: CommandLog,
     /// The hold in progress, exactly as `Active::digging` carries it.
     pub digging: Option<(BlockPos, f32)>,
@@ -159,6 +163,7 @@ impl Session {
             skills: Skills::default(),
             economy: Economy::new(),
             shop: Shop::new(),
+            garage: crate::garage::Garage::new(),
             journal: CommandLog::new(),
             digging: None,
             tick: 0,
@@ -187,6 +192,9 @@ impl Session {
         self.economy.save(root)?;
         self.mining.tank.save(root)?;
         crate::pile::save(&self.mining.fleet, root)?;
+        crate::fleet::save(&self.mining.fleet, root)?;
+        crate::dig::save(&self.mining, root)?;
+        self.garage.save(root)?;
         crate::whereabouts::save(
             crate::whereabouts::Whereabouts {
                 position: self.player.position,
@@ -225,10 +233,15 @@ impl Session {
         // Pull the saved ground back in place of the generated ground. The
         // same free function the live game's boot uses, so a chunk that was
         // dug in the last session comes back dug.
-        let around: Vec<vx_core::ChunkPos> = session.world.loaded_chunks().collect();
-        for pos in around {
-            session.world.unload_beyond(pos, i32::MAX);
-        }
+        //
+        // Every generated chunk has to go *first*, and this used to try that
+        // with `unload_beyond(pos, i32::MAX)` — which retains everything,
+        // because the radius is squared into a limit no chunk is outside. So
+        // nothing was dropped, `load_or_generate` returned early on chunks
+        // that were "already loaded", and the reload served generated terrain
+        // over the top of the save. Nothing noticed while the only reloads
+        // tested were of ground nobody had dug.
+        session.world.unload_all();
         let here = BlockPos::new(
             session.player.position.x.floor() as i32,
             session.player.position.y.floor() as i32,
@@ -250,6 +263,11 @@ impl Session {
         session.economy.load(root);
         session.mining.tank.load(root);
         crate::pile::load(&mut session.mining.fleet, root);
+        crate::fleet::load(&mut session.mining.fleet, root);
+        session.garage.load(root);
+        // Last, and with the world: restoring a dispatch re-pins its ground,
+        // which needs chunks that are already back in place.
+        crate::dig::load(&mut session.mining, &mut session.world, root);
         Ok(session)
     }
 
@@ -997,6 +1015,72 @@ impl Session {
         self.mining.fleet.set_base(at);
     }
 
+    /// Buy one machine of a kind, if the wallet can stand it.
+    ///
+    /// Straight through [`crate::garage::Garage::buy`], which is where the
+    /// rising price and the one-kestrel rule live: the session buys what a
+    /// player buys, at what a player pays.
+    pub fn buy(&mut self, kind: &str) -> bool {
+        self.garage.buy(&mut self.wallet, kind)
+    }
+
+    /// How many ground drones the shed holds.
+    pub fn crew(&self) -> u32 {
+        self.garage.owned(crate::garage::DRONE)
+    }
+
+    /// Mark a body and dispatch on a *named* method, if this ground offers it.
+    ///
+    /// The plain [`Session::dispatch`] takes whatever the planner ranks first,
+    /// which is right for play and wrong for measurement: an adit and a
+    /// decline move different amounts of rock, so comparing one crew on a
+    /// decline with two on an adit says nothing about the crew. Cycling to a
+    /// chosen method is exactly what the player's own key does.
+    pub fn dispatch_using(
+        &mut self,
+        area: vx_agent::VoxelAabb,
+        method: vx_agent::MineMethod,
+    ) -> Option<vx_agent::MineMethod> {
+        let crew = self.crew();
+        self.mining.mark(&mut self.world, area.min);
+        self.mining.mark(&mut self.world, area.max);
+        // Bounded: the planner offers at most one plan per method, so a full
+        // lap of the list is the most that can ever be needed.
+        for _ in 0..vx_agent::MineMethod::ALL.len() {
+            if self.mining.selected_plan().is_some_and(|plan| plan.method == method) {
+                break;
+            }
+            self.mining.cycle_method();
+        }
+        self.mining.start(&mut self.world, crew)
+    }
+
+    /// Let the crew work for a while, and say how much landed on the pile.
+    ///
+    /// The player stands still: this is the drones' clock, not the walker's,
+    /// and the journal hears about it the same way `advance` tells it.
+    pub fn work(&mut self, ticks: u32) -> u64 {
+        let before = self.pile().map_or(0, |pile| pile.total());
+        self.advance(ticks, self.command(0));
+        self.pile()
+            .map_or(0, |pile| pile.total())
+            .saturating_sub(before)
+    }
+
+    /// Everything the crew is holding but has not delivered yet.
+    ///
+    /// The number that makes a conservation check possible: blocks cut are on
+    /// the pile, in a hopper, or at the mine mouth waiting for a ferry, and
+    /// any that are in none of those have been lost.
+    pub fn in_transit(&self) -> u64 {
+        self.mining
+            .operation_snapshot()
+            .map_or(0, |dig| {
+                dig.stockpile.total()
+                    + dig.drones.iter().map(|drone| drone.cargo.total()).sum::<u64>()
+            })
+    }
+
     /// Hold the trigger on whatever the head is pointed at until it breaks.
     ///
     /// Returns what became of the block, or `None` if the bit never bit —
@@ -1104,15 +1188,23 @@ impl Session {
         let now = self.journal.tick();
         let before = self.wallet.credits();
 
-        let mut shed = crate::garage::Garage::default();
+        // The session's own shed, not a throwaway: a sale and a purchase have
+        // to see the same machines, or buying a drone out of the takings is a
+        // drone that exists only until the panel closes.
+        let mut shed = std::mem::take(&mut self.garage);
         let mut rack = crate::arsenal::Arsenal::default();
         let mut kit = crate::intrusion::Intrusions::default();
         let security = self.skills.level(skills::SECURITY);
 
         // The shelf lists one sell row per kind on the pile, ahead of
         // everything you can buy, so walking the cursor from the top sells
-        // each kind in turn until the sell rows run out.
+        // each kind in turn until the sell rows run out — or until the
+        // counter runs out of money, which since stage 52 it can. A stack the
+        // till cannot finish leaves its row on the shelf, so the loop has to
+        // notice a pass that sold nothing rather than pressing Enter for ever.
+        let mut stalled = 0;
         loop {
+            let held = self.mining.fleet.held();
             let mut market = self.economy.market(&site, now).clone();
             let rows = {
                 let pile = self.mining.fleet.base.as_ref().map(|base| &base.stockpile);
@@ -1153,8 +1245,20 @@ impl Session {
                 true,
             );
             *self.economy.market_mut(&site, now) = market;
+            if self.mining.fleet.held() == held {
+                stalled += 1;
+                // Two passes that moved nothing: this counter has bought
+                // everything it can afford, and the rest of the load stays on
+                // the pile for another town.
+                if stalled >= 2 {
+                    break;
+                }
+            } else {
+                stalled = 0;
+            }
         }
 
+        self.garage = shed;
         self.wallet.credits() - before
     }
 }
@@ -1541,6 +1645,43 @@ mod tests {
     }
 
     /// A scratch directory that cleans up after itself, like `wear.rs`'s.
+    /// A session with a container down, a drone bought and a crew already
+    /// cutting: the state this round is about.
+    fn dug_in() -> Session {
+        let mut session = ready();
+        // Credits the honest way is a whole play; the shed is what is under
+        // test here, so the wallet is seeded and the drone is *bought*.
+        session.wallet.earn(5_000);
+        // Declaring a base is the moment the fleet starts wanting fuel —
+        // `Mining::fuelled` reports a machine fuelled only while there is *no*
+        // base — so a crew on a dry pile never turns a wheel. Stage 50 found
+        // that trap; this is it, avoided.
+        session.fuel_the_fleet(24);
+        assert!(session.buy(crate::garage::DRONE), "could not buy a drone");
+        assert_eq!(session.crew(), 1);
+
+        // A body under the ground beside the house, big enough to take a
+        // while and small enough to stay inside the loaded chunks.
+        let base = session
+            .mining
+            .fleet
+            .base
+            .as_ref()
+            .map(|base| base.position)
+            .expect("no base");
+        let area = vx_agent::VoxelAabb::new(
+            BlockPos::new(base.x + 4, base.y - 6, base.z + 4),
+            BlockPos::new(base.x + 9, base.y - 2, base.z + 9),
+        );
+        assert!(
+            session
+                .dispatch_using(area, vx_agent::MineMethod::Decline)
+                .is_some(),
+            "the dispatch never started"
+        );
+        session
+    }
+
     fn scratch(name: &str) -> std::path::PathBuf {
         let directory = std::env::temp_dir().join(format!(
             "vx-session-{name}-{}",
@@ -1587,6 +1728,405 @@ mod tests {
         assert_eq!(pile.count("engine:copper_ore"), 37, "the ore did not come back");
         assert_eq!(pile.count("engine:stone"), 4);
         assert_eq!(pile.total(), 41);
+    }
+
+    /// A crew set to work survives a save, and keeps working.
+    ///
+    /// The bug this round is named for. `Mining::operation` was a private
+    /// field that no save file anywhere named, so buying drones, marking a
+    /// body and setting them cutting was work you lost the moment you quit —
+    /// the hole stayed dug and nothing was in it. Every drone, its cargo, its
+    /// claimed job and the board itself have to come back, or a restored crew
+    /// stands idle on work nobody posted.
+    #[test]
+    fn a_dig_in_progress_survives_a_save() {
+        let directory = scratch("dig");
+        let (crew, cut, at, transit) = {
+            let mut session = dug_in();
+            session.work(8 * 20);
+            let dig = session
+                .mining
+                .operation_snapshot()
+                .expect("the crew was never dispatched");
+            assert!(
+                dig.board.entries.iter().any(|(_, held)| held.is_some()),
+                "nobody had claimed a job to test the claim with"
+            );
+            session.save_to(&directory).unwrap();
+            (
+                dig.drones.len(),
+                session.pile().map_or(0, |pile| pile.total()),
+                dig.drones.iter().map(|drone| drone.position).collect::<Vec<_>>(),
+                session.in_transit(),
+            )
+        };
+
+        let mut session = Session::load_from(&directory).unwrap();
+        std::fs::remove_dir_all(&directory).ok();
+
+        let dig = session
+            .mining
+            .operation_snapshot()
+            .expect("the dispatch did not survive the save");
+        assert_eq!(dig.drones.len(), crew, "the crew came back a different size");
+        assert_eq!(
+            dig.drones.iter().map(|drone| drone.position).collect::<Vec<_>>(),
+            at,
+            "the crew came back somewhere else"
+        );
+        assert!(
+            dig.board.entries.iter().any(|(_, held)| held.is_some()),
+            "the claims did not come back"
+        );
+        assert_eq!(session.pile().map_or(0, |pile| pile.total()), cut);
+        assert_eq!(
+            session.in_transit(),
+            transit,
+            "goods in a hopper were lost or doubled across the save"
+        );
+
+        // And it is still a *working* crew, not a museum piece.
+        let before = session.pile().map_or(0, |pile| pile.total()) + session.in_transit();
+        session.work(8 * 30);
+        let after = session.pile().map_or(0, |pile| pile.total()) + session.in_transit();
+        assert!(
+            after > before,
+            "the restored crew cut nothing: {before} -> {after}"
+        );
+    }
+
+    /// A restored crew digs the same hole, because it holds the same ground.
+    ///
+    /// The subtle half of the fix. A drone reads the world to decide what to
+    /// cut and an unloaded chunk reads as *air*, so a dispatch whose span is
+    /// not resident digs differently depending on where the player is
+    /// standing. `Mining::start` pins against exactly that; a restore that
+    /// forgot the pin would hand the replay oracle an excavation whose outcome
+    /// depended on the camera.
+    #[test]
+    fn a_restored_crew_holds_its_own_ground() {
+        let directory = scratch("pinned");
+        {
+            let mut session = dug_in();
+            session.work(8 * 20);
+            session.save_to(&directory).unwrap();
+        }
+        let mut session = Session::load_from(&directory).unwrap();
+        std::fs::remove_dir_all(&directory).ok();
+
+        let dig = session.mining.operation_snapshot().expect("no dispatch");
+        // Every job region the crew is going to read is resident. Unloaded
+        // ground is the thing that would read as air.
+        for (job, _) in &dig.board.entries {
+            for corner in [job.region.min, job.region.max] {
+                assert!(
+                    session.world.chunk(corner.chunk()).is_some(),
+                    "the crew's ground at {corner:?} was not held after a reload"
+                );
+            }
+        }
+        // And it stays held while the crew works, rather than being evicted by
+        // the streamer the first time the player moves.
+        session.work(8 * 10);
+        let dig = session.mining.operation_snapshot().expect("no dispatch");
+        for (job, _) in &dig.board.entries {
+            assert!(
+                session.world.chunk(job.region.min.chunk()).is_some(),
+                "the crew's ground was let go while it was still working"
+            );
+        }
+    }
+
+    /// The same dispatch writes the same bytes twice — the refusal lists come
+    /// off `HashSet`s, whose order is not stable, so they are sorted on the
+    /// way out. A save that churned would make every quit a fresh write.
+    #[test]
+    fn the_same_dispatch_writes_the_same_bytes() {
+        let directory = scratch("stable");
+        let mut session = dug_in();
+        session.work(8 * 20);
+        crate::dig::save(&session.mining, &directory).unwrap();
+        let first = std::fs::read(directory.join("dig.dat")).unwrap();
+        crate::dig::save(&session.mining, &directory).unwrap();
+        let second = std::fs::read(directory.join("dig.dat")).unwrap();
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(first, second);
+    }
+
+    /// A missing or damaged file is no dispatch at all, never a world that
+    /// refuses to open — and a cancelled dig stays cancelled rather than being
+    /// resurrected by a stale file from two saves ago.
+    #[test]
+    fn a_missing_or_damaged_dig_is_no_dig_at_all() {
+        let directory = scratch("damaged");
+        let mut session = ready();
+        crate::dig::load(&mut session.mining, &mut session.world, &directory);
+        assert!(!session.mining.is_running(), "a missing file invented a crew");
+
+        std::fs::write(directory.join("dig.dat"), b"NOPE and then some").unwrap();
+        crate::dig::load(&mut session.mining, &mut session.world, &directory);
+        assert!(!session.mining.is_running(), "a damaged file invented a crew");
+
+        // And a save taken with nothing running says so out loud.
+        crate::dig::save(&session.mining, &directory).unwrap();
+        let mut fresh = ready();
+        crate::dig::load(&mut fresh.mining, &mut fresh.world, &directory);
+        std::fs::remove_dir_all(&directory).ok();
+        assert!(!fresh.mining.is_running(), "an idle save invented a crew");
+    }
+
+    /// Every sector you have already swept survives a save.
+    ///
+    /// A sweep burns HHO off the pile, so a survey is bought and paid for —
+    /// and `pile.dat` wrote the base and nothing else, so the receipt was
+    /// binned every time. You came back to a fleet that had never scanned
+    /// anything, re-flew ground you had already covered, spent the fuel twice,
+    /// and had no way of knowing.
+    #[test]
+    fn the_sectors_you_paid_to_scan_survive_a_save() {
+        let directory = scratch("surveys");
+        let (pings, depth) = {
+            let mut session = ready();
+            session.fuel_the_fleet(12);
+            session
+                .scan_sector((146, 30), 8 * 900)
+                .expect("the flier never finished its sweep");
+            let pings = session.pings();
+            assert!(!pings.is_empty(), "the sweep found nothing to save");
+            session.save_to(&directory).unwrap();
+            (pings, session.mining.fleet.scan_depth)
+        };
+
+        let session = Session::load_from(&directory).unwrap();
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(session.pings(), pings, "the pings did not come back");
+        assert_eq!(session.mining.fleet.scan_depth, depth);
+        assert!(
+            !session.mining.fleet.fliers.is_empty(),
+            "the fleet came back with no fliers"
+        );
+    }
+
+    /// Goods are conserved across a save, wherever they happen to be.
+    ///
+    /// The obvious way to get the crew's persistence wrong is to write a
+    /// drone's cargo *and* an operation stockpile that already counted it, and
+    /// come back with twice the ore. The obvious way to get it wrong in the
+    /// other direction is to drop a hopper on the floor. Neither: cut, save
+    /// mid-haul, reload, and the pile plus everything in transit adds up to
+    /// exactly what it did.
+    #[test]
+    fn nothing_is_lost_or_doubled_by_saving_mid_haul() {
+        let directory = scratch("conserved");
+        let (piled, carried) = {
+            let mut session = dug_in();
+            // Long enough that somebody is part way through a run.
+            session.work(8 * 60);
+            let carried = session.in_transit();
+            assert!(carried > 0, "nobody was carrying anything to test with");
+            session.save_to(&directory).unwrap();
+            (session.pile().map_or(0, |pile| pile.total()), carried)
+        };
+
+        let session = Session::load_from(&directory).unwrap();
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(
+            session.pile().map_or(0, |pile| pile.total()),
+            piled,
+            "the pile changed across a save"
+        );
+        assert_eq!(
+            session.in_transit(),
+            carried,
+            "goods in transit were lost or doubled"
+        );
+    }
+
+    /// Breaking your own container keeps the goods.
+    ///
+    /// It used to destroy them: `main.rs` took the pile back out of the fleet,
+    /// logged how much was "set aside", and let it fall out of scope — so one
+    /// stray click on your own container was the single most expensive
+    /// mistake available. The goods are held instead, and the next container
+    /// picks them up. Held, not doubled: the total never moves.
+    #[test]
+    fn breaking_the_container_holds_the_goods_rather_than_eating_them() {
+        let mut session = ready();
+        if let Some(base) = session.mining.fleet.base.as_mut() {
+            base.stockpile.add("engine:copper_ore".to_string(), 31);
+        }
+        let held = session.mining.fleet.held();
+        assert_eq!(held, 31);
+
+        let at = session
+            .mining
+            .fleet
+            .base
+            .as_ref()
+            .map(|base| base.position)
+            .expect("no base");
+        let broken = session.mining.fleet.clear_base();
+        assert_eq!(broken, 31, "the break did not report what it held");
+        assert!(session.mining.fleet.base.is_none());
+        assert_eq!(
+            session.mining.fleet.held(),
+            31,
+            "breaking the container destroyed the goods"
+        );
+
+        // A new container anywhere picks them up, once.
+        session.place_base(BlockPos::new(at.x, at.y, at.z + 1));
+        assert_eq!(
+            session.pile().map_or(0, |pile| pile.total()),
+            31,
+            "the goods did not come back with the new container"
+        );
+        assert_eq!(session.mining.fleet.held(), 31, "the goods were doubled");
+        assert_eq!(
+            session.mining.fleet.orphaned().total(),
+            0,
+            "the goods are still in holding as well as on the pile"
+        );
+    }
+
+    /// And goods in holding survive a save, so quitting between breaking a
+    /// container and placing the next one is not a way to lose a barrow —
+    /// nor, in the other direction, to walk away with two.
+    #[test]
+    fn goods_waiting_for_a_container_survive_a_save() {
+        let directory = scratch("orphan");
+        {
+            let mut session = ready();
+            if let Some(base) = session.mining.fleet.base.as_mut() {
+                base.stockpile.add("engine:copper_ore".to_string(), 17);
+            }
+            session.mining.fleet.clear_base();
+            assert_eq!(session.mining.fleet.orphaned().total(), 17);
+            session.save_to(&directory).unwrap();
+        }
+        let mut session = Session::load_from(&directory).unwrap();
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(
+            session.mining.fleet.held(),
+            17,
+            "goods waiting for a container did not survive the save"
+        );
+        assert!(session.mining.fleet.base.is_none(), "a base reappeared");
+
+        let home = vx_world::town::chest_position(&session.home());
+        session.place_base(BlockPos::new(home.x, home.y, home.z));
+        assert_eq!(session.pile().map_or(0, |pile| pile.total()), 17);
+        assert_eq!(session.mining.fleet.held(), 17, "the goods were doubled");
+    }
+
+    /// Cancelling a dispatch does not mint or destroy anything either: the
+    /// crew stands down, the hole stays dug, and the pile is untouched.
+    #[test]
+    fn cancelling_a_dispatch_conserves_the_pile() {
+        let mut session = dug_in();
+        session.work(8 * 40);
+        let piled = session.pile().map_or(0, |pile| pile.total());
+        session.mining.cancel(&mut session.world);
+        assert!(!session.mining.is_running(), "the dispatch survived a cancel");
+        // `cancel` keeps the fleet, which is what the pile lives on.
+        assert_eq!(
+            session.pile().map_or(0, |pile| pile.total()),
+            piled,
+            "cancelling changed the pile"
+        );
+    }
+
+    /// Two drones cut faster than one — the whole reason to spend the money.
+    ///
+    /// Controlled: the same ground, the same method, the same window. The
+    /// first `--payroll` run compared a lone drone on a decline against a pair
+    /// on an adit and reported the pair as *slower*, which was a fact about
+    /// the planner rather than the crew.
+    #[test]
+    fn two_drones_cut_faster_than_one() {
+        fn cut_with(crew: u32, at: BlockPos) -> u64 {
+            let mut session = ready();
+            session.wallet.earn(50_000);
+            session.fuel_the_fleet(200);
+            for _ in 0..crew {
+                assert!(session.buy(crate::garage::DRONE), "could not buy a drone");
+            }
+            assert_eq!(session.crew(), crew);
+            let face = vx_agent::VoxelAabb::new(
+                BlockPos::new(at.x, at.y - 10, at.z),
+                BlockPos::new(at.x + 10, at.y - 2, at.z + 10),
+            );
+            assert!(
+                session
+                    .dispatch_using(face, vx_agent::MineMethod::Decline)
+                    .is_some(),
+                "no decline on this ground"
+            );
+            let before = session.pile().map_or(0, |pile| pile.total()) + session.in_transit();
+            session.advance(8 * 90, session.command(0));
+            session.pile().map_or(0, |pile| pile.total()) + session.in_transit() - before
+        }
+
+        let base = vx_world::town::chest_position(&Session::open(SEED).home());
+        let at = BlockPos::new(base.x + 4, base.y, base.z + 4);
+        let one = cut_with(1, at);
+        let two = cut_with(2, at);
+        assert!(one > 0, "a single drone cut nothing at all");
+        assert!(
+            two > one,
+            "two drones ({two}) did not beat one ({one}) on the same ground"
+        );
+    }
+
+    /// The census: everything a saved session writes is accounted for.
+    ///
+    /// Both directions, which is the point. A file on the list that is missing
+    /// means a subsystem quietly stopped saving; a file on disk that is *not*
+    /// on the list means a new one arrived without anybody deciding whether it
+    /// should persist — which is exactly how the pile, the player and the crew
+    /// each went three stages before anyone noticed. The table in `main.rs`'s
+    /// module docs is the human-readable half of the same promise.
+    #[test]
+    fn the_census_covers_every_saved_subsystem() {
+        const EXPECTED: [&str; 10] = [
+            "log.dat",
+            "wallet.dat",
+            "player.dat",
+            "economy.dat",
+            "fuel.dat",
+            "pile.dat",
+            "fleet.dat",
+            "dig.dat",
+            "garage.dat",
+            "whereabouts.dat",
+        ];
+
+        let directory = scratch("census");
+        let mut session = dug_in();
+        session.work(8 * 20);
+        session.save_to(&directory).unwrap();
+
+        let written: std::collections::BTreeSet<String> = std::fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".dat"))
+            .collect();
+        std::fs::remove_dir_all(&directory).ok();
+
+        for name in EXPECTED {
+            assert!(
+                written.contains(name),
+                "{name} was not written: a subsystem stopped saving"
+            );
+        }
+        for name in &written {
+            assert!(
+                EXPECTED.contains(&name.as_str()),
+                "{name} is saved but not in the census: decide whether it should persist, \
+                 then add it here and to main.rs's table"
+            );
+        }
     }
 
     /// Where you were standing survives a save.

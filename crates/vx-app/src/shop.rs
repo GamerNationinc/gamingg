@@ -426,16 +426,29 @@ pub fn sell_all(
     let Some(good) = economy::good_index(name) else {
         return (0, 0);
     };
-    let sold = pile.take(name, u64::MAX);
-    if sold == 0 {
-        return (0, 0);
-    }
     // Priced before the sale lands: you are paid what the board said, and the
     // market moves for the next seller rather than under your own feet. The
     // Compact's opinion of you shades the unit rate a few percent either way
     // — a relationship, deliberately never a cliff.
     let rate = crate::reputation::shaded_sell(market.price(good), standing);
-    let earned = sold * rate;
+    // And bounded by what the counter can actually pay. Before stage 52 a
+    // town's money was infinite and its price had a floor, so selling rubble
+    // to one counter for ever was the strongest play in the game — see
+    // `economy::TILL_CAP`. Now a full barrow can leave a shop half sold, and
+    // the rest goes back on the pile for another town or another day.
+    let affordable = market.affords(rate);
+    if affordable == 0 {
+        return (0, 0);
+    }
+    let sold = pile.take(name, affordable);
+    if sold == 0 {
+        return (0, 0);
+    }
+    // Saturating rather than wrapping: `sold` is bounded by a pile that has no
+    // ceiling of its own, and a wrap here would turn a big honest haul into a
+    // small dishonest payment — or a vast one.
+    let asked = sold.saturating_mul(rate);
+    let earned = market.draw(asked);
     market.deposit(good, sold as f32);
     walletbook.earn(earned);
     (sold, earned)
@@ -693,6 +706,113 @@ mod tests {
             (0, 0)
         );
         assert_eq!(pile.count("engine:dirt"), 60);
+    }
+
+    /// A counter pays out of money it has, and a barrow bigger than the till
+    /// leaves the shop half sold.
+    ///
+    /// Before stage 52 a town's cash was infinite while its price had a floor,
+    /// which made "sell rubble to the nearest counter for ever" the strongest
+    /// play in the game. The rest of the load stays on the pile, for another
+    /// town or another day — which is the decision the round is about.
+    #[test]
+    fn a_counter_sells_only_what_it_can_pay_for() {
+        let mut pile = Stockpile::new();
+        let mut wallet = Wallet::new();
+        let mut market = market();
+
+        // A hoard worth far more than any town keeps on hand.
+        pile.add("engine:copper_ore", 100_000);
+        let rate = market.price(economy::ORE);
+        let affordable = market.affords(rate);
+        assert!(
+            affordable < 100_000,
+            "the fixture's hoard was not bigger than the till"
+        );
+
+        let (sold, earned) = sell_all(
+            &mut pile,
+            &mut wallet,
+            &mut market,
+            "engine:copper_ore",
+            crate::reputation::Standing::Neutral,
+        );
+        assert_eq!(sold, affordable, "the counter bought more than it could pay for");
+        assert_eq!(earned, affordable * rate);
+        assert_eq!(wallet.credits(), earned);
+        assert_eq!(
+            pile.count("engine:copper_ore"),
+            100_000 - affordable,
+            "the rest of the load did not stay on the pile"
+        );
+
+        // And the till really is empty now: asking again pays nothing and
+        // takes nothing.
+        assert_eq!(
+            sell_all(
+                &mut pile,
+                &mut wallet,
+                &mut market,
+                "engine:copper_ore",
+                crate::reputation::Standing::Neutral
+            ),
+            (0, 0),
+            "an emptied counter kept buying"
+        );
+        assert_eq!(pile.count("engine:copper_ore"), 100_000 - affordable);
+    }
+
+    /// Credits are conserved: what the wallet gained is exactly what the town
+    /// paid out, every time, with nothing minted in between.
+    #[test]
+    fn every_credit_earned_came_out_of_a_towns_till() {
+        let mut pile = stocked_pile();
+        let mut wallet = Wallet::new();
+        let mut market = market();
+        let before = market.till();
+
+        let mut earned = 0;
+        for good in ["engine:copper_ore", "engine:stone", "engine:log"] {
+            earned += sell_all(
+                &mut pile,
+                &mut wallet,
+                &mut market,
+                good,
+                crate::reputation::Standing::Neutral,
+            )
+            .1;
+        }
+        assert_eq!(wallet.credits(), earned);
+        assert_eq!(
+            before - market.till(),
+            earned,
+            "credits appeared that no town paid for"
+        );
+    }
+
+    /// An absurd pile cannot wrap the multiply into a small — or vast —
+    /// payment. `sold * rate` was a plain `u64` multiply; the till bounds it
+    /// now, and the arithmetic saturates rather than wrapping even so.
+    #[test]
+    fn an_impossible_pile_cannot_wrap_the_payment() {
+        let mut pile = Stockpile::new();
+        let mut wallet = Wallet::new();
+        let mut market = market();
+        pile.add("engine:copper_ore", u64::MAX);
+        // And the pile itself saturates rather than wrapping to nothing.
+        pile.add("engine:copper_ore", 10);
+        assert_eq!(pile.count("engine:copper_ore"), u64::MAX);
+
+        let (sold, earned) = sell_all(
+            &mut pile,
+            &mut wallet,
+            &mut market,
+            "engine:copper_ore",
+            crate::reputation::Standing::Neutral,
+        );
+        assert!(sold > 0 && sold < u64::MAX, "sold an impossible amount");
+        assert!(earned <= market.till() + earned, "the payment wrapped");
+        assert_eq!(wallet.credits(), earned);
     }
 
     #[test]

@@ -107,6 +107,20 @@ pub struct Operation {
     controlled: Option<usize>,
 }
 
+/// An excavation's whole persistent state, as plain data.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OperationSnapshot {
+    pub board: crate::job::BoardSnapshot,
+    pub stockpile: Stockpile,
+    pub home: BlockPos,
+    pub drones: Vec<crate::drone::DroneSnapshot>,
+    pub fields_built: u64,
+    /// Which drone the player had the wheel of. Restored, because a session
+    /// that saved mid-drive and reloaded with the machine back on autopilot
+    /// would quietly countermand an order the player gave.
+    pub controlled: Option<usize>,
+}
+
 impl Operation {
     pub fn new(home: BlockPos) -> Self {
         Operation {
@@ -116,6 +130,34 @@ impl Operation {
             drones: Vec::new(),
             fields_built: 0,
             controlled: None,
+        }
+    }
+
+    /// Everything about this excavation that outlives a session.
+    ///
+    /// The crew, the board with its claims, the mine-mouth pile and who has
+    /// the wheel. Stage 52's whole point: until then `Mining` held this in a
+    /// private field, nothing wrote it, and a dispatch died at every save.
+    pub fn snapshot(&self) -> OperationSnapshot {
+        OperationSnapshot {
+            board: self.board.snapshot(),
+            stockpile: self.stockpile.clone(),
+            home: self.home,
+            drones: self.drones.iter().map(Drone::snapshot).collect(),
+            fields_built: self.fields_built,
+            controlled: self.controlled,
+        }
+    }
+
+    /// Build an operation back from one.
+    pub fn restore(snapshot: OperationSnapshot) -> Self {
+        Operation {
+            board: JobBoard::restore(snapshot.board),
+            stockpile: snapshot.stockpile,
+            home: snapshot.home,
+            drones: snapshot.drones.into_iter().map(Drone::restore).collect(),
+            fields_built: snapshot.fields_built,
+            controlled: snapshot.controlled,
         }
     }
 
@@ -674,6 +716,58 @@ mod tests {
     /// Count every solid block across a generous box around a work site.
     fn solid_total(world: &World, around: VoxelAabb) -> u64 {
         solid_blocks(world, around.expanded(30).clamped_to_world())
+    }
+
+    /// A crew, its board and its claims survive a snapshot exactly.
+    ///
+    /// The whole of stage 52 rests on this: until then a dispatch lived in a
+    /// private field of `Mining` that no save file named, so buying drones and
+    /// setting them cutting was work you lost the moment you quit.
+    #[test]
+    fn an_operation_round_trips_through_a_snapshot() {
+        let mut operation = Operation::new(BlockPos::new(3, 64, -7));
+        operation.add_drone(BlockPos::new(3, 64, -7));
+        operation.add_drone(BlockPos::new(4, 64, -7));
+        let job = operation.board.post(
+            crate::job::JobKind::Extract,
+            VoxelAabb::new(BlockPos::new(0, 40, 0), BlockPos::new(4, 44, 4)),
+            3,
+        );
+        operation.board.claim_nearest(DroneId(1), BlockPos::new(4, 64, -7));
+        operation.stockpile.add("engine:copper_ore", 9);
+        operation.drones[0].cargo.add("engine:stone", 2);
+        operation.drones[0].state = DroneState::Hauling;
+
+        let snapshot = operation.snapshot();
+        let back = Operation::restore(snapshot.clone());
+
+        assert_eq!(back.home, operation.home);
+        assert_eq!(back.stockpile.total(), 9);
+        assert_eq!(back.drones.len(), 2);
+        assert_eq!(back.drones[0].cargo.total(), 2);
+        assert_eq!(back.drones[0].state, DroneState::Hauling);
+        assert_eq!(
+            back.board.claimant(job),
+            Some(DroneId(1)),
+            "the claim did not come back"
+        );
+        // And the snapshot of the restored operation is the same snapshot,
+        // which is what makes saving twice write the same bytes.
+        assert_eq!(back.snapshot(), snapshot);
+    }
+
+    /// The cached route is *not* in it, and must not be: it holds a whole flow
+    /// field keyed on the world's edit count, which the next broken block
+    /// invalidates anyway.
+    #[test]
+    fn a_restored_drone_carries_no_stale_route() {
+        let mut operation = Operation::new(BlockPos::new(0, 64, 0));
+        operation.add_drone(BlockPos::new(0, 64, 0));
+        let back = Operation::restore(operation.snapshot());
+        assert!(
+            back.drones[0].route.is_none(),
+            "a route survived a snapshot"
+        );
     }
 
     struct Site {

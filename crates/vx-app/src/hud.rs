@@ -79,6 +79,10 @@ pub struct HudContent<'a> {
     pub optic: Option<&'static str>,
     /// What the fleet has left to burn, when there is a fleet to fuel.
     pub fuel: Option<String>,
+    /// What the crew is cutting, while a dispatch is running. The number that
+    /// says whether the last drone was worth what it cost — and the one thing
+    /// a player buying machines had no way at all to see before stage 52.
+    pub payroll: Option<String>,
     /// Hits left, once anything has landed. Whole draws nothing: a bar that
     /// is always there is a bar nobody reads.
     pub condition: Option<String>,
@@ -236,6 +240,11 @@ pub fn render_hud(content: &HudContent) -> Vec<u8> {
         y += LINE_HEIGHT as i32;
     }
 
+    // Line 4d: what the crew is earning, while it is working.
+    if let Some(line) = &content.payroll {
+        font::draw_text(&mut pixels, HUD_WIDTH, margin, y, 1, DIM, line);
+        y += LINE_HEIGHT as i32;
+    }
     // Line 4c: the scout, while one is owned.
     if let Some(line) = &content.fuel {
         // Red when the crew has stopped: a fleet that quietly does nothing is
@@ -326,6 +335,7 @@ mod tests {
             skills,
             time: TimeOfDay::NOON,
             status: None,
+            payroll: None,
             drilling: None,
             level_up: None,
             greeting: None,

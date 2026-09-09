@@ -38,15 +38,26 @@ use vx_agent::Fleet;
 use vx_core::BlockPos;
 
 const MAGIC: &[u8; 4] = b"VXBP";
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// Longest good name accepted, so a damaged file cannot ask for a huge buffer.
 const MAX_NAME: u32 = 64;
+
+/// And a cap on how many kinds a pile can hold: more than the registry has,
+/// and far short of an allocation a damaged file could weaponise.
+const MAX_ROWS: u32 = 4_096;
 
 /// Write the base and its pile to `pile.dat`.
 ///
 /// A fleet with no base writes a present-flag of zero — "there is no pile" is
 /// a fact worth recording, not an absence to be inferred from a missing file.
+///
+/// Version 2 adds the **orphaned** goods: what a broken container was holding,
+/// waiting for a new one. Breaking your own container used to destroy
+/// everything in it, so there was nothing to write; since stage 52 the goods
+/// are kept and they have to survive a save like everything else. A version-1
+/// file simply has none, which is exactly true of a save written before the
+/// goods were kept.
 pub fn save(fleet: &Fleet, directory: &Path) -> std::io::Result<()> {
     let mut file = std::io::BufWriter::new(std::fs::File::create(directory.join("pile.dat"))?);
     file.write_all(MAGIC)?;
@@ -67,7 +78,20 @@ pub fn save(fleet: &Fleet, directory: &Path) -> std::io::Result<()> {
         }
         None => file.write_all(&[0u8])?,
     }
+    write_rows(&mut file, fleet.orphaned())?;
     file.flush()
+}
+
+/// A stockpile's rows. Off a `BTreeMap`, so already sorted and stable.
+fn write_rows(file: &mut impl Write, pile: &vx_agent::Stockpile) -> std::io::Result<()> {
+    let rows: Vec<(&str, u64)> = pile.entries().collect();
+    file.write_all(&(rows.len() as u32).to_le_bytes())?;
+    for (name, count) in rows {
+        file.write_all(&(name.len() as u32).to_le_bytes())?;
+        file.write_all(name.as_bytes())?;
+        file.write_all(&count.to_le_bytes())?;
+    }
+    Ok(())
 }
 
 /// Read it back, tolerating absence and damage.
@@ -79,20 +103,32 @@ pub fn save(fleet: &Fleet, directory: &Path) -> std::io::Result<()> {
 pub fn load(fleet: &mut Fleet, directory: &Path) {
     let path = directory.join("pile.dat");
     match read(&path) {
-        Ok(Some((at, goods))) => {
-            fleet.set_base(at);
-            if let Some(base) = fleet.base.as_mut() {
-                for (name, count) in goods {
-                    base.stockpile.add(name, count);
+        Ok(Some(stored)) => {
+            if let Some((at, goods)) = stored.base {
+                fleet.set_base(at);
+                if let Some(base) = fleet.base.as_mut() {
+                    for (name, count) in goods {
+                        base.stockpile.add(name, count);
+                    }
                 }
             }
+            // Goods with no container go back into holding. If the loop above
+            // just declared a base, `set_base` has already drained whatever
+            // was orphaned before, so these land in the orphan slot and wait
+            // for the *next* container — which is what the file says happened.
+            fleet.orphan_goods(stored.orphan);
         }
         Ok(None) => {}
         Err(error) => log::warn!("ignoring damaged pile at {}: {error}", path.display()),
     }
 }
 
-type Stored = (BlockPos, Vec<(String, u64)>);
+/// What the file holds: the declared base and its goods, if any, and whatever
+/// is waiting for a container.
+struct Stored {
+    base: Option<(BlockPos, Vec<(String, u64)>)>,
+    orphan: Vec<(String, u64)>,
+}
 
 fn read(path: &Path) -> std::io::Result<Option<Stored>> {
     let mut file = match std::fs::File::open(path) {
@@ -105,23 +141,40 @@ fn read(path: &Path) -> std::io::Result<Option<Stored>> {
     if &magic != MAGIC {
         return Err(std::io::Error::other("not a pile file"));
     }
-    if read_u32(&mut file)? != VERSION {
+    let version = read_u32(&mut file)?;
+    if version == 0 || version > VERSION {
         return Ok(None);
     }
     let mut present = [0u8; 1];
     file.read_exact(&mut present)?;
-    if present[0] == 0 {
-        return Ok(None);
+    let base = if present[0] == 0 {
+        None
+    } else {
+        let at = BlockPos::new(
+            read_i32(&mut file)?,
+            read_i32(&mut file)?,
+            read_i32(&mut file)?,
+        );
+        Some((at, read_rows(&mut file)?))
+    };
+    // Version 1 stops here and has no orphaned goods, which is the truth: a
+    // save from before stage 52 was written by a build that destroyed them.
+    let orphan = if version >= 2 {
+        read_rows(&mut file)?
+    } else {
+        Vec::new()
+    };
+    Ok(Some(Stored { base, orphan }))
+}
+
+fn read_rows(file: &mut impl Read) -> std::io::Result<Vec<(String, u64)>> {
+    let rows = read_u32(file)?;
+    if rows > MAX_ROWS {
+        return Err(std::io::Error::other("implausible pile manifest"));
     }
-    let at = BlockPos::new(
-        read_i32(&mut file)?,
-        read_i32(&mut file)?,
-        read_i32(&mut file)?,
-    );
-    let rows = read_u32(&mut file)?;
-    let mut goods = Vec::new();
+    let mut goods = Vec::with_capacity(rows.min(1024) as usize);
     for _ in 0..rows {
-        let length = read_u32(&mut file)?;
+        let length = read_u32(file)?;
         if length > MAX_NAME {
             return Err(std::io::Error::other("implausible good name"));
         }
@@ -133,7 +186,7 @@ fn read(path: &Path) -> std::io::Result<Option<Stored>> {
         file.read_exact(&mut count)?;
         goods.push((name, u64::from_le_bytes(count)));
     }
-    Ok(Some((at, goods)))
+    Ok(goods)
 }
 
 fn read_u32(file: &mut impl Read) -> std::io::Result<u32> {
