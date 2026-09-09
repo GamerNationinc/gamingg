@@ -116,6 +116,7 @@ const VERBS: &[Verb] = &[
     Verb { name: "cancel", help: "DROP THE MARKED PLAN" },
     Verb { name: "survey", help: "SWEEP THE SECTOR YOU STAND IN" },
     Verb { name: "lights", help: "TURN THE OPTICS DIAL" },
+    Verb { name: "drill", help: "THE DRILL MOD: DRILL HOLO, DRILL PING" },
     Verb { name: "save", help: "WRITE THE WORLD OUT" },
     Verb { name: "clear", help: "EMPTY THE SCROLLBACK" },
     Verb { name: "exit", help: "CLOSE THE TERMINAL" },
@@ -167,6 +168,11 @@ pub fn parse(line: &str) -> Parsed {
         // The books, in one place: what the crew cuts an hour, what the pile
         // is worth here, and which counter would pay more — and can.
         "payroll" | "books" | "wages" => Parsed::Ask("payroll".into(), rest),
+        // The drill mod. Bare, it reports both switches and the last ping;
+        // with an argument it flips one. It is here as well as on `H` and
+        // `P` because a player on a pad who never finds SELECT and a stick
+        // click should not be locked out of a feature that is free.
+        "drill" | "holo" | "sonar" | "ping" => Parsed::Ask("drill".into(), rest),
         "weather" | "sky" | "forecast" => Parsed::Ask("weather".into(), rest),
         "town" | "hall" | "council" => Parsed::Ask("town".into(), rest),
         "found" | "charter" => Parsed::Ask("found".into(), rest),

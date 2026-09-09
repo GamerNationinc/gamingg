@@ -117,6 +117,12 @@ pub struct Session {
     pub journal: CommandLog,
     /// The hold in progress, exactly as `Active::digging` carries it.
     pub digging: Option<(BlockPos, f32)>,
+    /// The drill mod's two switches, exactly as `Active::drillmod` carries
+    /// them — and the whole point of having them here is that they change
+    /// nothing about what a session does. See `the_drill_mod_is_a_lens_not_a_lever`.
+    pub drillmod: crate::drillmod::Switches,
+    /// The last sonar reading, so a fixture can photograph one.
+    pub ping: Option<crate::sonar::Reading>,
     /// Ticks the session has advanced.
     pub tick: u64,
     /// Blocks that came out of the ground with nowhere to go. The bug this
@@ -166,6 +172,8 @@ impl Session {
             garage: crate::garage::Garage::new(),
             journal: CommandLog::new(),
             digging: None,
+            drillmod: crate::drillmod::Switches::default(),
+            ping: None,
             tick: 0,
             lost: 0,
             last_move: None,
@@ -195,6 +203,7 @@ impl Session {
         crate::fleet::save(&self.mining.fleet, root)?;
         crate::dig::save(&self.mining, root)?;
         self.garage.save(root)?;
+        self.drillmod.save(root)?;
         crate::whereabouts::save(
             crate::whereabouts::Whereabouts {
                 position: self.player.position,
@@ -230,6 +239,7 @@ impl Session {
             session.yaw = at.yaw;
             session.pitch = at.pitch;
         }
+        session.drillmod.load(root);
         // Pull the saved ground back in place of the generated ground. The
         // same free function the live game's boot uses, so a chunk that was
         // dug in the last session comes back dug.
@@ -1107,6 +1117,13 @@ impl Session {
                 Some((target, progress)) if *target == hit.block => Some(*progress),
                 _ => None,
             };
+            // A fresh block under the bit is a drill use, and the sonar
+            // goes out — the same rule the live game drills by, through the
+            // same function, so a played session exercises the real ping
+            // rather than a second copy of it.
+            if carried.is_none() && self.drillmod.ping {
+                self.ping = Some(self.sonar_at(hit.block));
+            }
             let bite = drill::advance_bite(carried, step);
             self.digging = Some((hit.block, bite.progress));
             if !bite.through {
@@ -1137,6 +1154,12 @@ impl Session {
             return Some(landed);
         }
         None
+    }
+
+    /// Read the four metres of ground round a block, exactly as the live
+    /// game does.
+    pub fn sonar_at(&self, at: BlockPos) -> crate::sonar::Reading {
+        crate::sonar::ping(&self.world, self.world.registry(), at)
     }
 
     /// Is the player standing somewhere they could actually trade?
@@ -1293,6 +1316,95 @@ mod tests {
         let chest = vx_world::town::chest_position(&session.home());
         session.place_base(BlockPos::new(chest.x, chest.y, chest.z));
         session
+    }
+
+    /// **The drill mod is a lens, not a lever.**
+    ///
+    /// The whole claim of stage 53, as a test. Two sessions on the same
+    /// seed play the same orders — one with the cage and the sonar on, one
+    /// with both off — and the world they leave behind and the journal they
+    /// wrote must be identical, byte for byte and hash for hash.
+    ///
+    /// This is what buys the feature its freedom. Because it draws and
+    /// reads and never writes, it needs no order on the wire, no journal
+    /// version bump and no keyframe; a session recorded with it on replays
+    /// against a build with it off. If a pretty effect could ever change
+    /// what happened, this goes red, and it should.
+    #[test]
+    fn the_drill_mod_is_a_lens_not_a_lever() {
+        let played = |cage: bool, ping: bool| {
+            let mut session = ready();
+            session.drillmod = crate::drillmod::Switches { cage, ping };
+            // Cut a few blocks out of the ground under the doorstep: enough
+            // holds for the sonar to fire on several fresh blocks, which is
+            // the code path being cleared of suspicion.
+            for step in 0..4 {
+                let under = BlockPos::new(
+                    session.player.position.x.floor() as i32,
+                    session.player.position.y.floor() as i32 - 1 - step,
+                    session.player.position.z.floor() as i32,
+                );
+                session.look_at(under);
+                session.drill_through(seconds(6.0));
+                session.advance(seconds(0.5), MoveCommand::default());
+            }
+            let hash = vx_world::world_hash(&session.world);
+            let orders = format!("{:?}", session.journal.entries());
+            let pile = session.pile().map(|pile| pile.total()).unwrap_or(0);
+            (hash, orders, pile)
+        };
+
+        let lit = played(true, true);
+        let dark = played(false, false);
+        assert_eq!(lit.0, dark.0, "the drill mod changed the ground");
+        assert_eq!(lit.1, dark.1, "the drill mod wrote to the journal");
+        assert_eq!(lit.2, dark.2, "the drill mod changed what was mined");
+        // And it really did dig something, or the three assertions above
+        // are three ways of comparing nothing to nothing.
+        assert!(lit.2 > 0, "nothing was mined, so nothing was proved");
+    }
+
+    /// The other half: with the ping on, a played session really does come
+    /// back with a reading, through the same function the live game uses.
+    #[test]
+    fn a_played_session_hears_the_ground_it_drills() {
+        let mut session = ready();
+        let under = BlockPos::new(
+            session.player.position.x.floor() as i32,
+            session.player.position.y.floor() as i32 - 1,
+            session.player.position.z.floor() as i32,
+        );
+        session.look_at(under);
+        session.drill_through(seconds(6.0));
+
+        let reading = session.ping.as_ref().expect("the drill never pinged");
+        assert_eq!(reading.centre, under);
+        assert!(reading.cells > 0, "the ground under the doorstep read as empty");
+
+        // And with the switch off, no ping — which is what "toggleable"
+        // means when it is written down rather than described.
+        let mut quiet = ready();
+        quiet.drillmod.ping = false;
+        quiet.look_at(under);
+        quiet.drill_through(seconds(6.0));
+        assert!(quiet.ping.is_none(), "the sonar fired with its switch off");
+    }
+
+    /// Both switches come back off a save, like everything else that is a
+    /// choice the player made.
+    #[test]
+    fn the_switches_come_back_with_the_world() {
+        let root = std::env::temp_dir().join("gamingg-session-drillmod");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("scratch");
+
+        let mut session = ready();
+        session.drillmod.cage = false;
+        session.save_to(&root).expect("save");
+
+        let reloaded = Session::load_from(&root).expect("load");
+        assert!(!reloaded.drillmod.cage, "the cage came back on");
+        assert!(reloaded.drillmod.ping, "the sonar came back off");
     }
 
     #[test]
@@ -2088,7 +2200,7 @@ mod tests {
     /// module docs is the human-readable half of the same promise.
     #[test]
     fn the_census_covers_every_saved_subsystem() {
-        const EXPECTED: [&str; 10] = [
+        const EXPECTED: [&str; 11] = [
             "log.dat",
             "wallet.dat",
             "player.dat",
@@ -2099,6 +2211,7 @@ mod tests {
             "dig.dat",
             "garage.dat",
             "whereabouts.dat",
+            "drillmod.dat",
         ];
 
         let directory = scratch("census");

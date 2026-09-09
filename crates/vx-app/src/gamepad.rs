@@ -210,7 +210,9 @@ pub fn key_for(button: Button, context: Context) -> Option<KeyCode> {
             Button::Start => Some(KeyCode::Enter),
             _ => None,
         },
-        // Everything a hand does not need in a hurry.
+        // Everything a hand does not need in a hurry. The drill mod's two
+        // switches land here rather than on the world layer: they are set
+        // once and left, and the world layer has been full since stage 46a.
         Context::Second => match button {
             Button::North => Some(KeyCode::KeyT),
             Button::South => Some(KeyCode::KeyZ),
@@ -220,6 +222,8 @@ pub fn key_for(button: Button, context: Context) -> Option<KeyCode> {
             Button::DPadDown => Some(KeyCode::F5),
             Button::DPadLeft => Some(KeyCode::KeyG),
             Button::DPadRight => Some(KeyCode::KeyF),
+            Button::LeftThumb => Some(KeyCode::KeyH),
+            Button::RightThumb => Some(KeyCode::KeyP),
             _ => None,
         },
         // Ten slots, ten controls, no cursor: the palette is muscle memory
@@ -350,7 +354,7 @@ const BACKGROUND: [u8; 4] = [10, 12, 16, 240];
 /// The control scheme, written for the player. One row per physical
 /// control, in the order a hand finds them, grouped by layer. A row whose
 /// control is empty is a heading. Tested drawable.
-pub const SCHEME: [(&str, &str); 34] = [
+pub const SCHEME: [(&str, &str); 36] = [
     ("", "ON FOOT"),
     ("LEFT STICK", "MOVE, CLICK TO SPRINT"),
     ("RIGHT STICK", "LOOK, CLICK FOR OPTICS"),
@@ -378,6 +382,8 @@ pub const SCHEME: [(&str, &str); 34] = [
     ("D-PAD RIGHT", "WALK OR FLY"),
     ("D-PAD UP", "THE DEBUG READOUT"),
     ("D-PAD DOWN", "SAVE THE WORLD"),
+    ("L-STICK", "THE DRILL HOLOGRAM"),
+    ("R-STICK", "THE DRILL SONAR"),
     ("SELECT", "TAP: THIS PANEL"),
     ("", "IN A PANEL"),
     ("A, B", "CONFIRM, BACK OUT"),
@@ -509,7 +515,7 @@ mod tests {
             KeyCode::KeyE, KeyCode::KeyF, KeyCode::KeyV, KeyCode::KeyC, KeyCode::KeyT,
             KeyCode::KeyL, KeyCode::KeyM, KeyCode::KeyN, KeyCode::KeyG, KeyCode::KeyR,
             KeyCode::KeyX, KeyCode::KeyZ, KeyCode::KeyW, KeyCode::KeyS, KeyCode::KeyA,
-            KeyCode::KeyD, KeyCode::KeyQ,
+            KeyCode::KeyD, KeyCode::KeyQ, KeyCode::KeyH, KeyCode::KeyP,
             KeyCode::Space, KeyCode::ShiftLeft, KeyCode::ControlLeft,
             KeyCode::Tab, KeyCode::Enter, KeyCode::Escape, KeyCode::Backspace,
             KeyCode::Delete, KeyCode::Home, KeyCode::End,

@@ -129,7 +129,16 @@ pub mod slot {
     /// Still water frozen over: pale, see-through, a hairline crack or two.
     pub const ICE: u32 = 65;
 
-    pub const COUNT: u32 = 66;
+    /// The drill's holographic cage: a cyan grid on a dark field, the way a
+    /// projected line looked to somebody in 1984. Worn by no block — it is
+    /// only ever an [`crate::Object`], drawn as thin bars round the block
+    /// the bit is aimed at.
+    pub const HOLOGRAM: u32 = 66;
+    /// The sonar's answer, in the other half of the same palette: magenta on
+    /// dark, so an echo is never mistaken for the cage that fired it.
+    pub const SONAR: u32 = 67;
+
+    pub const COUNT: u32 = 68;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -565,6 +574,36 @@ pub fn generate_tile(tile: u32, turn: f32) -> Vec<u8> {
                         shade([0.92, 0.94, 0.97], noise * 0.03)
                     } else {
                         shade([0.45, 0.32, 0.21], noise * 0.12)
+                    }
+                }
+                slot::HOLOGRAM | slot::SONAR => {
+                    // Two tiles, one painter, because they are the same idea
+                    // in two colours: a lit grid line on a nearly-black
+                    // field. The cage is cyan, the echo magenta.
+                    //
+                    // Both are *opaque*. The obvious way to draw a hologram
+                    // is a translucent shell, and it is the wrong way here:
+                    // the object pipeline writes depth and blends unsorted
+                    // (see `lib.rs`), so a clear box round a block z-fights
+                    // its own faces and occludes whatever translucent thing
+                    // draws after it. Thin opaque bars in a bright tile give
+                    // the same read with none of that, and the glow comes
+                    // from `Object::light` pushed past 1.0 instead.
+                    let lit = if tile == slot::HOLOGRAM {
+                        [0.20, 0.95, 0.98]
+                    } else {
+                        [0.98, 0.24, 0.86]
+                    };
+                    // A grid every four texels, with the scanline rows of a
+                    // tube that never quite settled.
+                    let grid = x % 4 == 0 || y % 4 == 0;
+                    let scan = y % 2 == 0;
+                    if grid {
+                        shade(lit, noise * 0.05)
+                    } else if scan {
+                        shade([lit[0] * 0.45, lit[1] * 0.45, lit[2] * 0.45], noise * 0.04)
+                    } else {
+                        shade([lit[0] * 0.12, lit[1] * 0.12, lit[2] * 0.12], noise * 0.02)
                     }
                 }
                 slot::ICE => {

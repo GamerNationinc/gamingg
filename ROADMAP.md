@@ -128,7 +128,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 49a | `93a4cb6` | The machine you look through. Driving a machine by hand was never written down — not the wheel, not the controls — while `Operation::pilot_tick` calls `break_block`, so a hand-dug hole replayed as untouched ground. Demonstrated at two different hashes over the same orders, then closed: `Wheel` and `Pilot` on the wire, journal VERSION 31, and `MachineTag` gaining the kestrel its own doc comment said would be "a version bump, loudly". And the camera comes off the hull it was sitting inside — a gimbal under the nose, measured off each rig's real parts, with the subject machine culled from its own feed and machine *heading* interpolated between ticks for the first time, so a nose-mounted camera glides instead of snapping |
 | 50 | `f458008` | The ditch you cannot climb out of. Asked to play the loop through a save — scout, dig, save, reload, haul it to another village and sell it — and it broke twice. The fleet's **base pile was never written to disk**: `Fleet` has no `save` or `load` anywhere in `vx-agent`, so a reload came back with an empty pile *and no declared base*, which re-armed stage 48's silent ore loss on the very next block. It gets `pile.dat` (`VXBP`), beside the tank and the wear ledger. Then the haul itself could not finish, and the reason was in the world: **every town is ringed by a three-block ditch that ran straight across its own gateway**, and a body mantles 2.2 — so no player could enter any town, or re-enter the one they started in, from the day forts shipped in stage 21. The gate gets the uncut causeway a fort with no drawbridge is actually built with. And the walker learns to stop and look: `afoot.rs` sweeps the ground a *body* can cross — two blocks of headroom, a climb of two, a drop of six — where the drones' one-block field said a mountainside was unreachable. Played end to end on the shipped seed: 792 ticks of sector scan, two pings, 322 ore columns, 20 blocks cut, 25 goods on the pile **before and after the save**, 206 blocks to the next town, and 405 credits over a stranger's counter |
 | 51 | `086a51c` | Every load put you back in bed. Asked to play the whole loop — leave town, mine, **come back**, save, go to another town and trade — and the half nothing had ever walked broke it twice over. `App`'s boot builds the body at `town::spawn_position` unconditionally and nothing anywhere reads a saved position, because nothing anywhere writes one: the ground, the pile, the wallet, the skills, the books, the chest, the tank and the wear ledger all came back and **you** did not. Walk two hundred blocks, sell up, quit, come back — you are in your own kitchen with the walk to do again. It hid for the same reason the ditch did: every save/load test there had ever been ran at the spawn, where being put back at the spawn is indistinguishable from working. It gets `whereabouts.dat` (`VXYO`) — where you are and where you are looking, at `f64`, read *above* the pregen so the ground is prepared around where the body will actually be rather than dropping it through unloaded air. `Session::cross_country` names the shape every long walk has (out by your gate, over the hills in legs, in by theirs) after it had been written by hand three times, and `--haul` grows the beat it never had: the walk **home**, laden, in through your own gate |
-| 52 | _this_ | The crew you leave working, and the books that balance. Asked for the loop where bots mine and you get rich, with two conditions: everything saves, and nothing can be glitched upward. Both had teeth. **A running dispatch was in no save file** — `Mining::operation` is private and nothing named it — so buying drones and setting them cutting was work you lost at every quit; the third round running that the same shape turned up (the pile in 50, the player in 51). Walking every field of `Active` against every `save(` call found three more: **every sector you burned fuel to survey**, the kestrel's whole report, and your radiation dose — the last of which made the menu screen a free ward cot. They get `dig.dat`, `fleet.dat`, `marks.dat` and `dose.dat`, and a **persistence census** in the module docs with a test that fails if a subsystem stops saving or a new one arrives unaccounted for. The integrity half found a working infinite-money glitch: price floors at one credit, stock caps so it cannot fall further, and **nothing checked whether the town could pay** — so selling rubble to one counter for ever beat every interesting decision the economy offers. Towns get a **till** that their own trade refills, which kills the faucet and turns earning into a routing problem. And the played run turned up the worst bug of the round: `Session::load_from`'s `unload_beyond(pos, i32::MAX)` retained every chunk instead of dropping them, so a reload served **generated ground over the ground on disk** — a dig came back filled in and the crew standing in it reported stuck. Measured: 40 blocks by hand for the first drone, one drone 15,150 blocks/hr, **two 31,830 (2.1×)** on the same method and matched ground, a dispatch saved mid-dig and resumed cutting, and every good conserved across the save |
+| 52 | `76bf1aa` | The crew you leave working, and the books that balance. Asked for the loop where bots mine and you get rich, with two conditions: everything saves, and nothing can be glitched upward. Both had teeth. **A running dispatch was in no save file** — `Mining::operation` is private and nothing named it — so buying drones and setting them cutting was work you lost at every quit; the third round running that the same shape turned up (the pile in 50, the player in 51). Walking every field of `Active` against every `save(` call found three more: **every sector you burned fuel to survey**, the kestrel's whole report, and your radiation dose — the last of which made the menu screen a free ward cot. They get `dig.dat`, `fleet.dat`, `marks.dat` and `dose.dat`, and a **persistence census** in the module docs with a test that fails if a subsystem stops saving or a new one arrives unaccounted for. The integrity half found a working infinite-money glitch: price floors at one credit, stock caps so it cannot fall further, and **nothing checked whether the town could pay** — so selling rubble to one counter for ever beat every interesting decision the economy offers. Towns get a **till** that their own trade refills, which kills the faucet and turns earning into a routing problem. And the played run turned up the worst bug of the round: `Session::load_from`'s `unload_beyond(pos, i32::MAX)` retained every chunk instead of dropping them, so a reload served **generated ground over the ground on disk** — a dig came back filled in and the crew standing in it reported stuck. Measured: 40 blocks by hand for the first drone, one drone 15,150 blocks/hr, **two 31,830 (2.1×)** on the same method and matched ground, a dispatch saved mid-dig and resumed cutting, and every good conserved across the save |
+| 53 | _this_ | The drill mod: a cage of light, and a ping through the rock. Asked for an 80s holographic glow on the block being drilled, toggleable, plus a sonar ping reading the elements within four metres of it. Found on the way in that **this game has never had a selection box** — nothing was drawn on the aimed block, and no crosshair either; fifty-two stages of the only way to know what was under the bit being the F3 panel's text row. So the mod is not decoration on a highlight, it *is* the highlight: twelve opaque bars in a new cyan tile standing `SWELL` off the block, dim on a block you are looking at and ramping to the shader's 1.4 overbright as the bit bites, with a plane of light rising through the block as the drill's progress bar. The other half reads the 9×9×9 box round the touched block, keeps the cells inside four metres, and groups them seams-first with every tie broken — a total order, so the same ground pings the same way twice. Markers hang in the **air cell against an exposed seam** rather than inside the ore, because this renderer draws opaque geometry with a depth test and a marker in rock is one nobody sees; what is still buried is counted and reported instead. **Neither switch is on the wire.** The mod draws and reads and never writes a block, a good or a number, so it needs no order, no `VERSION` bump and no keyframe — and `the_drill_mod_is_a_lens_not_a_lever` plays the same session twice with both switches on and off and demands identical journal bytes and world hash. Free on any drill, `H` and `P`, on the pad's second layer and at the terminal, remembered in `drillmod.dat`. The aim ray is now cast **once** a frame instead of twice-and-discarded |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -3377,6 +3378,143 @@ decline against two on an adit and reported the pair as slower. And the books:
 the home counter can pay 104 of the 2,005 credits the pile is worth, and the
 Depot 206 blocks away would pay 3,743.
 
+## Shipped — Stage 53: the drill mod — a cage of light, and a ping through the rock
+
+The ask, in the player's own words: *"a drill mod that when drilling the block
+gets like an 80s holographic glow over it and can scan the elements directly
+in the touching 4m area like a sonar ping every time drill is used"*, with the
+holographic selection on **any basic drill** and toggleable while mining.
+
+### There was never a selection box
+
+The first thing the audit turned up is not a bug so much as an absence nobody
+had named. **Nothing was drawn on the aimed block.** No outline, no highlight,
+not even a crosshair. The only way to learn what was under the bit was to open
+the F3 panel and read `aimed` off a text row (`debug.rs:42`) — fifty-two
+stages of a mining game where the tool's target was invisible.
+
+So this stage is not decoration bolted onto an existing highlight. It *is* the
+highlight, and it is written to read as one: quiet on a block you are only
+looking at, bright on the block the bit is in.
+
+The aim ray was already being cast twice a frame and thrown away both times —
+once inside `update_drilling` (`main.rs:9648`) and once more, throttled, in
+`refresh_debug` for that text row. Neither result outlived its call, which is
+*why* nothing could draw on it. It is now cast once in `App::frame`, from the
+camera the frame draws with, into `Active::aimed`, and the drill, the cage and
+the debug row all read the same answer. One fewer traversal a frame than
+before the feature existed.
+
+### The cage: bars, not a shell
+
+`hologram.rs` is pure geometry — `BlockPos` and two floats in, `Vec<Object>`
+out, no wallet and no skill sheet anywhere in a signature, which is the proof
+that it is free on any drill rather than a promise that it is.
+
+Twelve opaque bars standing `SWELL = 0.03` off the block's faces, in a new
+`slot::HOLOGRAM` tile: a cyan grid on a near-black field with the scanlines of
+a tube that never quite settled. A plane of light crosses the block at the
+height the bit has reached and rises with it, so the drill's progress bar is
+on the rock instead of parked in the corner of the screen.
+
+The obvious hologram is a translucent box, and it is the wrong shape here for
+three reasons that all live in `vx-render`: the object pipeline writes depth,
+blends unsorted, and culls back faces. A clear box would z-fight the block's
+own faces, occlude whatever translucent thing drew after it, and vanish when
+you stepped inside it. Thin opaque bars have none of those problems and read
+as a projected wireframe besides.
+
+The glow is `Object::light` pushed past 1.0. The shader already multiplies
+`light` into the lighting and clamps at 1.4, so up to a 40% overbright was
+reachable with **no new shader, no new instance attribute and no new
+pipeline** — which is why the night beat of the capture shows the rock going
+dark around a cage that does not.
+
+One trap, written into the module doc because it will bite the next person:
+`App::frame` walks the whole frame's object list and *overwrites* every
+object's `light` from the column-depth rule, so that a drone standing in a
+hole is as dark as the hole. Anything from `hologram` is appended **after**
+that loop, or the cage is a dull grey box in a dark mine — exactly where it is
+most wanted.
+
+### The ping, and what a depth test will let you see
+
+`sonar::ping` sweeps the 9×9×9 box round the touched block, keeps the ~268
+cells actually within four metres, and groups what it finds by block name.
+The order is **seams first, then count, then name** — every tie broken, so the
+same ground pings the same way twice, which is what makes the scope panel safe
+to compare in a test and safe to photograph. A seam is a *rule* rather than a
+table: anything whose bare name ends in `_ore`, plus the two hydrocarbons, so
+a block a later stage or a mod registers is a seam on the day it exists.
+
+The honest limitation is the renderer's. A marker drawn inside a solid block
+is a marker nobody will ever see: the object pass is opaque geometry with a
+depth test, and there is no way to draw through rock that does not mean a
+second pipeline. So the markers hang in the **open cell against an exposed
+face** of a seam block — where a player is actually looking, at no cost — and
+ore with no exposed face at all is counted into `Reading::buried` and reported
+on the panel as `N IN ROCK`. That is the division of labour the feature ships
+with: the markers show what you could reach out and touch, and the readout
+tells you what is still behind the wall.
+
+The pulse itself is beads on two circles rather than bars on a square. A
+square ring lying flat is four long bars, and a player standing level with it
+— which is where a player drilling is — sees two lines across the screen
+instead of a ring; short beads on a circle read as a ring from any angle, and
+the second circle standing upright means one of them is always turned towards
+the eye. Cyan for the pulse, magenta for what came back, so the picture has a
+grammar in it.
+
+The scope is overlay slot 19, with `OVERLAY_SLOTS` raised 19 → 20. Not the
+HUD: `HUD_HEIGHT = 94` has about two rows of headroom and its conditional
+stack can already overflow. Its first layout put the rows beside the scope
+face, where `COPPER ORE 69 AT 1.4M` ran off the edge — the font is fixed
+width, so `no_row_runs_off_the_edge_of_the_scope` is arithmetic rather than an
+eyeball, and it caught that before a person did.
+
+### A lens, not a lever
+
+Neither switch changes anything the world can see. No block moves, no good
+moves, no number changes — the whole feature is a way of *looking*. That is
+why it is on disk but not on the wire: `drillmod.dat` (`VXDM`) remembers where
+you left the switches, the journal never hears about them, and `VERSION` stays
+at 31. A session recorded with the mod on replays against a build with it off.
+
+The claim gets a test rather than a comment.
+`the_drill_mod_is_a_lens_not_a_lever` plays the same session twice on the same
+seed, once with both switches on and once with both off, and demands identical
+journal bytes, an identical world hash and an identical pile. It was verified
+to fail: temporarily recording one `Command` on each ping turns it red.
+
+`optics.rs` made exactly this argument for the lamp and the visors in stage
+18, and this file follows it.
+
+### Two switches, one key each
+
+`H` for the cage, `P` for the ping, each remembered where you left it, both on
+by default because both are free and a feature nobody can see is a feature
+nobody has. Bundling them behind one key would mean a player who wants the
+outline but finds the ping busy has to give up both.
+
+The keybind is the expensive part, and it was three coupled edits: the arms in
+`handle_press`, the hand-maintained `bound` array plus a slot in `key_for` —
+the pad's World layer has been saturated since 46a, so they land on the second
+layer's stick clicks — and two rows in `SCHEME`, whose length is in its type
+and which is re-checked against `PAD_HEIGHT` by an overflow assertion. Plus a
+`DRILL` terminal verb, so a player who never finds SELECT and a stick click is
+not locked out of something free.
+
+### Played
+
+`--drillmod` cuts the adit a player would have cut — six blocks of corridor,
+three by three, through the real `break_block` — into the outcrop
+`crates/vx-agent/tests/real_terrain.rs` pins on the shipped seed, then
+photographs five beats: the quiet cage on a block you are only aiming at, the
+cage bright with the scan plane part way up over a face carved by the drill's
+own `Shape::DrillFace`, the ping with the ore in the walls lit and the panel
+reading `COPPER ORE 69 AT 1.4M / 45 IN ROCK`, the same frame at midnight, and
+the same frame again with both switches down.
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -3745,10 +3883,19 @@ quit, three more things nobody was writing down, a working infinite-money
 glitch, and a reload that had been serving generated ground over the ground on
 disk.
 
-One round is named now:
+And 53 took the drill mod — an 80s cage of light on the block under the bit,
+and a sonar ping four metres into the rock around it — and found on the way in
+that this game had never had a selection box at all, nor even a crosshair, and
+that the ray which would have drawn one was already being cast twice a frame
+and thrown away both times.
+
+Three rounds are named now — 54 and 55 are the rest of what 53's note asked
+for, in the order it asked for them:
 
 | Stage | What | Why here |
 |---|---|---|
+| 54 | The pack | Blocks that pop to you as drops, a real player inventory with visible counts, and a carrying weight that **slows you first and hard-stops you second**, upgradeable by an exoskeleton. It is also the fix for the oldest rough edge in the README: the movement system weighs you down by a pile sitting in a container somewhere else entirely. The `load` byte already rides the journal and replay never re-derives it, so repointing it at a real pack costs nothing on the wire |
+| 55 | The spoil heap | You mark a spot, pick a shape — square-base pyramid, spiral tower, straight shaft — and the crew hauls spoil there and stacks it, reusing the mark / choose-a-method / dispatch flow and the job board. The expensive one, and honestly so: **nothing in `vx-agent` can place a block.** Not a missing function, a missing concept — `JobKind` has two behaviourless variants, a `Job` carries only a region with nowhere to say *what to put there*, `DroneState` has no build state, and `REACH_OFFSETS` is shaped entirely by the rules of cutting. Stacked blocks are ground and ground is the hash, so it is a journal order and `VERSION` 32 |
 | 49b | The drone you can lose | A machine cannot collide with anything, so it cannot crash. Integrity beside `wear.rs` and on the oracle for the same reason wear is; the flier's auto-climb off under manual control so it can be flown into a cliff, while the digger keeps the standability rule that stops a hand-driven drone stranding itself; gunfire through `segment_hits_box`; a persistent, mapped wreck you walk out to and salvage or rebuild; and `garage.rs`'s first `lose` mutator, since `grant` only ever added |
 
 Beyond those the board holds the outstanding engineering below, and whatever
@@ -3756,7 +3903,7 @@ the next note says.
 
 ## The feature map
 
-The whole game at a glance, as of stage 52.
+The whole game at a glance, as of stage 53.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -3881,6 +4028,15 @@ uphill and downwind, every wooden thing burnable wherever it stands and
 ancient wood burnable nowhere) and the succession clock behind it (only
 disturbed cells stored, cut or burnt alike, coming back through meadow,
 thicket and mixed stand as the tree the seed always described);
+the drill mod (the selection box this game never had — twelve opaque bars of
+cyan light standing off the aimed block, dim when you are looking and
+overbright when the bit is in, with a plane of light rising through the block
+as the drill's own progress bar; and a sonar that reads four metres of ground
+on every fresh block the bit touches, ranking seams first, hanging markers in
+the open air against exposed ore and reporting on a scope panel what is still
+buried behind it — two switches, one key each, free on any drill, on disk and
+deliberately off the journal, because the whole thing draws and reads and
+never writes);
 towns that are run by somebody (a mayor and a sheriff drawn without
 replacement off the town's own seed, residents who put goods on the books and
 credits in their pockets on the hours the schedule already gave them, trust
@@ -3958,10 +4114,12 @@ played session in 48, and named there rather than smuggled into it).
 
 Tracked in `README.md` under "Known rough edges" — currently ~28 entries, the
 notable ones being: saves store a whole chunk snapshot per modified chunk;
-water is alpha-blended without depth sorting; a running excavation is not
-persisted; only one drone and one flier are ever created; selling is not on
-the journal, so a session replays to the same ground but not to the same
-books; the played session steers rather than paths, so a route with a doorway
-in it needs the doorway named; and there is no player-carried inventory, so
-everything routes through the fleet's base pile — which is also what the
-movement system now weighs you down by, for want of a real backpack.
+water is alpha-blended without depth sorting; only one drone and one flier are
+ever created; selling is not on the journal, so a session replays to the same
+ground but not to the same books; the played session steers rather than paths,
+so a route with a doorway in it needs the doorway named; the sonar's markers
+cannot be drawn through rock, because the object pass is opaque geometry with
+a depth test, so buried ore is reported on the panel rather than lit in the
+world; and there is no player-carried inventory, so everything routes through
+the fleet's base pile — which is also what the movement system weighs you down
+by, for want of a real backpack. **That last one is stage 54's whole job.**

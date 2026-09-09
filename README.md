@@ -179,6 +179,13 @@ build in it, and it survives quitting — skills included.
   slope would want stepped footings, and no building stands on a slope yet.
 - A town's vault charges no fee and pays no interest, so banking is pure
   convenience rather than a decision with a price on it.
+- The sonar cannot draw a marker through rock. The object pass is opaque
+  geometry with a depth test, and a second pass just for hologram markers is
+  more renderer than the feature is worth, so ore with no exposed face is
+  counted on the scope rather than lit in the world.
+- The drill's cage is drawn on whatever is aimed at within reach, whether or
+  not the trigger is down, and there is still no crosshair for the moments
+  when nothing is in reach at all.
 - Forts are raised whole or dropped in segments; nothing between, and no
   rubble where a wall fell. Nobody defends them either — that waits for
   hostiles.
@@ -1055,6 +1062,52 @@ blocks cut and 25 goods on the pile; save, drop the whole session, load it back
 — **25 goods still on it**; then 206 blocks over the hills to a depot that has
 no ore of its own and pays **405 credits** for yours. Four pictures come out of
 it, one per beat.
+
+### The drill knows what it's looking at
+
+You wanted the drill to light the block up like something off an old arcade
+cabinet, and you wanted it to ping the rock around it like sonar. Here's the
+thing I found on the way in: **this game has never had a selection box.** No
+little outline on the block you're pointing at, not even a crosshair. Fifty-odd
+rounds, and the only way to know what was under the bit was to open the debug
+panel and read the name off a text row.
+
+So this isn't sparkle glued onto a highlight. It *is* the highlight.
+
+**The cage.** Twelve bars of cyan light round whatever the bit is aimed at,
+standing just off the faces so they read as projected rather than painted on.
+Dim when you're only looking. Bright when you're cutting — bright enough to
+read in a pitch-dark shaft, which is where you'll want it. And a plane of light
+that rises through the block as you chew through it, so the progress bar is on
+the rock instead of stuck in the corner of the screen. Free on any drill.
+Nobody has to buy it.
+
+**The ping.** Every time the bit touches a new block it reads four metres in
+every direction and tells you what's in there. Ore in the walls around you gets
+a magenta marker hanging against it. Ore that's still *inside* the rock gets
+counted and reported on the scope instead — I'll be straight about why: the way
+this renderer draws things, a marker inside a solid block is a marker nobody
+can ever see. So the markers show you what you could reach out and touch, and
+the readout tells you what's behind the wall and how far. `COPPER ORE 69 AT
+1.4M`, and `45 IN ROCK`.
+
+Two switches, one key each — `H` for the light show, `P` for the ping — and the
+game remembers where you left them. Both are on the pad's second layer, and you
+can type `DRILL` at the terminal if you'd rather.
+
+Now the boring-but-important bit. **Neither of these things does anything to
+the world.** They don't move a block, they don't move a credit, they don't
+change a single number. It's a lens, not a lever. That matters because there's
+a thing in here that replays a whole session back and proves it came out the
+same, and there's now a test that plays the game twice — once with the light
+show on, once with it off — and demands both come out byte for byte identical.
+If a pretty effect could ever change what happens, that test goes red.
+
+One thing got faster on the way past: the ray that works out what you're
+pointing at used to be cast twice a frame and thrown away both times. That's
+*why* there was never a selection box — nothing outside those two bits of code
+could find out what the block was. It's cast once now, and everyone reads the
+same answer.
 
 ### The robots dig, and the books balance
 

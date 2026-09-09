@@ -41,6 +41,7 @@
 //! | Claims and what the town caught you at | `permits.dat` |
 //! | The kestrel's contact report | `marks.dat` |
 //! | What the deep ore has done to you | `dose.dat` |
+//! | Where you left the drill mod's two switches | `drillmod.dat` |
 //! | Your condition | `health.dat` |
 //! | Standing with the Compact and the holdouts | `reputation.dat` |
 //! | Town vaults | `bank.dat` |
@@ -63,8 +64,13 @@
 //!   they never write a block, so the hash never hears about them and a fresh
 //!   callout on load is the honest outcome.
 //! - `cut_rate` — a measurement of *this session*, not a fact about the world.
-//! - `movement`, `digging`, `last_move` — stance, a half-drilled block and a
-//!   held key. You arrive stood up and still; see [`whereabouts`].
+//! - `movement`, `digging`, `aimed`, `last_move` — stance, a half-drilled
+//!   block, a ray cast this frame and a held key. You arrive stood up and
+//!   still; see [`whereabouts`].
+//! - `ping`, `pinged_at`, `started` — the last sonar reading and the clocks
+//!   the drill mod shimmers by. The reading is a *look* at ground that is
+//!   itself saved, so a reload simply pings again; see [`drillmod`]. The
+//!   switches that decide whether it pings at all are in the table above.
 //! - Panel state (`shop`, `board`, `home_panel`, `intro`, `terminal`,
 //!   `console`, `counter`, `offers`, cursors) — where a cursor was.
 //! - `roost`, `villagers`, `people` — derived from the world and the clock.
@@ -89,6 +95,7 @@ mod dig;
 mod fleet;
 mod disposition;
 mod drill;
+mod drillmod;
 mod dose;
 mod economy;
 mod felling;
@@ -99,6 +106,7 @@ mod garrison;
 #[cfg(feature = "gold")]
 mod gold;
 mod health;
+mod hologram;
 mod homestead;
 mod hostile;
 mod hud;
@@ -130,6 +138,7 @@ mod roost;
 mod scout;
 mod shop;
 mod skills;
+mod sonar;
 mod stalker;
 mod streaming;
 mod succession;
@@ -184,6 +193,8 @@ const WELL_SLOT: usize = 16;
 const WARD_SLOT: usize = 17;
 /// The on-screen keyboard, over the terminal it types into.
 const OSK_SLOT: usize = 18;
+/// The drill sonar's scope, up for a few seconds after a ping.
+const SCOPE_SLOT: usize = 19;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -304,6 +315,9 @@ struct Options {
     /// Scout, collect, save, load, and haul the goods to another town.
     haul: bool,
     payroll: bool,
+    /// The drill mod, in five beats: the cage, the cut, the ping, the dark
+    /// and the same frame with both switches down.
+    drillmod: bool,
     /// Draw the terminal over the capture, with a session's worth of log.
     terminal: bool,
     /// Market day in the hometown, with the roster and a word on the
@@ -400,6 +414,7 @@ fn parse_args() -> Result<Options, String> {
         play: false,
         gimbal: false,
         haul: false,
+        drillmod: false,
         terminal: false,
         people: false,
         pad: false,
@@ -507,6 +522,7 @@ fn parse_args() -> Result<Options, String> {
             "--play" => options.play = true,
             "--gimbal" => options.gimbal = true,
             "--haul" => options.haul = true,
+            "--drillmod" => options.drillmod = true,
             "--payroll" => options.payroll = true,
             "--terminal" => options.terminal = true,
             "--osk" => {
@@ -944,6 +960,12 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
 
     if options.haul {
         return haul_it_somewhere(&context, &mut renderer, &mut camera, options, path);
+    }
+
+    // The drill mod: the cage of light on the block under the bit, and the
+    // sonar's answer through the rock around it.
+    if options.drillmod {
+        return photograph_the_drill_mod(&context, &mut renderer, &mut camera, options, path);
     }
 
     // A capture's sky is normally the hour alone. The weather fixtures set
@@ -4468,6 +4490,237 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The drill mod, photographed: the cage of light and the sonar's answer.
+///
+/// Five beats on the shipped seed, at the documented outcrop, so what the
+/// pictures show is real ground rather than a set built for them:
+///
+/// 1. `aimed` — the quiet cage on a block you are only looking at.
+/// 2. `cut` — the cage bright and the scan plane part way up, mid-drill,
+///    over a face carved by the same `Shape::DrillFace` the drill uses.
+/// 3. `ping` — the rings out, the copper behind the wall lit magenta, and
+///    the scope panel up.
+/// 4. `dark` — the same, at midnight, where a glow is a glow.
+/// 5. `off` — the identical frame with both switches down, so the toggle is
+///    visibly a toggle rather than a claim in a changelog.
+fn photograph_the_drill_mod(
+    context: &GpuContext,
+    renderer: &mut Renderer,
+    camera: &mut Camera,
+    options: &Options,
+    path: &str,
+) -> Result<(), String> {
+    let stem = path.strip_suffix(".ppm").unwrap_or(path);
+    // The outcrop `crates/vx-agent/tests/real_terrain.rs` pins, so the copper
+    // this fixture pings is the copper that test asserts is there.
+    let at = (146, 30);
+    let (mut world, _) = build_scene(context, renderer, options.seed, 7, at);
+
+    // A face worth drilling: a solid block with air in front of it, with as
+    // much of a seam as possible inside the sonar's reach. Searched rather
+    // than hard-coded, so the fixture survives a change to the generator by
+    // finding a different face instead of photographing the sky.
+    let ore = world
+        .registry()
+        .id_of("engine:copper_ore")
+        .ok_or("this build has no copper")?;
+    // The four horizontal sides a camera could stand on.
+    const SIDES: [[i32; 3]; 4] = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1]];
+    let mut best: Option<(vx_core::BlockPos, [i32; 3], u32)> = None;
+    for dz in -28..=28 {
+        for dx in -28..=28 {
+            let (x, z) = (at.0 + dx, at.1 + dz);
+            let Some(surface) = world.surface_y(x, z) else { continue };
+            for y in (surface - 9)..(surface - 1) {
+                let block = vx_core::BlockPos::new(x, y, z);
+                // Rock, and only rock. Not the ore itself — the whole point
+                // of the ping is that it sees *through* stone, and a picture
+                // of a seam being drilled directly proves nothing you could
+                // not have seen with your eyes. And not a tree: a drill in a
+                // trunk is a picture of the wrong tool.
+                if world.registry().get_or_air(world.block(block)).name != "engine:stone" {
+                    continue;
+                }
+                // Open to the air on some side, and that is where the camera
+                // will stand.
+                let Some(side) = SIDES
+                    .into_iter()
+                    .find(|side| world.block(block.offset(*side)).is_air())
+                else {
+                    continue;
+                };
+                let mut seam = 0;
+                for oz in -4..=4i32 {
+                    for oy in -4..=4i32 {
+                        for ox in -4..=4i32 {
+                            if ox * ox + oy * oy + oz * oz > 16 {
+                                continue;
+                            }
+                            if world.block(block.offset([ox, oy, oz])) == ore {
+                                seam += 1;
+                            }
+                        }
+                    }
+                }
+                if best.is_none_or(|(_, _, found)| seam > found) {
+                    best = Some((block, side, seam));
+                }
+            }
+        }
+    }
+    let (face, side, seam_count) = best.ok_or("no drillable face near the outcrop")?;
+    println!("  face {face:?}, {seam_count} ore blocks within the ping");
+    if seam_count == 0 {
+        return Err("no stone face near the outcrop has ore inside the ping".into());
+    }
+
+    let middle = glam::DVec3::new(
+        f64::from(face.x) + 0.5,
+        f64::from(face.y) + 0.5,
+        f64::from(face.z) + 0.5,
+    );
+    // Two framings, because the two halves of the mod want different ones.
+    // Up close and level for the cage — the range a drill actually works
+    // at. Back and above for the ping, because the rings lie flat around
+    // the block and a camera level with them sees two bars rather than a
+    // ring.
+    let out = glam::DVec3::new(f64::from(side[0]), 0.0, f64::from(side[2]));
+    let along = glam::DVec3::new(-out.z, 0.0, out.x);
+
+    // Cut the adit a player would have cut to get here.
+    //
+    // The best face this deep in a hillside is a face at the back of solid
+    // rock, and a camera parked in front of it stands *inside* the hill. So
+    // the fixture drives the drill first: six blocks of corridor, three wide
+    // and three high, through the real `break_block` — the same call the
+    // trigger makes, events, veto and all. What the pictures show is a hole
+    // somebody dug, not a hole arranged for a photograph.
+    let cross = [-1, 0, 1];
+    for step in 1..=6i32 {
+        for lift in cross {
+            for wide_step in cross {
+                let at = middle
+                    + out * f64::from(step)
+                    + along * f64::from(wide_step)
+                    + glam::DVec3::Y * f64::from(lift);
+                let block = vx_core::BlockPos::new(
+                    at.x.floor() as i32,
+                    at.y.floor() as i32,
+                    at.z.floor() as i32,
+                );
+                let _ = vx_world::break_block(&mut world, &vx_core::EventBus::new(), block);
+            }
+        }
+    }
+    remesh_all(context, renderer, &mut world);
+
+    let close = middle + out * 2.4 + along * 0.35 + glam::DVec3::Y * 0.55;
+    let wide = middle + out * 5.4 + along * 0.6 + glam::DVec3::Y * 1.1;
+    camera.position = close;
+    look_at(camera, middle);
+
+    let reading = sonar::ping(&world, world.registry(), face);
+    println!("  {}", sonar::headline(&reading));
+    for line in sonar::lines(&reading) {
+        println!("  {line}");
+    }
+
+    let mut shot = 0;
+    let mut photograph = |context: &GpuContext,
+                          renderer: &mut Renderer,
+                          camera: &Camera,
+                          objects: &[vx_render::Object],
+                          beat: &str|
+     -> Result<(), String> {
+        shot += 1;
+        renderer.update_camera(&context.queue, camera);
+        renderer.set_objects(&context.device, &context.queue, objects);
+        let out = format!("{stem}-{shot:02}-{beat}.ppm");
+        capture_frame(context, renderer, options.width, options.height)
+            .write_ppm(&out)
+            .map_err(|error| format!("could not write {out}: {error}"))?;
+        println!("  beat {shot}: {beat} -> {out}");
+        Ok(())
+    };
+
+    let day = clock::sun_uniform(clock::sky_at(TimeOfDay::new(0.42)));
+    renderer.set_sun(&context.queue, day);
+
+    // 1. Aimed at, not drilled.
+    photograph(
+        context,
+        renderer,
+        camera,
+        &hologram::cage(face, 0.0, 0.0),
+        "aimed",
+    )?;
+
+    // 2. Mid-cut. The face is carved by the drill's own rule, so the block
+    // under the cage is a block that has really been worked.
+    let worked = drill::face_index(match side {
+        [1, 0, 0] => vx_core::Face::PosX,
+        [-1, 0, 0] => vx_core::Face::NegX,
+        [0, 0, 1] => vx_core::Face::PosZ,
+        _ => vx_core::Face::NegZ,
+    });
+    for _ in 0..2 {
+        world.carve(
+            face,
+            vx_world::micro::Shape::DrillFace.cells(0, 0, 0, worked),
+        );
+    }
+    remesh_all(context, renderer, &mut world);
+    let mut cutting = hologram::cage(face, 0.55, 0.0);
+    cutting.extend(hologram::scan_plane(face, 0.55));
+    photograph(context, renderer, camera, &cutting, "cut")?;
+
+    // 3. The ping: rings on their way out, and every seam within reach lit.
+    camera.position = wide;
+    look_at(camera, middle);
+    // Early in the pulse, while the ring is still inside the adit. Later it
+    // is inside rock, where it is correctly invisible and makes a poor
+    // photograph.
+    let age = 0.16;
+    let mut pinging = cutting.clone();
+    pinging.extend(hologram::rings(face, age));
+    pinging.extend(
+        reading
+            .marks
+            .iter()
+            .filter_map(|found| hologram::echo(*found, age)),
+    );
+    let scope = sonar::render_scope(&reading, age);
+    let margin = 12.0;
+    let width = sonar::SCOPE_WIDTH as f32 * sonar::SCOPE_SCALE;
+    let height = sonar::SCOPE_HEIGHT as f32 * sonar::SCOPE_SCALE;
+    renderer.set_overlay(
+        SCOPE_SLOT,
+        &context.device,
+        &context.queue,
+        (sonar::SCOPE_WIDTH, sonar::SCOPE_HEIGHT),
+        &scope,
+        vx_render::OverlayRect {
+            x: options.width as f32 - width - margin,
+            y: margin,
+            width,
+            height,
+        },
+    );
+    photograph(context, renderer, camera, &pinging, "ping")?;
+
+    // 4. Midnight, with no lamp: what the mod is actually for.
+    let night = clock::sun_uniform(clock::sky_at(TimeOfDay::new(0.02)));
+    renderer.set_sun(&context.queue, night);
+    photograph(context, renderer, camera, &pinging, "dark")?;
+
+    // 5. Both switches down. The same ground, the same hour, the same
+    // camera — and nothing drawn on it.
+    renderer.clear_overlay(SCOPE_SLOT);
+    photograph(context, renderer, camera, &[], "off")?;
+
+    Ok(())
+}
+
 /// Point `camera` at `target` from where it stands.
 ///
 /// Derived from the same yaw/pitch convention `Camera::forward` uses, so a
@@ -5724,6 +5977,30 @@ struct Active {
     skills: Skills,
     /// The block being drilled and how far through it the bit has got.
     digging: Option<(vx_core::BlockPos, f32)>,
+    /// What the drill is pointed at, cast once a frame.
+    ///
+    /// Stage 53. Before it, this ray was cast **twice** a frame and thrown
+    /// away both times — once inside `update_drilling` and once more in
+    /// `refresh_debug` for the block-name row — so nothing outside those two
+    /// methods could ever know what the player was aiming at. That is the
+    /// whole reason this game had no selection box: there was nothing to
+    /// draw one on. Cast here, from the camera the frame draws with, and
+    /// read by everybody who needs it.
+    aimed: Option<vx_world::raycast::RayHit>,
+    /// The drill mod's two switches: the cage of light and the sonar ping.
+    drillmod: drillmod::Switches,
+    /// The last sonar reading and when it came back, while it is still worth
+    /// drawing. Live-only on purpose: a ping is a look at ground that is
+    /// itself saved, so a reload simply pings again.
+    ping: Option<(sonar::Reading, Instant)>,
+    /// The tick the last ping went out on, for `drillmod::PING_REST`.
+    pinged_at: u64,
+    /// When this session started drawing, for effects that shimmer.
+    ///
+    /// Wall clock, and only ever wall clock: everything it drives moves a
+    /// colour and stops there. Nothing simulated may read it, or a slow
+    /// frame would change the world.
+    started: Instant,
     /// A recent level-up, shown on the HUD for a moment.
     level_up: Option<(String, u32, Instant)>,
     /// The hour of the in-game day.
@@ -6199,6 +6476,12 @@ impl App {
                 active.resuming = false;
             }
         }
+
+        // What the drill is pointed at, cast once, from the camera this
+        // frame will draw with. Everything downstream reads it: the drill,
+        // the cage of light, the sonar, and the F3 block-name row — each of
+        // which used to cast its own or go without.
+        self.refresh_aim();
 
         // The player's drill runs before streaming too, for the same reason
         // the drones dig first: edits land in this frame's remesh.
@@ -6866,10 +7149,41 @@ impl App {
                 object.light = vx_mesh::sky_light(depth) as f32 / vx_mesh::FULL_LIGHT as f32;
             }
         }
+        // The drill mod, last of all — and *after* the lighting loop above,
+        // deliberately. That loop overwrites every object's `light` from the
+        // column-depth rule, so a hologram appended before it would be
+        // relit as though it were a machine standing in the hole, which is
+        // to say it would be a dull grey box exactly where a glow is most
+        // wanted. See `hologram`'s module note.
+        if active.drillmod.cage {
+            if let Some(hit) = active.aimed {
+                let progress = match active.digging {
+                    Some((block, done)) if block == hit.block => done,
+                    _ => 0.0,
+                };
+                // A free-running angle for the shimmer. Wall clock, because
+                // nothing downstream of it is simulated: it moves a colour
+                // and stops there.
+                let phase = active.started.elapsed().as_secs_f32() * 3.0;
+                objects.extend(hologram::cage(hit.block, progress, phase));
+                objects.extend(hologram::scan_plane(hit.block, progress));
+            }
+        }
+        if let Some((reading, when)) = &active.ping {
+            let age = when.elapsed().as_secs_f32();
+            objects.extend(hologram::rings(reading.centre, age));
+            objects.extend(
+                reading
+                    .marks
+                    .iter()
+                    .filter_map(|found| hologram::echo(*found, age)),
+            );
+        }
         active
             .renderer
             .set_objects(&active.context.device, &active.context.queue, &objects);
         self.refresh_hud();
+        self.refresh_scope();
         self.refresh_shop();
         self.refresh_home();
         self.refresh_permit();
@@ -7823,6 +8137,39 @@ impl App {
             // where you are stood, and which counter within reach would pay
             // more — ranked on what it can actually *pay*, not on the sticker
             // price, since stage 52 gave every town a till that runs dry.
+            // The drill mod. Bare, it reports; with an argument, it flips a
+            // switch. Nothing here touches the world, so nothing here is an
+            // order — see `drillmod`.
+            "drill" => {
+                match args.first().map(String::as_str) {
+                    Some("holo") | Some("hologram") | Some("cage") => {
+                        let line = active.drillmod.toggle_cage();
+                        vec![line.to_string()]
+                    }
+                    Some("ping") | Some("sonar") => {
+                        let line = active.drillmod.toggle_ping();
+                        if !active.drillmod.ping {
+                            active.ping = None;
+                            active.renderer.clear_overlay(SCOPE_SLOT);
+                        }
+                        vec![line.to_string()]
+                    }
+                    Some(other) => {
+                        vec![format!("NO SUCH SWITCH: {}", other.to_uppercase())]
+                    }
+                    None => {
+                        let mut lines = active.drillmod.lines();
+                        match &active.ping {
+                            Some((reading, _)) => {
+                                lines.push(String::new());
+                                lines.extend(sonar::lines(reading));
+                            }
+                            None => lines.push("NO PING YET".into()),
+                        }
+                        lines
+                    }
+                }
+            }
             "payroll" => {
                 let at = active.player.position;
                 let here = (at.x.floor() as i32, at.z.floor() as i32);
@@ -9607,6 +9954,67 @@ impl App {
         active.greeting = Some((format!("SALVAGED {}", listed.join(", ")), Instant::now()));
     }
 
+    /// Cast the aim ray once, for everybody who needs it this frame.
+    ///
+    /// Before stage 53 this ray was cast inside `update_drilling` and again,
+    /// throttled, inside `refresh_debug`, and neither result outlived its
+    /// call. That is the reason this game shipped fifty-two stages with no
+    /// selection box on the aimed block: nothing outside those two methods
+    /// could find out what the block was. One cast, one answer, read by all
+    /// three — and one fewer traversal a frame than before.
+    fn refresh_aim(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        // Nothing is aimed at while a panel has the mouse: the camera is not
+        // being steered, and a cage sitting on whatever the player happened
+        // to be facing when they opened the shop reads as a bug.
+        if !self.input.mouse_captured {
+            active.aimed = None;
+            return;
+        }
+        active.aimed = raycast_solid(
+            &active.world,
+            active.world.registry(),
+            active.camera.position,
+            active.camera.forward(),
+            Self::REACH,
+        );
+    }
+
+    /// Send the sonar out from the block the bit has just touched.
+    ///
+    /// Called on a *new* block, not every frame: one ping a block is what
+    /// "every time the drill is used" means in practice, and the rest keeps
+    /// a trigger swept across a wall from machine-gunning the scope. The
+    /// rest is counted in journal ticks rather than seconds so a capture
+    /// fixture reproduces the same pings in the same order.
+    ///
+    /// It reads the world and writes nothing, which is why no order is
+    /// recorded here and no version bumped. See [`crate::drillmod`].
+    fn send_the_ping(active: &mut Active, at: vx_core::BlockPos) {
+        if !active.drillmod.ping {
+            return;
+        }
+        let now = active.journal.tick();
+        if active.ping.is_some() && now.saturating_sub(active.pinged_at) < drillmod::PING_REST {
+            return;
+        }
+        let reading = sonar::ping(&active.world, active.world.registry(), at);
+        // Say it out loud when the ping finds a seam it was not already
+        // looking at. Every ping would be noise — you get one a block — but
+        // the moment the bit picks up something new is exactly the moment a
+        // player is not looking at the corner of the screen.
+        let found = reading.seams().next().map(|echo| echo.nearest);
+        let before = active
+            .ping
+            .as_ref()
+            .and_then(|(last, _)| last.seams().next().map(|echo| echo.nearest));
+        if found.is_some() && found != before {
+            active.greeting = Some((sonar::headline(&reading), Instant::now()));
+        }
+        active.pinged_at = now;
+        active.ping = Some((reading, Instant::now()));
+    }
+
     /// Run the drill for one frame, if it is held on something drillable.
     ///
     /// Hold-to-dig: progress accumulates while the bit stays on one block and
@@ -9645,13 +10053,10 @@ impl App {
             active.dark.hear(active.player.position, 0.55);
         }
 
-        let Some(hit) = raycast_solid(
-            &active.world,
-            active.world.registry(),
-            active.camera.position,
-            active.camera.forward(),
-            Self::REACH,
-        ) else {
+        // Cast once a frame in `frame`, not here: the cage of light has to
+        // be drawn on the same block the bit is working, and a second cast
+        // would be a second answer waiting to disagree with this one.
+        let Some(hit) = active.aimed else {
             active.digging = None;
             return;
         };
@@ -9740,6 +10145,13 @@ impl App {
                 Some((target, progress)) if *target == hit.block => Some(*progress),
                 _ => None,
             };
+            // A fresh block under the bit is a drill *use*, and that is when
+            // the sonar goes out — once a block, not once a frame. It reads
+            // the ground and writes nothing, so there is no order to record
+            // and no version to bump; see `drillmod`.
+            if carried.is_none() {
+                Self::send_the_ping(active, hit.block);
+            }
             let bite = drill::advance_bite(carried, step);
             active.digging = Some((hit.block, bite.progress));
             if bite.carve {
@@ -10984,6 +11396,28 @@ impl App {
                 if let Some(active) = &mut self.active {
                     active.optics.cycle();
                     let line = active.optics.label().unwrap_or("LIGHTS OFF");
+                    active.greeting = Some((line.to_string(), Instant::now()));
+                }
+            }
+            // The drill mod's two switches, one key each. Free on any
+            // drill: neither of these arms asks the wallet or the skill
+            // sheet a question, and nothing below the toggle changes.
+            KeyCode::KeyH => {
+                if let Some(active) = &mut self.active {
+                    let line = active.drillmod.toggle_cage();
+                    active.greeting = Some((line.to_string(), Instant::now()));
+                }
+            }
+            KeyCode::KeyP => {
+                if let Some(active) = &mut self.active {
+                    let line = active.drillmod.toggle_ping();
+                    if !active.drillmod.ping {
+                        // Take the scope down with the switch, the way the
+                        // minimap goes with `N`. A panel that outlived the
+                        // thing that fills it is a panel telling lies.
+                        active.ping = None;
+                        active.renderer.clear_overlay(SCOPE_SLOT);
+                    }
                     active.greeting = Some((line.to_string(), Instant::now()));
                 }
             }
@@ -12492,6 +12926,46 @@ impl App {
         );
     }
 
+    /// Draw the sonar's scope for a few seconds after a ping, then take it
+    /// down.
+    ///
+    /// The panel is a pure function of the reading and its age, so the frame
+    /// it draws is a function of when the ping went out and nothing else —
+    /// which is what makes it safe to photograph.
+    fn refresh_scope(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        let Some((reading, when)) = &active.ping else {
+            return;
+        };
+        let age = when.elapsed().as_secs_f32();
+        if age > sonar::SCOPE_SECONDS || !active.drillmod.ping {
+            active.ping = None;
+            active.renderer.clear_overlay(SCOPE_SLOT);
+            return;
+        }
+        let pixels = sonar::render_scope(reading, age);
+        let (screen_width, _) = active.renderer.size();
+        let margin = 12.0;
+        let width = sonar::SCOPE_WIDTH as f32 * sonar::SCOPE_SCALE;
+        let height = sonar::SCOPE_HEIGHT as f32 * sonar::SCOPE_SCALE;
+        active.renderer.set_overlay(
+            SCOPE_SLOT,
+            &active.context.device,
+            &active.context.queue,
+            (sonar::SCOPE_WIDTH, sonar::SCOPE_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                // Top right: the HUD owns the bottom left, the minimap the
+                // top left, and a readout you glance at belongs where
+                // nothing else is.
+                x: screen_width as f32 - width - margin,
+                y: margin,
+                width,
+                height,
+            },
+        );
+    }
+
     /// Draw the terminal when it is open.
     /// Assemble the F3 snapshot and draw it. The panel is a pure function
     /// of this struct; everything here only *reads*, which is the whole
@@ -12511,14 +12985,10 @@ impl App {
 
         let at = active.player.position;
         let feet = vx_core::BlockPos::new(at.x.floor() as i32, at.y.floor() as i32, at.z.floor() as i32);
-        let aimed = raycast_solid(
-            &active.world,
-            active.world.registry(),
-            active.camera.position,
-            active.camera.forward(),
-            Self::REACH,
-        )
-        .map(|hit| {
+        // The ray `frame` already cast, rather than a second one of its own.
+        // Diagnostics that re-derive what they are reporting can disagree
+        // with it, which is the one thing a diagnostic must never do.
+        let aimed = active.aimed.map(|hit| {
             active
                 .world
                 .registry()
@@ -13076,6 +13546,13 @@ impl App {
         if let Err(error) = active.dose.save(save.root()) {
             log::error!("could not save the dose: {error}");
         }
+        // Where you left the drill mod's two switches. Two bools and the
+        // smallest file in the game, and it still gets its own: one concern
+        // per file is the rule that stops a version bump on somebody else's
+        // ledger silently erasing this one.
+        if let Err(error) = active.drillmod.save(save.root()) {
+            log::error!("could not save the drill mod: {error}");
+        }
         // And you. The boot below used to plant the body at the spawn every
         // time, whatever the save said, because the save had never been asked
         // to say anything: walk to another town, sell up, quit, come back, and
@@ -13343,6 +13820,7 @@ impl ApplicationHandler for App {
         let mut friends = disposition::Disposition::default();
         let mut sightings = scout::Marks::default();
         let mut rads = dose::Dose::default();
+        let mut drillmod = drillmod::Switches::default();
         if let Some(save) = &save {
             map.load(save.root());
             skills.load(save.root());
@@ -13396,6 +13874,7 @@ impl ApplicationHandler for App {
             sightings.load(save.root());
             // Not scrubbed by a reload any more: see `dose`'s module note.
             rads.load(save.root());
+            drillmod.load(save.root());
         }
         if self.sheriff {
             // The hometown's badge, which is what this override always meant:
@@ -13468,6 +13947,11 @@ impl ApplicationHandler for App {
             map,
             skills,
             digging: None,
+            aimed: None,
+            drillmod,
+            ping: None,
+            pinged_at: 0,
+            started: Instant::now(),
             level_up: None,
             clock,
             view: ViewMode::default(),
