@@ -123,7 +123,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 45 | `0130222` | Entities in `f64` — the line stage 42 drew at the things that travel, moved out to everything that carries a position. Villagers, deputies, holders, the stalker, shots, sweeps, falling stems, marks, sightings, the belief board, caravans and crashes all run at the body's width; directions, headings, ranges and rig geometry stay `f32` and the difference is taken wide first. Every body is drawn in the camera's frame and marked so, the per-object lighting pass adds the origin back before reading a column, the muzzle crosses the journal's wire at `f64` (VERSION 29) and `arsenal.dat` widens its crash columns (VERSION 2, v1 read). Proved by the stage-42 tests' siblings: the same posse walks the same walk, the same townsfolk stroll the same stroll, the same rounds leave the same craters, and the same rig draws the same bytes, at spawn and three thousand kilometres out |
 | 46a | `63e69ce` | The pad is the game — every control reachable from a controller and every panel escapable from one. Stage 24's single bit of context becomes five layers: the world, a held `LB` for the block palette, a held `SELECT` for the second layer, a panel, and — the one that did not exist — looking through a machine, where the pad had been in *world* context with no button that hung up. About twenty bindings that no button could reach get homes, the sticks drive panel cursors and the arcade, the triggers stop digging through an open panel, and a table-driven test walks every `KeyCode` the game binds and fails the build if the pad cannot produce it |
 | 46b | `a1a0292` | The keyboard you never need, and the stick that creeps. Typing arrives on a window's text event, which `poll_pad` cannot raise, so no binding of any button to any key could ever produce a character — the pad gets a grid and a cursor instead, and what it picks goes into the same `type_char` the window's text lands in. And `MoveCommand` gains a quantised throttle byte, so the stick's *lean* reaches the simulation and is replayed with it: a gentle push is a gentle walk. Journal VERSION 30 |
-| 47 | _this_ | The body does not pass through the world. Every collision test in the game is a *binary* predicate — inside a block or not — and none of them ever said how much room was left, so the millimetre skin the sweep promises was a promise nothing checked. Three places were not keeping it: a mantle walked the hull along a fixed arc with **no collision query at all** and only its destination validated, the follow camera's minimum-orbit floor overruled a wall and put the lens a quarter block inside it, and standing up under a ceiling asked only whether the taller hull collides — which, thanks to the inset in the block query, a head resting exactly on the plane does not. All three fixed, the block query made symmetric at both ends, and the margin family of tests that never existed written: the hull rests *exactly* `SKIN` off a wall and a floor, a mantle is outside the rock on every tick of the climb, and the orbit keeps its whole skin at every angle inside a three-block room |
+| 47 | `2e114eb` | The body does not pass through the world. Every collision test in the game is a *binary* predicate — inside a block or not — and none of them ever said how much room was left, so the millimetre skin the sweep promises was a promise nothing checked. Three places were not keeping it: a mantle walked the hull along a fixed arc with **no collision query at all** and only its destination validated, the follow camera's minimum-orbit floor overruled a wall and put the lens a quarter block inside it, and standing up under a ceiling asked only whether the taller hull collides — which, thanks to the inset in the block query, a head resting exactly on the plane does not. All three fixed, the block query made symmetric at both ends, and the margin family of tests that never existed written: the hull rests *exactly* `SKIN` off a wall and a floor, a mantle is outside the rock on every tick of the climb, and the orbit keeps its whole skin at every angle inside a three-block room |
+| 48 | _this_ | The loop you can actually play. Asked to play a round — leave, collect, trade — and found that nothing could: every verb in the loop is a method on `App`, which owns a window, and `main.rs` has no tests and `vx-app` no library target, so the walk, the drill and the counter had never once been joined up. The drill's arithmetic comes out into `drill.rs` and a `Session` plays the game headlessly through the game's own functions — and the join turns out to be where the bug was: a block mined with no base container declared **evaporated in silence**, the only system in the game that produced goods and never said where they went. Played end to end on the shipped seed: out the door, 170 blocks to the copper outcrop, sixteen blocks cut at two seconds each, home slower than you left because the pile is the weight, and 224 credits over the counter — with four captures, and three walking bugs found by walking |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -2966,6 +2967,84 @@ that pokes less than `INSET` past a line at either end.
 and a screenshot of a millimetre is a screenshot of a wall. The tests are the
 evidence.
 
+## Shipped — Stage 48: the loop you can actually play
+
+**The ask was to play a round of it. The finding was that nothing could.**
+Every verb in the loop — walking, aiming, drilling, opening the counter,
+selling — is a method on `App`, which owns an `Arc<Window>`; `main.rs` has no
+test module and cannot usefully have one, and `vx-app` is a binary crate, so no
+integration test can reach `movement`, `mining`, `shop` or `economy` either.
+The two headless paths do not help: `run_screenshot` builds a `World` and a
+`Camera` and nothing else — no player, no pile, no wallet — and `run_replay`
+can only re-run a journal a *windowed* session already wrote.
+
+So the loop's three verbs had wildly different coverage. The walk is proved to
+a micrometre three thousand kilometres out. The drone's mining is proved end to
+end on real terrain. Selling is proved against a hand-built `Stockpile` and a
+bare `Market`. **Nothing joined them**, and the join is where the bug was.
+
+**The bug.** `App::update_drilling` banks a broken block on the fleet's pile
+with a bare `if let Some(base)` and no `else`. There is no base when a world
+opens — the pile only exists once a container has been placed to declare one —
+so a new player who walked out and mined got **nothing, silently**: the block
+broke, the ore evaporated, and no line was printed anywhere. Every sibling
+system says so out loud ("NO BASE PILE. PLACE A CONTAINER.", "NO BASE PILE TO
+DRAW ON", "NO BASE CONTAINER SET", "NO BASE PILE"); the one that *produces* the
+goods was the only one that stayed quiet. And the welcome panel said "THE CHEST
+KEEPS YOUR GOODS", which is not true of anything you mine.
+
+**`drill.rs` — the drill's laws, extracted.** The power, the bite, the four
+layers a worked face shows and the deposit rule come out of `App` as free
+functions; everything that is *policy* — the launcher, who hears the drill
+running, what a lockbox does differently, when a trunk is a tree, who saw you,
+what a refusal costs — stays exactly where it was. The point of the split is
+that the played session drills with **the same four functions the window
+drills with**. A playthrough that re-implemented the drill would be a test of
+itself. `deposit` returns what became of the block rather than a `bool`, which
+is what lets the caller say the line.
+
+**`session.rs` — a session with nobody at the keyboard.** The headless twin of
+the player's half of `Active`, in the shape `journal::Rebuilt` established for
+replay. `advance` is the journal's own `Command::Advance` arm — `Mining::advance`
+then `movement::advance_journal_tick` per tick — recording `Move` and `Advance`
+exactly as the live game does, so a played session writes a journal `--replay`
+can check. `walk_to` is a steering behaviour and *not* a pathfinder: hold
+forward, let stage 47's vault do the climbing, and return `Arrival::Stuck` with
+a position when it cannot get there, because a wall is a real answer.
+
+**Three walking bugs, found by walking.** The first run left the house and
+walked into the wall beside its own front door: it set off on the bearing of
+something 170 blocks away while still stood in the kitchen. The house's
+doorway and the shop's are named places now (`plan::door_offset`,
+`shop_door_offset`, `counter_stand_offset`), with the geometry tests to keep
+them true. The second run got over a three-block cliff by holding jump the
+whole way — which also meant it climbed the *shop*, and finished stood on the
+roof trying to sell ore down through the ceiling. So the walk reaches for the
+jump only once it is genuinely stuck and never on a final approach, and
+`at_the_counter` is a **raycast at the till** — the question `App::interact`
+asks — rather than a radius, which a lens four blocks above the counter passes
+happily. The third could not pass that cliff at all until the walker learned to
+commit to a side and work along a face instead of bouncing off it.
+
+**What a played loop actually costs**, on the shipped seed: spawn at
+`(-14, 73, 9)`; 170 blocks east to copper breaking the surface at
+`(154, 95, 37)`; two seconds a block on a drill nobody has spent anything on;
+sixteen blocks cut; home again in **more** ticks than the walk out took,
+because the pile is the weight on your back and `mass_from_byte` floors at
+0.55; 224 credits over the counter at the price that town was paying, and the
+price down for the next seller.
+
+**`--play`** is the first fixture that is a playthrough rather than a tableau,
+and the first to write more than one image: four beats, framed by the game's
+*own* follow camera, which means the shot inside the shop is first person
+because stage 47 taught that camera to refuse a wall rather than clamp through
+it — and `ViewMode::draws_body`'s rule means it draws no body there, for the
+good reason that all it would show is the inside of your own head.
+
+**Named, not smuggled in: selling is not on the journal.** There is no
+`Command::Sell`; the wallet, the pile's contents and the market sit outside the
+replayed hash, so `--replay` cannot see wealth. That is a round of its own.
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -3318,18 +3397,21 @@ eight directions at one speed. And 47 closed the reported clipping: the
 mantle arc, the orbit floor and the headroom check all stopped bypassing the
 sweep, and the margin the sweep promises is asserted rather than assumed.
 
+And 48 answered "play a round of it" by finding that nothing could, building
+the thing that can, and fixing the silent loss it turned up on the way.
+
 One round is named now, from playing the thing on a Deck:
 
 | Stage | What | Why here |
 |---|---|---|
-| 48 | The drone you can lose | The FPV camera sits inside the machine's own hull; a machine cannot collide with anything, so it cannot crash; and — the one nobody meant — piloted digging calls `break_block` while neither taking the wheel nor the per-tick pilot command is journalled, so a hand-dug hole replays as untouched ground. Closing that comes first, because integrity is oracle state for the same reason wear is |
+| 49 | The drone you can lose | The FPV camera sits inside the machine's own hull; a machine cannot collide with anything, so it cannot crash; and — the one nobody meant — piloted digging calls `break_block` while neither taking the wheel nor the per-tick pilot command is journalled, so a hand-dug hole replays as untouched ground. Closing that comes first, because integrity is oracle state for the same reason wear is |
 
 Beyond those the board holds the outstanding engineering below, and whatever
 the next note says.
 
 ## The feature map
 
-The whole game at a glance, as of stage 47.
+The whole game at a glance, as of stage 48.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -3495,24 +3577,40 @@ thousand kilometres out); a game you can play with a controller and nothing
 else (six mapping layers including two held modifiers and a machine feed that
 can finally be hung up, an on-screen keyboard for the terminal, an analog
 stick on foot, and a test that fails the build if a binding has no pad path);
+a body that does not pass through the world (the mantle arc validated at every
+tick instead of only at its destination, an orbit camera that refuses a wall
+rather than clamping through it, the skin added to the headroom check, and the
+margin family of tests that assert *how much* room the sweep leaves rather than
+merely that it leaves some);
+a loop that can be played with nobody at the keyboard (the drill's arithmetic
+lifted out of the window into laws the headless session and the live game
+share, a session that walks by holding forward and reports where it got stuck
+rather than pretending, the house's and the shop's doorways named so a body can
+aim at the gap, and a four-beat `--play` capture framed by the game's own
+follow camera) — and the silent loss it found, where a block mined with no base
+container declared evaporated without a word;
 a Steam Deck dist build every round.
 
-**Planned, in arc order:** the body kept out of the world's geometry, then
-the drone you can lose — and, first inside that round, the replay hole where
-a hand-dug hole is not written down.
+**Planned, in arc order:** the drone you can lose — and, first inside that
+round, the replay hole where a hand-dug hole is not written down.
 
 **Outstanding engineering:** journal-shrunk saves;
 real min-cost flow for freight; ammunition as a trade good; the rest of the
 weapon table; the kestrel's
 cell state surviving a reload; anything that hacks *you* (the hardened link
-has no adversary until factions).
+has no adversary until factions); **selling on the journal** — there is no
+`Command::Sell`, so the wallet, the pile's contents and the market sit outside
+the replayed hash and `--replay` cannot see wealth (found while building the
+played session in 48, and named there rather than smuggled into it).
 
 ## Known rough edges
 
-Tracked in `README.md` under "Known rough edges" — currently ~25 entries, the
+Tracked in `README.md` under "Known rough edges" — currently ~28 entries, the
 notable ones being: saves store a whole chunk snapshot per modified chunk;
 water is alpha-blended without depth sorting; a running excavation is not
-persisted; only one drone and one flier are ever created; and there is no
-player-carried inventory, so everything routes through the fleet's base pile —
-which is also what the movement system now weighs you down by, for want of a
-real backpack.
+persisted; only one drone and one flier are ever created; selling is not on
+the journal, so a session replays to the same ground but not to the same
+books; the played session steers rather than paths, so a route with a doorway
+in it needs the doorway named; and there is no player-carried inventory, so
+everything routes through the fleet's base pile — which is also what the
+movement system now weighs you down by, for want of a real backpack.

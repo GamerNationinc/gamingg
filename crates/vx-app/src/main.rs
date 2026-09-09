@@ -24,6 +24,7 @@ mod controller;
 mod debug;
 mod device;
 mod disposition;
+mod drill;
 mod dose;
 mod economy;
 mod felling;
@@ -57,6 +58,7 @@ mod rig;
 mod salvage;
 mod gamepad;
 mod schedule;
+mod session;
 mod roost;
 mod scout;
 mod shop;
@@ -227,6 +229,9 @@ struct Options {
     vault: bool,
     /// Cut the ground away beside a building to show its footing in section.
     footing: bool,
+    /// Play a whole loop headlessly — leave the house, walk to the ore, cut it
+    /// out, carry it home and sell it — photographing each beat.
+    play: bool,
     /// Draw the terminal over the capture, with a session's worth of log.
     terminal: bool,
     /// Market day in the hometown, with the roster and a word on the
@@ -319,6 +324,7 @@ fn parse_args() -> Result<Options, String> {
         fort: false,
         vault: false,
         footing: false,
+        play: false,
         terminal: false,
         people: false,
         pad: false,
@@ -423,6 +429,7 @@ fn parse_args() -> Result<Options, String> {
             "--fort" => options.fort = true,
             "--vault" => options.vault = true,
             "--footing" => options.footing = true,
+            "--play" => options.play = true,
             "--terminal" => options.terminal = true,
             "--osk" => {
                 options.terminal = true;
@@ -831,6 +838,17 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
 
     let (mut world, mut camera) = build_scene(&context, &mut renderer, options.seed, 6, options.at);
     camera.aspect = width as f32 / height as f32;
+
+    // `--play` is not a fixture in the usual sense: every other one arranges a
+    // scene and photographs it, and this one *plays the game* and photographs
+    // what happened. It runs a whole loop — out of the house, out to the ore,
+    // cut it, home, sold — through `session`, which drives the same movement,
+    // drill and shop the window does, and it photographs four beats along the
+    // way rather than one at the end. It returns early because it owns its own
+    // output.
+    if options.play {
+        return play_the_loop(&context, &mut renderer, &mut camera, options, path);
+    }
 
     // A capture's sky is normally the hour alone. The weather fixtures set
     // this instead, and the sun uniform at the bottom of this function reads
@@ -4482,6 +4500,258 @@ fn look_at(camera: &mut Camera, target: impl Into<glam::DVec3>) {
     camera.yaw = to.x.atan2(-to.z);
     camera.pitch = to.y.atan2((to.x * to.x + to.z * to.z).sqrt());
     camera.clamp_pitch();
+}
+
+/// Play a whole loop and photograph it: leave, collect, trade.
+///
+/// The only fixture that is a *playthrough* rather than a tableau. Everything
+/// here goes through [`session::Session`], which drives the game's own
+/// movement, drill and counter — so if this run stops working, the game has
+/// stopped working, not the picture.
+///
+/// Writes one image per beat beside `path`: a capture asked for as `play.ppm`
+/// lands as `play-01-door.ppm` and so on, because four moments are what a loop
+/// looks like and one is what a screenshot looks like.
+fn play_the_loop(
+    context: &GpuContext,
+    renderer: &mut Renderer,
+    camera: &mut Camera,
+    options: &Options,
+    path: &str,
+) -> Result<(), String> {
+    let stem = path.strip_suffix(".ppm").unwrap_or(path);
+    let mut shot = 0;
+
+    // Frame the player from behind and a little above — near enough that the
+    // house, the seam of ore or the counter fills the frame with them.
+    let mut photograph = |context: &GpuContext,
+                          renderer: &mut Renderer,
+                          camera: &mut Camera,
+                          session: &mut session::Session,
+                          beat: &str,
+                          subject: glam::DVec3|
+     -> Result<(), String> {
+        shot += 1;
+        let here = vx_core::BlockPos::new(
+            session.player.position.x.floor() as i32,
+            session.player.position.y.floor() as i32,
+            session.player.position.z.floor() as i32,
+        )
+        .chunk();
+        // Only what is in shot: after a hundred and seventy blocks of walking
+        // the session is holding far more world than a frame needs, and
+        // meshing all of it for every beat is minutes of nothing.
+        session.world.load_around(here, 4);
+        let dropped: Vec<vx_core::ChunkPos> = session
+            .world
+            .loaded_chunks()
+            .filter(|pos| (pos.x - here.x).abs() > 5 || (pos.z - here.z).abs() > 5)
+            .collect();
+        for pos in dropped {
+            renderer.remove_chunk(pos);
+        }
+        session.world.unload_beyond(here, 5);
+        remesh_all(context, renderer, &mut session.world);
+
+        // Over the player's shoulder and well back, aimed at the middle of
+        // the two — so the frame holds the player *and* what they came for
+        // rather than a close-up of the paving.
+        let eye = session.player.eye_position();
+        let away = {
+            let to = subject - eye;
+            let level = glam::DVec3::new(to.x, 0.0, to.z);
+            if level.length() > 0.5 {
+                -level.normalize()
+            } else {
+                glam::DVec3::new(-1.0, 0.0, -1.0).normalize()
+            }
+        };
+        // Framed by the game's own follow camera rather than by hand: aim it
+        // where the player is looking, then let `view::camera_placement` stand
+        // it off. That is the camera stage 47 taught to refuse a wall instead
+        // of clamping through one, which is exactly what a shot taken inside
+        // the shop needs — the first framing of this beat put the lens six
+        // blocks behind the player and therefore outside the building,
+        // photographing the wall they were stood behind.
+        let _ = away;
+        camera.position = eye;
+        look_at(camera, subject);
+        camera.position = view::camera_placement(
+            &session.world,
+            camera,
+            eye,
+            view::ViewMode::ThirdPerson,
+        );
+        look_at(camera, subject);
+        renderer.update_camera(&context.queue, camera);
+
+        // Draw the player, so the pictures are of somebody playing rather
+        // than of scenery they happen to be stood in. Built in the camera's
+        // own frame, like every other body since stage 45.
+        //
+        // Except when the follow camera refused to stand off — inside the
+        // shop it collapses to the eye, and `ViewMode::draws_body` says a
+        // first-person frame draws no body, for the good reason that all it
+        // would show is the inside of your own head.
+        let third_person = camera.position != eye;
+        let drawn: Vec<vx_render::Object> = if third_person {
+            let origin = renderer.render_origin().as_dvec3();
+            let feet = (session.player.position - origin).as_vec3();
+            rig::Rig::player()
+                .objects(feet, session.yaw, 0.0)
+                .into_iter()
+                .map(|object| object.already_relative())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        renderer.set_objects(&context.device, &context.queue, &drawn);
+
+        let out = format!("{stem}-{shot:02}-{beat}.ppm");
+        let capture = capture_frame(context, renderer, options.width, options.height);
+        capture
+            .write_ppm(&out)
+            .map_err(|error| format!("could not write {out}: {error}"))?;
+        println!("  beat {shot}: {beat} -> {out}");
+        Ok(())
+    };
+
+    let mut session = session::Session::open(options.seed);
+    let home = session.home();
+    let spawn = vx_world::town::spawn_position(&home);
+    let counter = vx_world::town::counter_position(&home);
+    println!("playing a loop from {spawn:?} on seed {}", options.seed);
+
+    // The gesture the game never told anyone to make: without a container
+    // there is no pile, and everything cut by hand is thrown away.
+    let chest = vx_world::town::chest_position(&home);
+    session.place_base(vx_core::BlockPos::new(chest.x, chest.y, chest.z));
+
+    // --- 1. Out of the door -------------------------------------------
+    let doorstep = session.doorstep();
+    let went = session.walk_to(doorstep, 8 * 30);
+    println!("  out of the house: {went:?}");
+    photograph(context, renderer, camera, &mut session, "door", doorstep)?;
+
+    // --- 2. Clear of the town, on the way out --------------------------
+    let outcrop = (options.at.0.max(120), options.at.1.max(30));
+    session
+        .world
+        .load_around(vx_core::BlockPos::new(outcrop.0, 0, outcrop.1).chunk(), 2);
+    let body = vx_agent::find_body(&session.world, outcrop, 48)
+        .ok_or_else(|| format!("no ore body near {outcrop:?} to walk to"))?;
+    let seam = body
+        .blocks()
+        .filter(|pos| vx_agent::is_ore(&session.world, *pos))
+        .filter(|pos| {
+            session
+                .world
+                .block(vx_core::BlockPos::new(pos.x, pos.y + 1, pos.z))
+                .is_air()
+        })
+        .max_by_key(|pos| pos.y)
+        .ok_or("the body never reaches daylight")?;
+
+    let halfway = glam::DVec3::new(
+        (f64::from(spawn.x) + f64::from(seam.x)) * 0.5,
+        f64::from(spawn.y),
+        (f64::from(spawn.z) + f64::from(seam.z)) * 0.5,
+    );
+    let leg = session.walk_to(halfway, 8 * 240);
+    println!("  clear of the town: {leg:?}");
+    let ahead = session.player.position + (session.forward() * 8.0).as_dvec3();
+    photograph(context, renderer, camera, &mut session, "out", ahead)?;
+
+    // --- 3. At the seam, mid-bite --------------------------------------
+    let stand = glam::DVec3::new(
+        f64::from(seam.x) + 0.5,
+        f64::from(seam.y) + 1.0,
+        f64::from(seam.z) + 0.5,
+    );
+    let there = session.walk_to(stand, 8 * 300);
+    println!("  at the ore: {there:?}");
+    // What the bit is about to cost, from the drill's own law.
+    let power = drill::power_of(1, 0);
+    println!(
+        "  copper is {:.1}s a block on a drill nobody has spent anything on",
+        drill::seconds_for(2.5, power)
+    );
+    let mut cut = 0;
+    for _ in 0..16 {
+        let Some(next) = body
+            .blocks()
+            .filter(|pos| vx_agent::is_ore(&session.world, *pos))
+            .filter(|pos| {
+                (glam::DVec3::new(
+                    f64::from(pos.x) + 0.5,
+                    f64::from(pos.y) + 0.5,
+                    f64::from(pos.z) + 0.5,
+                ) - session.eye())
+                .length()
+                    < f64::from(session::REACH) - 0.5
+            })
+            .min_by_key(|pos| -pos.y)
+        else {
+            break;
+        };
+        session.look_at(next);
+        if matches!(session.drill_through(600), Some(drill::Deposited::Piled(_))) {
+            cut += 1;
+        } else {
+            break;
+        }
+    }
+    let pack = session.pile().map_or(0, |pile| pile.total());
+    println!("  cut {cut} blocks; the pack holds {pack}");
+    // Leave the last one half-drilled so the face in shot is a worked face.
+    if let Some(next) = body
+        .blocks()
+        .filter(|pos| vx_agent::is_ore(&session.world, *pos))
+        .min_by_key(|pos| -pos.y)
+    {
+        session.look_at(next);
+        for _ in 0..40 {
+            if session.drill_through(1).is_some() {
+                break;
+            }
+        }
+    }
+    let face = session.player.position + (session.forward() * 3.0).as_dvec3();
+    photograph(context, renderer, camera, &mut session, "ore", face)?;
+
+    // --- 4. Home, and paid ---------------------------------------------
+    let back = session.walk_route(&session.counter_route(), 8 * 400);
+    println!(
+        "  home again: {back:?} ({} ticks laden, {} out)",
+        back.ticks(),
+        went.ticks() + leg.ticks() + there.ticks()
+    );
+    if !back.reached() || !session.at_the_counter() {
+        return Err(format!(
+            "could not get back to the counter to trade: {back:?}, standing at {:?}",
+            session.player.position
+        ));
+    }
+    let earned = session.sell_everything();
+    println!(
+        "  sold the haul for {earned} CR; the wallet holds {}",
+        session.wallet.credits()
+    );
+
+    let till = glam::DVec3::new(
+        f64::from(counter.x) + 0.5,
+        f64::from(counter.y) + 0.5,
+        f64::from(counter.z) + 0.5,
+    );
+    photograph(context, renderer, camera, &mut session, "counter", till)?;
+
+    println!(
+        "played {} ticks, {} journal entries, {} blocks lost to no pile",
+        session.tick,
+        session.journal.entries().len(),
+        session.lost
+    );
+    Ok(())
 }
 
 /// Rebuild every loaded chunk's mesh. Used after a headless excavation, where
@@ -8470,9 +8740,11 @@ impl App {
             return;
         };
 
-        let power = skills::drill_power(active.skills.level(skills::MINING))
-            * wallet::drill_multiplier(active.wallet.upgrade(wallet::DRILL));
-        let step = dt * power / hardness.max(0.05);
+        let power = drill::power_of(
+            active.skills.level(skills::MINING),
+            active.wallet.upgrade(wallet::DRILL),
+        );
+        let step = drill::bite(hardness, power, dt);
 
         // A lockbox is not an ordinary block. It has a power gate below which
         // the bit simply skates, and its progress *persists* — a breach is a
@@ -8532,30 +8804,23 @@ impl App {
             // layer of cells nearest the bit, so a face being worked looks
             // worked — and the block still finishes on the same tick, by the
             // same `break_block` below.
-            let before = match &active.digging {
-                Some((target, progress)) if *target == hit.block => *progress,
-                _ => 0.0,
+            //
+            // The arithmetic itself lives in `drill`, so the headless session
+            // that plays the loop drills with this very rule rather than with
+            // a second copy of it.
+            let carried = match &active.digging {
+                Some((target, progress)) if *target == hit.block => Some(*progress),
+                _ => None,
             };
-            match &mut active.digging {
-                Some((target, progress)) if *target == hit.block => {
-                    *progress += step;
-                }
-                other => {
-                    *other = Some((hit.block, step.min(1.0)));
-                }
-            }
-            let after = active.digging.map_or(0.0, |(_, progress)| progress);
-            let layers = |progress: f32| (progress * 4.0).floor() as i32;
-            if layers(after) > layers(before) && after < 1.0 {
-                let face = vx_core::Face::ALL
-                    .iter()
-                    .position(|other| *other == hit.face)
-                    .unwrap_or(0);
+            let bite = drill::advance_bite(carried, step);
+            active.digging = Some((hit.block, bite.progress));
+            if bite.carve {
+                let face = drill::face_index(hit.face);
                 active
                     .world
                     .carve(hit.block, vx_world::micro::Shape::DrillFace.cells(0, 0, 0, face));
             }
-            if after < 1.0 {
+            if !bite.through {
                 return;
             }
         }
@@ -8596,11 +8861,23 @@ impl App {
                 // fabricator's whole catalogue is fed by it. A hand-cut block
                 // used to simply vanish, which made the drill the one tool
                 // in the game that produced nothing.
-                if let Some(base) = active.mining.fleet.base.as_mut() {
-                    if !crate_here {
-                        base.stockpile
-                            .add_block(active.world.registry(), hit.id, 1);
-                    }
+                let landed = drill::deposit(
+                    active
+                        .mining
+                        .fleet
+                        .base
+                        .as_mut()
+                        .map(|base| &mut base.stockpile),
+                    active.world.registry(),
+                    hit.id,
+                    crate_here,
+                );
+                if landed == drill::Deposited::NoBase {
+                    // There is no base at boot, and this was the one system in
+                    // the game that produced goods and never said where they
+                    // went: the block broke, the ore evaporated, and nothing
+                    // was printed anywhere. Every sibling says this line.
+                    active.greeting = Some((drill::NO_BASE.to_string(), Instant::now()));
                 }
                 let xp = (hardness * skills::MINING_XP_PER_HARDNESS) as u64;
                 if let Some(level) = active.skills.add_xp(skills::MINING, xp) {

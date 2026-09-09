@@ -675,6 +675,22 @@ pub fn counter_offset(_site: &TownSite) -> (i32, i32) {
     (0, 9)
 }
 
+/// The shop's doorway, in its north wall, as an offset from the centre.
+///
+/// Named since stage 48 for the same reason the house's door was: the counter
+/// stands *inside* a building, so anything walking to it on foot — a played
+/// session, and one day anything that paths — has to aim at the gap in the
+/// wall before it aims at the counter. The doorway is three wide.
+pub fn shop_door_offset() -> (i32, i32) {
+    (0, 6)
+}
+
+/// Where a customer stands to use the counter: inside the shop, on the near
+/// side of the counter run, within arm's reach of it.
+pub fn counter_stand_offset() -> (i32, i32) {
+    (0, 8)
+}
+
 /// Where this town's beacon console stands, as an offset from its centre:
 /// the south face of the radio tower's deck.
 pub fn beacon_offset(_site: &TownSite) -> (i32, i32) {
@@ -695,6 +711,19 @@ pub fn mailbox_offset() -> (i32, i32) {
 /// Where a new player wakes up: inside their house, facing the door.
 pub fn spawn_offset() -> (i32, i32) {
     (-14, 9)
+}
+
+/// The doorway of the player's house, in its east wall.
+///
+/// Named since stage 48, because the loop starts by walking through it and
+/// anything that wants to leave the house on foot has to aim at the gap
+/// rather than at where it is going: the wall either side is two blocks of
+/// solid container and a body that sets off on the bearing of somewhere a
+/// hundred and seventy blocks away walks straight into it. The doorway is two
+/// wide (z 8 and 9) and two high; this names the column in line with the
+/// spawn, so leaving is a straight line for the first three blocks.
+pub fn door_offset() -> (i32, i32) {
+    (-11, 9)
 }
 
 /// Your own lockbox, in the corner of your house. Named so the geometry tests
@@ -1038,6 +1067,58 @@ mod tests {
         ));
     }
 
+    /// You can get to the counter, and stand somewhere to use it.
+    ///
+    /// The counter is inside a building, and until stage 48 nothing named the
+    /// way in — so a body walking at the counter's own coordinates walked into
+    /// the shop's north wall instead. The door and the customer's spot are
+    /// named now, and this is what keeps them true.
+    #[test]
+    fn the_shop_has_a_door_and_somewhere_to_stand_at_the_counter() {
+        let site = town::home_site();
+        let counter = town::counter_position(&site);
+        let (door_x, door_z) = shop_door_offset();
+        let (stand_x, stand_z) = counter_stand_offset();
+
+        // A doorway two high in the named column, or nothing could walk
+        // through it.
+        for y in [HOME_GROUND_Y + 1, HOME_GROUND_Y + 2] {
+            assert_eq!(
+                cell_at(&site, door_x, y, door_z),
+                None,
+                "the shop's doorway is blocked at ({door_x},{y},{door_z})"
+            );
+        }
+
+        // Somewhere to stand inside, clear to head height.
+        for y in [HOME_GROUND_Y + 1, HOME_GROUND_Y + 2] {
+            assert_eq!(
+                cell_at(&site, stand_x, y, stand_z),
+                None,
+                "no room to stand at the counter at ({stand_x},{y},{stand_z})"
+            );
+        }
+
+        // And the walk from the door to that spot is a straight line down the
+        // same column, with the counter in reach at the end of it.
+        for z in door_z..=stand_z {
+            assert_eq!(
+                cell_at(&site, stand_x, HOME_GROUND_Y + 1, z),
+                None,
+                "the way in is blocked at z={z}"
+            );
+        }
+        let stand = (
+            site.centre.0 + stand_x,
+            site.centre.1 + stand_z,
+        );
+        let reach = ((counter.x - stand.0) as f64).hypot((counter.z - stand.1) as f64);
+        assert!(
+            reach <= 5.0,
+            "the customer's spot is {reach} from the counter, out of arm's reach"
+        );
+    }
+
     #[test]
     fn spawn_stays_clear_of_the_furniture() {
         // The player appears at the centre; nothing authored may stand there,
@@ -1087,10 +1168,14 @@ mod tests {
                 }
             }
         }
-        // The doorway: two wide, two high, in the east wall.
+        // The doorway: two wide, two high, in the east wall — and where
+        // `door_offset` says it is, so the walk out of the house and the
+        // plan that draws it cannot drift apart.
+        let (door_x, door_z) = door_offset();
+        assert!([8, 9].contains(&door_z), "the named door is not in the doorway");
         for z in [8, 9] {
             for y in [HOME_GROUND_Y + 1, HOME_GROUND_Y + 2] {
-                assert_eq!(cell_at(&site, -11, y, z), None, "doorway blocked at z={z} y={y}");
+                assert_eq!(cell_at(&site, door_x, y, z), None, "doorway blocked at z={z} y={y}");
             }
         }
         // A floor underfoot and a roof overhead.

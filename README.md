@@ -230,6 +230,20 @@ build in it, and it survives quitting — skills included.
   edge, now reachable at higher speed.
 - A 2.2 m mantle lets the player leave a hole a ground drone cannot drive out
   of. The planner does not warn about it yet.
+- Selling is not on the journal. There is no `Command::Sell`, so the wallet,
+  the pile's contents and the market sit outside the replayed world hash and
+  `--replay` cannot see wealth: a session that mined and sold replays to the
+  same *ground* but not to the same books. Found while building the played
+  session; it wants a round of its own rather than a corner of one.
+- The played session walks by holding forward and working along a face when it
+  is stuck. That is honest about what legs can do and it is not a pathfinder:
+  a route with a doorway in it needs the doorway named as a waypoint, which is
+  why the house's and the shop's are. A real path-finder for the player would
+  make the harness able to go anywhere a person can.
+- There is no player inventory, so everything routes through the fleet's base
+  pile — which is also what the movement system weighs you down by. Mining
+  sixty blocks makes you walk at 0.55× until you sell, with the "pack" sat in a
+  container somewhere else entirely.
 - Saves store a full chunk snapshot per modified chunk — about 24 KiB whether
   one block changed or ten thousand. An edit journal would cost bytes instead.
   Harmless until worlds get large.
@@ -871,6 +885,55 @@ town's **counter shuts to you** while anything stands: not a worse price, a
 closed door. So there is a whole middle now between "nothing happened" and
 "there are four lads with guns coming over the hill", and you can talk, pay or
 run your way out of it.
+
+### You can play it with nobody at the keyboard
+
+Somebody asked me to play a round — walk out, dig something up, sell it — and
+the first thing I found was that **nothing could**. Every verb in the loop is
+welded to the window: walking, aiming, drilling, opening the counter. The
+drone can be tested doing the whole job on real ground; you could not. So the
+loop's three verbs had wildly different coverage — the walk is proved to a
+micrometre three thousand kilometres from spawn, the drone's mining is proved
+end to end on ground nobody arranged, and selling is proved against a
+hand-built pile and a bare market. Nothing joined them up.
+
+**And the join is where the bug was.** When you break a block by hand it goes
+on your pile — except you have not *got* a pile until you place a container,
+and there is none when the world opens. So a new player walked out, spent two
+seconds a block chipping ore out of a hillside, and **every bit of it went
+nowhere, silently.** No message, no line in the terminal, nothing. Every other
+system in the game says so out loud — the printer, the bank, the chest, the
+job board all tell you there is no base pile — and the one that produces the
+goods was the only one that stayed quiet. It says so now, and the welcome
+panel says it before you get there.
+
+**So the game can be played without a person.** A session opens a world, puts
+you in the doorway, and drives the same movement, the same drill and the same
+shop counter the window does — not a simulation of them, the things
+themselves. It walks by holding forward and letting the automatic vault do
+the climbing; it aims by turning the head; it holds the trigger until the rock
+gives up; it presses Enter on the shelf. It can also *fail*, and that is the
+point of it: a walk that cannot get there reports where it stopped rather than
+pretending.
+
+Playing the whole loop on the shipped seed goes like this. Out of the front
+door, 170 blocks east to the copper that breaks the surface on the hillside,
+sixteen blocks of ore cut out at two seconds each, and home again — **slower
+than you left, because the pile is the weight on your back.** Then over the
+counter for 224 credits at the price that town was paying that day, and the
+price drops for whoever sells next. Four pictures come out of it, one per beat.
+
+Three things went wrong while playing it, all of them now fixed and all of
+them the sort of thing only playing finds. The first run walked out of the
+house and straight into the wall beside its own front door, because it set off
+on the bearing of somewhere 170 blocks away while still stood in the kitchen —
+so the door is a named place now, and so is the shop's. The second climbed a
+three-block cliff by holding jump, which also meant it climbed the *shop*, and
+finished stood on the roof selling ore down through the ceiling — so the walk
+only reaches for the jump when it is genuinely stuck, and "am I at the counter"
+is a raycast at the till, the same question the game asks, rather than a
+distance. And the third could not get past that cliff at all until it learned
+to walk along a face instead of bouncing off it.
 
 ### The body stays out of the wall
 
@@ -1950,6 +2013,11 @@ cargo run --release -p vx-app -- --screenshot market.ppm --at 0,4 --board
 
 # rebuild a saved world from its journal and check it against the ground on disk
 cargo run --release -p vx-app -- --replay --world myworld
+
+# play a whole loop with nobody at the keyboard — out of the house, out to the
+# ore, cut it, home, sold — and photograph all four beats. Writes
+# play-01-door.ppm, play-02-out.ppm, play-03-ore.ppm and play-04-counter.ppm
+cargo run --release -p vx-app -- --screenshot play.ppm --play --seed 2024 --at 146,30
 
 # put a bigger crew on the next dispatch
 cargo run --release -p vx-app -- --drones 8

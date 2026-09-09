@@ -444,6 +444,24 @@ pub fn mailbox_position(site: &TownSite) -> BlockPos {
     BlockPos::new(site.centre.0 + x, site.ground + 1, site.centre.1 + z)
 }
 
+/// The shop's doorway — the gap you go in through to reach the counter.
+pub fn shop_door_position(site: &TownSite) -> BlockPos {
+    let (x, z) = plan::shop_door_offset();
+    BlockPos::new(site.centre.0 + x, site.ground + 1, site.centre.1 + z)
+}
+
+/// Where a customer stands to trade at this town's counter.
+pub fn counter_stand_position(site: &TownSite) -> BlockPos {
+    let (x, z) = plan::counter_stand_offset();
+    BlockPos::new(site.centre.0 + x, site.ground + 1, site.centre.1 + z)
+}
+
+/// The doorway of the player's house — the gap you leave through.
+pub fn door_position(site: &TownSite) -> BlockPos {
+    let (x, z) = plan::door_offset();
+    BlockPos::new(site.centre.0 + x, site.ground + 1, site.centre.1 + z)
+}
+
 /// Where a new player wakes up: on their house's floor, inside.
 pub fn spawn_position(site: &TownSite) -> BlockPos {
     let (x, z) = plan::spawn_offset();

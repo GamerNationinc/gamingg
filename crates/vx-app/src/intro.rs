@@ -35,11 +35,12 @@ const BACKGROUND: [u8; 4] = [10, 12, 16, 240];
 const WINDOW: usize = 9;
 
 /// The authored greeting above the derived changelog.
-const PREAMBLE: [&str; 4] = [
+const PREAMBLE: [&str; 5] = [
     "THIS IS YOUR HOUSE IN STONEHAVEN.",
     "THE CHEST KEEPS YOUR GOODS. THE MAILBOX",
     "OUTSIDE TAKES DELIVERIES YOU ORDER AT",
-    "THE SHOP COUNTER UP THE PATH. GOOD LUCK.",
+    "THE SHOP COUNTER UP THE PATH.",
+    "PLACE A CONTAINER BEFORE YOU MINE.",
 ];
 
 /// Every changelog line, derived from the roadmap.
@@ -230,7 +231,7 @@ mod tests {
         // reading the wrong part of the file.
         let lines = changelog();
         assert!(
-            lines.iter().any(|line| line.starts_with("47 ")),
+            lines.iter().any(|line| line.starts_with("48 ")),
             "the newest stage is missing from its own welcome panel: {lines:#?}"
         );
     }
@@ -250,6 +251,34 @@ mod tests {
                 assert!(font::knows(character), "undrawable {character:?} in the preamble");
             }
         }
+    }
+
+    /// The preamble grew a line in stage 48 — a new player was never told
+    /// that mining without a container on the ground throws the ore away —
+    /// so the panel it lives in has to be checked for room rather than
+    /// assumed to have it.
+    #[test]
+    fn the_greeting_and_the_changelog_both_fit_the_panel() {
+        let margin = 8i32;
+        let usable = INTRO_WIDTH as i32 - margin * 2;
+        for line in PREAMBLE {
+            assert!(
+                font::text_width(line, 1) as i32 <= usable,
+                "the preamble line {line:?} is wider than the panel"
+            );
+        }
+
+        // The same walk down the panel `render_intro` makes.
+        let mut y = margin;
+        y += LINE_HEIGHT as i32 + 4;
+        y += PREAMBLE.len() as i32 * LINE_HEIGHT as i32;
+        y += 4;
+        y += LINE_HEIGHT as i32 + 2;
+        y += WINDOW as i32 * LINE_HEIGHT as i32;
+        assert!(
+            y <= INTRO_HEIGHT as i32,
+            "the panel overflows: the changelog ends at {y} of {INTRO_HEIGHT}"
+        );
     }
 
     #[test]
