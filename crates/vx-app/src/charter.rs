@@ -181,8 +181,7 @@ impl Charters {
     }
 
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("charters.dat"))?);
+        let mut file = crate::keeping::begin(directory, "charters.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         file.write_all(&self.unfiled.to_le_bytes())?;
@@ -198,7 +197,7 @@ impl Charters {
             file.write_all(&site.seed.to_le_bytes())?;
             file.write_all(&charter.founded.to_le_bytes())?;
         }
-        file.flush()
+        file.commit()
     }
 
     /// A missing or unreadable file is a frontier nobody has founded

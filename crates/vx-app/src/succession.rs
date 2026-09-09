@@ -184,8 +184,7 @@ impl Ledger {
     }
 
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("stands.dat"))?);
+        let mut file = crate::keeping::begin(directory, "stands.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         file.write_all(&(self.stands.len() as u32).to_le_bytes())?;
@@ -195,7 +194,7 @@ impl Ledger {
             file.write_all(&stand.disturbed_at.to_le_bytes())?;
             file.write_all(&[stand.stamped])?;
         }
-        file.flush()
+        file.commit()
     }
 
     /// A missing or unreadable file is an untouched country, not an error.

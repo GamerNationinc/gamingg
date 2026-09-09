@@ -566,14 +566,13 @@ impl Arcade {
     }
 
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("arcade.dat"))?);
+        let mut file = crate::keeping::begin(directory, "arcade.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         file.write_all(&[u8::from(self.owned)])?;
         file.write_all(&self.best.to_le_bytes())?;
         file.write_all(&self.deepest.to_le_bytes())?;
-        file.flush()
+        file.commit()
     }
 
     /// Read the cartridge back. What survives a session is what a cabinet

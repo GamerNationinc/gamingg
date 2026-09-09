@@ -616,7 +616,7 @@ pub struct Entry {
 }
 
 /// Everything ordered since the last keyframe.
-#[derive(Debug, Default, Clone, PartialEq)]
+#[derive(Debug, Default, Clone)]
 pub struct CommandLog {
     entries: Vec<Entry>,
     /// The tick the keyframe on disk was taken at.
@@ -626,6 +626,29 @@ pub struct CommandLog {
     pub keyframe_hash: u64,
     /// Ticks since the world began.
     tick: u64,
+    /// Whether anything has been ordered since the last save.
+    ///
+    /// Not written to disk and not part of the log: it is a question about
+    /// *this process*, asked by the autosave so that standing still writes
+    /// nothing. Set in [`CommandLog::record`], which is the one gate every
+    /// order in the game passes through.
+    dirty: bool,
+}
+
+/// Two logs are equal when they say the same thing, which `dirty` does not.
+///
+/// It is a question about *this process* — has anything been ordered since
+/// the last save — and it is not written to disk, so a log read back off the
+/// disk would never compare equal to the one that wrote it if the derived
+/// implementation were kept. That is not a difference between two journals;
+/// it is a difference between a journal and a moment.
+impl PartialEq for CommandLog {
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+            && self.keyframe_tick == other.keyframe_tick
+            && self.keyframe_hash == other.keyframe_hash
+            && self.tick == other.tick
+    }
 }
 
 impl CommandLog {
@@ -635,6 +658,16 @@ impl CommandLog {
 
     pub fn tick(&self) -> u64 {
         self.tick
+    }
+
+    /// Has anything been ordered since the last save?
+    pub fn unsaved(&self) -> bool {
+        self.dirty
+    }
+
+    /// Said after a save has been written.
+    pub fn marked_saved(&mut self) {
+        self.dirty = false;
     }
 
     pub fn entries(&self) -> &[Entry] {
@@ -655,6 +688,19 @@ impl CommandLog {
     /// running game issues one per frame, and sixty entries a second would
     /// bury the handful that carry meaning. Folding is exact — ticks add.
     pub fn record(&mut self, command: Command) {
+        // **The one place the game notices it has changed.**
+        //
+        // Every order passes through here — thirty call sites in `main.rs`
+        // alone — so this is where the autosave learns there is something
+        // worth writing, and it is the only place that could not be forgotten
+        // by the next stage that adds a verb. Which orders are also worth an
+        // *immediate* save is a separate question, answered by
+        // `keeping::worth_saving_now`; this half just says "not nothing".
+        //
+        // Advancing the clock is deliberately included: ticks pass because
+        // the world is turning, and a crew that dug for two minutes while you
+        // watched has changed the world as surely as your own drill would.
+        self.dirty = true;
         if let Command::Advance { ticks } = command {
             if ticks == 0 {
                 return;
@@ -688,7 +734,7 @@ impl CommandLog {
     }
 
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file = std::io::BufWriter::new(std::fs::File::create(directory.join("log.dat"))?);
+        let mut file = crate::keeping::begin(directory, "log.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         file.write_all(&self.keyframe_tick.to_le_bytes())?;
@@ -698,7 +744,7 @@ impl CommandLog {
         for entry in &self.entries {
             write_entry(&mut file, entry)?;
         }
-        file.flush()
+        file.commit()
     }
 
     /// Read a log back, tolerating absence and damage.
@@ -1851,6 +1897,8 @@ fn read_log(path: &Path) -> std::io::Result<Option<CommandLog>> {
         keyframe_tick,
         keyframe_hash,
         tick,
+        // Freshly read off disk is, by definition, saved.
+        dirty: false,
     }))
 }
 

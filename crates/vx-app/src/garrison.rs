@@ -35,6 +35,9 @@
 //! and a cleared shelter is session state. Nothing here reaches the replay
 //! oracle, and the journal never learns a bunker was held.
 
+use std::io::{Read, Write};
+use std::path::Path;
+
 use glam::DVec3;
 
 use vx_world::bunker::Tier;
@@ -594,10 +597,155 @@ impl Garrisons {
         }
         None
     }
+
+    /// The shelters this world has finished with.
+    pub fn cleared(&self) -> &[(i32, i32)] {
+        &self.cleared
+    }
+
+    /// Write down which shelters are done.
+    ///
+    /// # Why only the cleared list
+    ///
+    /// A squad mid-fight is genuinely transient — holders leaning out of
+    /// cover, a belief halfway through an occupancy search, rounds in the
+    /// air — and freezing one across a save would be the same mistake as
+    /// saving a slug in flight. `muster_near` re-derives every squad from
+    /// the bunker's own seed, which is why the same shelter is the same
+    /// shelter every session. **What is not derivable is the outcome.**
+    ///
+    /// Until stage 54 this list was documented as "cleared is cleared, for
+    /// the session", and that turned out to be two bugs wearing one coat.
+    /// A shelter you fought through came back fully manned on the next
+    /// load, with the holders you had put down on their feet again — so the
+    /// afternoon was undone. And because the capture pay had already gone
+    /// into `wallet.dat`, which *does* survive, you could clear a shelter,
+    /// save, reload and clear it again for the money. A thing you lost and
+    /// a thing you could farm, out of one missing file.
+    pub fn save(&self, directory: &Path) -> std::io::Result<()> {
+        let mut file = crate::keeping::begin(directory, "garrisons.dat")?;
+        file.write_all(MAGIC)?;
+        file.write_all(&VERSION.to_le_bytes())?;
+        file.write_all(&(self.cleared().len() as u32).to_le_bytes())?;
+        for (x, z) in self.cleared() {
+            file.write_all(&x.to_le_bytes())?;
+            file.write_all(&z.to_le_bytes())?;
+        }
+        file.commit()
+    }
+
+    /// Read it back, tolerating absence and damage.
+    ///
+    /// A damaged file means the shelters stand again — the honest failure
+    /// direction, since the alternative is a file that could hand a player
+    /// every bunker on the map by being corrupt in the right way.
+    pub fn load(&mut self, directory: &Path) {
+        let path = directory.join("garrisons.dat");
+        match read_cleared(&path) {
+            Ok(Some(cleared)) => self.cleared = cleared,
+            Ok(None) => {}
+            Err(error) => {
+                log::warn!("ignoring damaged garrisons at {}: {error}", path.display())
+            }
+        }
+    }
+}
+
+const MAGIC: &[u8; 4] = b"VXGA";
+const VERSION: u32 = 1;
+
+/// However many shelters a world could plausibly hold. A count past this is
+/// a corrupt file, not a very busy campaign.
+const MAX_CLEARED: u32 = 100_000;
+
+fn read_cleared(path: &Path) -> std::io::Result<Option<Vec<(i32, i32)>>> {
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => std::io::BufReader::new(file),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic)?;
+    if &magic != MAGIC {
+        return Err(std::io::Error::other("not a garrisons file"));
+    }
+    let mut word = [0u8; 4];
+    file.read_exact(&mut word)?;
+    if u32::from_le_bytes(word) != VERSION {
+        return Ok(None);
+    }
+    file.read_exact(&mut word)?;
+    let count = u32::from_le_bytes(word);
+    if count > MAX_CLEARED {
+        return Err(std::io::Error::other("implausible cleared count"));
+    }
+    let mut cleared = Vec::with_capacity(count as usize);
+    for _ in 0..count {
+        file.read_exact(&mut word)?;
+        let x = i32::from_le_bytes(word);
+        file.read_exact(&mut word)?;
+        let z = i32::from_le_bytes(word);
+        cleared.push((x, z));
+    }
+    Ok(Some(cleared))
 }
 
 #[cfg(test)]
 mod tests {
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("gamingg-garrisons-{name}"));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).expect("scratch");
+        path
+    }
+
+    /// **A shelter you took stays taken.**
+    ///
+    /// Before stage 54 this list lived and died with the session, so a bunker
+    /// you fought through came back fully manned — and, because the capture
+    /// pay was already in a wallet that *does* survive, could be cleared again
+    /// for the money.
+    #[test]
+    fn a_cleared_shelter_is_still_cleared_after_a_reload() {
+        let directory = scratch("round-trip");
+        let mut held = Garrisons::default();
+        held.cleared.push((512, -1024));
+        held.cleared.push((-2048, 3072));
+        held.save(&directory).expect("save");
+
+        let mut reloaded = Garrisons::default();
+        reloaded.load(&directory);
+        assert_eq!(reloaded.cleared(), &[(512, -1024), (-2048, 3072)]);
+    }
+
+    /// And a shelter nobody has touched is not cleared by an empty file.
+    #[test]
+    fn an_untouched_world_has_no_cleared_shelters() {
+        let directory = scratch("empty");
+        Garrisons::default().save(&directory).expect("save");
+        let mut reloaded = Garrisons::default();
+        reloaded.cleared.push((1, 1));
+        reloaded.load(&directory);
+        assert!(reloaded.cleared().is_empty());
+    }
+
+    /// A damaged file puts the holders back on their feet rather than
+    /// handing over the map. Failing towards the harder outcome is the only
+    /// safe direction for a file whose whole content is "you already won".
+    #[test]
+    fn a_missing_or_damaged_file_leaves_every_shelter_held() {
+        let directory = scratch("damaged");
+        let mut held = Garrisons::default();
+        held.cleared.push((7, 7));
+        held.load(&directory);
+        assert_eq!(held.cleared(), &[(7, 7)], "absence overwrote the list");
+
+        std::fs::write(directory.join("garrisons.dat"), b"not a garrisons file").expect("write");
+        let mut fresh = Garrisons::default();
+        fresh.load(&directory);
+        assert!(fresh.cleared().is_empty(), "a damaged file was believed");
+    }
     use super::*;
 
     fn a_site() -> vx_world::bunker::BunkerSite {

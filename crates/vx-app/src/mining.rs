@@ -261,6 +261,31 @@ impl Mining {
         }
     }
 
+    /// The corners you have picked, and which method is selected.
+    ///
+    /// For [`crate::dig`], which writes them down: a marked-but-undispatched
+    /// area is a decision the player made by eye, and it used to be thrown
+    /// away by a save. Only the corners and the choice are kept — the area
+    /// and the plans are derived from them by [`Mining::mark`], and deriving
+    /// them again on load is both cheaper than storing them and the only way
+    /// to be sure a plan still matches ground that may have moved.
+    pub fn marked(&self) -> (&[BlockPos], usize) {
+        (&self.corners, self.chosen)
+    }
+
+    /// Put a mark back, exactly as though it had been clicked.
+    pub fn restore_mark(&mut self, world: &mut World, corners: &[BlockPos], chosen: usize) {
+        if self.operation.is_some() {
+            return;
+        }
+        for corner in corners.iter().take(2) {
+            self.mark(world, *corner);
+        }
+        if !self.plans.is_empty() {
+            self.chosen = chosen.min(self.plans.len() - 1);
+        }
+    }
+
     /// Choose the next method in the list.
     pub fn cycle_method(&mut self) {
         if !self.plans.is_empty() && self.operation.is_none() {

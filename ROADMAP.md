@@ -130,6 +130,7 @@ Written down because they are easy to forget and expensive to get wrong.
 | 51 | `086a51c` | Every load put you back in bed. Asked to play the whole loop — leave town, mine, **come back**, save, go to another town and trade — and the half nothing had ever walked broke it twice over. `App`'s boot builds the body at `town::spawn_position` unconditionally and nothing anywhere reads a saved position, because nothing anywhere writes one: the ground, the pile, the wallet, the skills, the books, the chest, the tank and the wear ledger all came back and **you** did not. Walk two hundred blocks, sell up, quit, come back — you are in your own kitchen with the walk to do again. It hid for the same reason the ditch did: every save/load test there had ever been ran at the spawn, where being put back at the spawn is indistinguishable from working. It gets `whereabouts.dat` (`VXYO`) — where you are and where you are looking, at `f64`, read *above* the pregen so the ground is prepared around where the body will actually be rather than dropping it through unloaded air. `Session::cross_country` names the shape every long walk has (out by your gate, over the hills in legs, in by theirs) after it had been written by hand three times, and `--haul` grows the beat it never had: the walk **home**, laden, in through your own gate |
 | 52 | `76bf1aa` | The crew you leave working, and the books that balance. Asked for the loop where bots mine and you get rich, with two conditions: everything saves, and nothing can be glitched upward. Both had teeth. **A running dispatch was in no save file** — `Mining::operation` is private and nothing named it — so buying drones and setting them cutting was work you lost at every quit; the third round running that the same shape turned up (the pile in 50, the player in 51). Walking every field of `Active` against every `save(` call found three more: **every sector you burned fuel to survey**, the kestrel's whole report, and your radiation dose — the last of which made the menu screen a free ward cot. They get `dig.dat`, `fleet.dat`, `marks.dat` and `dose.dat`, and a **persistence census** in the module docs with a test that fails if a subsystem stops saving or a new one arrives unaccounted for. The integrity half found a working infinite-money glitch: price floors at one credit, stock caps so it cannot fall further, and **nothing checked whether the town could pay** — so selling rubble to one counter for ever beat every interesting decision the economy offers. Towns get a **till** that their own trade refills, which kills the faucet and turns earning into a routing problem. And the played run turned up the worst bug of the round: `Session::load_from`'s `unload_beyond(pos, i32::MAX)` retained every chunk instead of dropping them, so a reload served **generated ground over the ground on disk** — a dig came back filled in and the crew standing in it reported stuck. Measured: 40 blocks by hand for the first drone, one drone 15,150 blocks/hr, **two 31,830 (2.1×)** on the same method and matched ground, a dispatch saved mid-dig and resumed cutting, and every good conserved across the save |
 | 53 | `fe739a7` | The drill mod: a cage of light, and a ping through the rock. Asked for an 80s holographic glow on the block being drilled, toggleable, plus a sonar ping reading the elements within four metres of it. Found on the way in that **this game has never had a selection box** — nothing was drawn on the aimed block, and no crosshair either; fifty-two stages of the only way to know what was under the bit being the F3 panel's text row. So the mod is not decoration on a highlight, it *is* the highlight: twelve opaque bars in a new cyan tile standing `SWELL` off the block, dim on a block you are looking at and ramping to the shader's 1.4 overbright as the bit bites, with a plane of light rising through the block as the drill's progress bar. The other half reads the 9×9×9 box round the touched block, keeps the cells inside four metres, and groups them seams-first with every tie broken — a total order, so the same ground pings the same way twice. Markers hang in the **air cell against an exposed seam** rather than inside the ore, because this renderer draws opaque geometry with a depth test and a marker in rock is one nobody sees; what is still buried is counted and reported instead. **Neither switch is on the wire.** The mod draws and reads and never writes a block, a good or a number, so it needs no order, no `VERSION` bump and no keyframe — and `the_drill_mod_is_a_lens_not_a_lever` plays the same session twice with both switches on and off and demands identical journal bytes and world hash. Free on any drill, `H` and `P`, on the pad's second layer and at the terminal, remembered in `drillmod.dat`. The aim ray is now cast **once** a frame instead of twice-and-discarded |
+| 54 | _this_ | Nothing you did is lost. Asked, as a gate on the whole arc, to make sure progress and gameplay actually save — *"because if you don't have that, the game isn't really a game."* Walking all 104 fields of `Active` and all 34 save/load pairs in the **live** game rather than the headless session the census test walks turned up six things. **There was no autosave at all**: `save_world` was reachable from `F5`, the terminal and closing the window, all three a cooperative shutdown the player chooses, so a crash, an OOM kill, a SIGTERM or a closed lid took the session — and on the Deck this build targets those are the ordinary ways a session ends, not the exotic ones. **Every one of the 34 sidecar writers used `File::create`**, which truncates first, while `vx_world::save::write_atomically` had protected the region files since they existed: an interrupted save left a short file, and every loader in this game is tolerant enough to answer one by resetting its subsystem, so a power cut could take your wallet to zero and warn nobody. Worse, the set was written sequentially with nothing comparing the pieces, so a wallet from after a sale could load beside a pile from before it. **A failed save was a `log::error!`** and the terminal printed "WORLD WRITTEN OUT" unconditionally; a boot that could not open the save directory never saved at all and never said so. And three things were being lost outright: the goods a broken container was holding were **written on every save and dropped on load** by a live boot that grafted across only `.base` — while the test proving the format works exercises the session's path, which was never the broken one; a **cleared garrison** re-mustered on reload with its downed holders alive, which is both an afternoon undone and, since the capture pay banks, a reload payday; and a **pump you switched on came back off**, filed in the census under "things mid-flight" when a running pump is a standing decision. Fixed with `keeping.rs`: one atomic writer (temp, `sync_all`, rename) behind all thirty-six files, a `manifest.dat` written **last** and stamped from what the save actually produced so a torn set is detected and rolled back to a hard-linked fallback with the wreck kept under `torn/`, an autosave on a two-minute clock *and* on the orders worth not repeating (marked in `CommandLog::record`, the one gate every order passes), `suspended`/`exiting`/`Destroyed` handlers, and failures collected into a line the player actually sees. The census stopped being a comment — it had **six wrong filenames in it** — and became a table the manifest is checked against. Measured: 6.0 ms for a save of 24 hand-cut blocks, 4.4 ms for one with nothing new in it |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -3515,6 +3516,154 @@ own `Shape::DrillFace`, the ping with the ore in the walls lit and the panel
 reading `COPPER ORE 69 AT 1.4M / 45 IN ROCK`, the same frame at midnight, and
 the same frame again with both switches down.
 
+## Shipped — Stage 54: nothing you did is lost
+
+The ask was a gate rather than a feature: make sure progress and gameplay
+actually save, *"because if you don't have that, the game isn't really a
+game."* So the pack and the spoil heap moved back a place and this round is
+the gate.
+
+Stages 50, 51, 52 and 53 each added a save file, and 52 added a persistence
+*census*. That was the right instinct and it caught one class of bug. Walking
+all 104 fields of `Active` and all 34 save/load pairs in the **live** game —
+rather than the headless `Session` the census test actually walks — turned up
+six more.
+
+### There was no autosave, and no other way out was handled
+
+`App::save_world` was reachable from exactly three places: `F5`, the
+terminal's `SAVE`, and `WindowEvent::CloseRequested`. All three are a
+*cooperative* shutdown the player chooses through the window. `impl
+ApplicationHandler for App` overrode four methods and `suspended` was not one
+of them; there was no `exiting`, no `Destroyed` arm, no `Drop`, no panic hook
+and no signal handling. A crash, an out-of-memory kill, a SIGTERM, a lost GPU
+or a closed lid took the whole session. On the Steam Deck this build targets,
+those are not the exotic ways a session ends. They are the ordinary ones.
+
+It saves itself now: a two-minute clock, and the orders worth not repeating.
+The second half comes off `CommandLog::record` — the one gate every order in
+the game passes through, so it cannot be forgotten by the next stage that adds
+a verb — with `keeping::worth_saving_now` as a pure predicate over the enum
+deciding which of them earns an immediate write. Yes for a sale, a print, a
+crew dispatched, a town founded; no for breaking a block, which is the whole
+of mining and would save on every swing. A save is skipped outright when
+nothing has changed, so standing still writes nothing, and the flag is acted
+on at the top of the next frame rather than in the middle of the verb that set
+it.
+
+### A crash mid-save could leave a save worse than none
+
+`vx_world::save::write_atomically` — temp file, `sync_all`, rename — has
+protected the region files since they existed, and was the **only** such
+writer in the workspace. All 34 sidecar writers used
+`std::fs::File::create` straight onto the destination, which truncates first.
+So an interrupted save left whichever file was open short, and because every
+loader here is deliberately tolerant, a short file is not an error: it is a
+subsystem quietly resetting. `Wallet::load` answers a truncated `wallet.dat`
+by setting your credits to zero and logging a warning nobody reads.
+
+And the *set* was worse than any one file. Thirty-four writes ran one after
+another, any prefix could land, and nothing on the read side ever compared
+them — so an interrupted save could leave your wallet from after a sale beside
+your ore pile from before it. A duplication glitch you reach by pulling the
+plug, which is the class of thing stage 52 was asked to close.
+
+`keeping.rs` now holds one writer, `begin`/`commit`, behind all thirty-six
+files: bytes go to a temporary beside the destination, are pushed to the
+device rather than to the page cache, and only then renamed into place. A
+`Writing` dropped without committing removes its own temporary, so a writer
+that gives up leaves nothing behind.
+
+The set is made atomic by `manifest.dat`, written **last** and stamped from
+what the save *actually produced* rather than from what the writers intended —
+a manifest derived from intention would agree with a save that failed, which
+is the exact failure it exists to catch. A mismatch on load means the
+generation never finished: the wreck is moved to `torn/` for a bug report, the
+hard-linked fallback under `previous/` is renamed back into place, and the
+world loads through the ordinary path. **A world with no manifest is old, not
+torn** — every save written before this stage is in that state, and calling
+them all broken would have done far more damage than the bug being fixed.
+
+The fallback copies the thirty-six ledgers and hard-links the regions. Copies
+for the small ones because it makes the backup independent of damage in place;
+links for the ground because copying a world every couple of minutes is not a
+backup, it is a stall — and a link is safe there precisely because
+`write_atomically` publishes by rename, leaving the old inode for the link to
+hold.
+
+### A failed save was invisible
+
+All 34 arms were `log::error!` and `save_world` returned `()`. The terminal
+printed `WORLD WRITTEN OUT` whether or not a byte had been written. And if
+`WorldSave::create` failed at boot, `save` was `None`, `save_world`
+early-returned, and **the session silently never saved at all**. Failures are
+collected into a `Kept` the caller can see; a save that lost anything is a red
+line on the HUD and a warning in the scrollback; the terminal's line is earned
+and carries the generation and the milliseconds; and a world that cannot be
+saved says so at boot, on screen, once.
+
+### Three things were being lost outright
+
+**The goods a broken container was holding.** `pile.dat` has carried the
+fleet's orphaned stockpile since stage 52 — kept aside for the next container
+you place, so one stray click is not the most expensive mistake in the game.
+The live boot read them back correctly into a throwaway fleet and then grafted
+across `mining.fleet.base = base_pile.base`, dropping the rest on the floor.
+Written every save, binned every load. It hid for the best possible reason:
+`goods_waiting_for_a_container_survive_a_save` passes, and exercises the
+session's path, which was never the one that was broken. There is one
+`keeping::restore_the_fleet` now and both boots call it.
+
+**A cleared garrison.** `Garrisons.cleared` was documented "cleared is
+cleared, for the session", which turned out to be two bugs in one coat: a
+shelter you fought through came back fully manned with its downed holders on
+their feet, and because the capture pay banks to `wallet.dat`, which does
+survive, you could clear it again for the money. It gets `garrisons.dat`. The
+squads themselves stay live-only and should: a firefight mid-save is as
+transient as a slug in the air, and `muster_near` re-derives every squad from
+the bunker's own seed.
+
+**A pump you switched on.** The block persisted in the region file; the switch
+did not. It was filed in the census under "things mid-flight", and that wrong
+bucket is exactly how it survived three consecutive rounds of persistence
+work. A running pump is a standing decision, the same kind of thing as which
+optic you left the dial on. It gets `pumps.dat`, and a position that is no
+longer a pump is dropped rather than kept as a ghost.
+
+Two smaller ones with it: a **hacked watch box's** timers reset although the
+spoofer charge that bought them was saved, so saving wasted a coil — they join
+`intrusion.dat`, beside the charge; and a **marked-but-undispatched area** was
+binned, so `dig.dat` gained the two corners and the chosen method behind a
+version bump that still reads version 1, because a round about not losing
+things must not lose somebody's running crew on the way past.
+
+### The census stopped being a comment
+
+`the_census_covers_every_saved_subsystem` hardcoded eleven names, never read
+`main.rs`'s table and never saw `App::save_world` — it would have stayed green
+if 23 of the 34 live savers were deleted. And the doc table had **six wrong
+filenames** in it: `map.dat` for `explored.dat`, `bank.dat` for `vaults.dat`,
+`ballot.dat` for `elections.dat`, `charter.dat` for `charters.dat`,
+`succession.dat` for `stands.dat`, `electrolysis.dat` for `electrolyser.dat`.
+Six subsystems documented under names that have never existed on a disk, in
+the one table whose whole job is to say what is on the disk.
+
+So `keeping::FILES` is the list, the manifest is written from what a save
+produced, and two tests tie them: one asserts a fresh save's manifest names
+exactly `FILES`, and one parses the doc table out of `main.rs` and compares.
+`intro.rs` already reads `ROADMAP.md` this way, so the trick is in-house — a
+document read by a test is a document that cannot drift.
+
+### Measured
+
+`--keeping` plays it: twenty-four blocks cut by hand, a container broken on
+them, a save, a fallback kept, a save torn on purpose, and the world coming
+back from the generation before it with all twenty-four orphaned goods intact
+and the wreck set aside. **6.0 ms** for that save, **4.4 ms** for one with
+nothing new in it — the first timings this game has ever taken of its own
+save, because there was no instrumentation on that path at all, which is a
+poor position to add an autosave from.
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -3883,19 +4032,26 @@ quit, three more things nobody was writing down, a working infinite-money
 glitch, and a reload that had been serving generated ground over the ground on
 disk.
 
+And 54 was a gate rather than a round: make sure progress actually saves,
+because a game that loses your afternoon is not a game. There was no autosave
+at all, none of the thirty-four ledgers was written safely, a failed save was a
+line in a log nobody opens, and three things — the goods a broken container was
+holding, a cleared shelter, a running pump — were being lost outright, one of
+them written down on every single save and thrown away on every single load.
+
 And 53 took the drill mod — an 80s cage of light on the block under the bit,
 and a sonar ping four metres into the rock around it — and found on the way in
 that this game had never had a selection box at all, nor even a crosshair, and
 that the ray which would have drawn one was already being cast twice a frame
 and thrown away both times.
 
-Three rounds are named now — 54 and 55 are the rest of what 53's note asked
+Three rounds are named now — 55 and 56 are the rest of what 53's note asked
 for, in the order it asked for them:
 
 | Stage | What | Why here |
 |---|---|---|
-| 54 | The pack | Blocks that pop to you as drops, a real player inventory with visible counts, and a carrying weight that **slows you first and hard-stops you second**, upgradeable by an exoskeleton. It is also the fix for the oldest rough edge in the README: the movement system weighs you down by a pile sitting in a container somewhere else entirely. The `load` byte already rides the journal and replay never re-derives it, so repointing it at a real pack costs nothing on the wire |
-| 55 | The spoil heap | You mark a spot, pick a shape — square-base pyramid, spiral tower, straight shaft — and the crew hauls spoil there and stacks it, reusing the mark / choose-a-method / dispatch flow and the job board. The expensive one, and honestly so: **nothing in `vx-agent` can place a block.** Not a missing function, a missing concept — `JobKind` has two behaviourless variants, a `Job` carries only a region with nowhere to say *what to put there*, `DroneState` has no build state, and `REACH_OFFSETS` is shaped entirely by the rules of cutting. Stacked blocks are ground and ground is the hash, so it is a journal order and `VERSION` 32 |
+| 55 | The pack | Blocks that pop to you as drops, a real player inventory with visible counts, and a carrying weight that **slows you first and hard-stops you second**, upgradeable by an exoskeleton. It is also the fix for the oldest rough edge in the README: the movement system weighs you down by a pile sitting in a container somewhere else entirely. The `load` byte already rides the journal and replay never re-derives it, so repointing it at a real pack costs nothing on the wire |
+| 56 | The spoil heap | You mark a spot, pick a shape — square-base pyramid, spiral tower, straight shaft — and the crew hauls spoil there and stacks it, reusing the mark / choose-a-method / dispatch flow and the job board. The expensive one, and honestly so: **nothing in `vx-agent` can place a block.** Not a missing function, a missing concept — `JobKind` has two behaviourless variants, a `Job` carries only a region with nowhere to say *what to put there*, `DroneState` has no build state, and `REACH_OFFSETS` is shaped entirely by the rules of cutting. Stacked blocks are ground and ground is the hash, so it is a journal order and `VERSION` 32 |
 | 49b | The drone you can lose | A machine cannot collide with anything, so it cannot crash. Integrity beside `wear.rs` and on the oracle for the same reason wear is; the flier's auto-climb off under manual control so it can be flown into a cliff, while the digger keeps the standability rule that stops a hand-driven drone stranding itself; gunfire through `segment_hits_box`; a persistent, mapped wreck you walk out to and salvage or rebuild; and `garage.rs`'s first `lose` mutator, since `grant` only ever added |
 
 Beyond those the board holds the outstanding engineering below, and whatever
@@ -3903,7 +4059,7 @@ the next note says.
 
 ## The feature map
 
-The whole game at a glance, as of stage 53.
+The whole game at a glance, as of stage 54.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -4028,6 +4184,12 @@ uphill and downwind, every wooden thing burnable wherever it stands and
 ancient wood burnable nowhere) and the succession clock behind it (only
 disturbed cells stored, cut or burnt alike, coming back through meadow,
 thicket and mixed stand as the tree the seed always described);
+saves you cannot lose (an autosave on a clock and on the orders worth not
+repeating, every ledger written to a temporary and renamed into place, a
+manifest written last so a set torn by a crash is detected and rolled back to
+a kept fallback rather than silently loaded, a failed save that says so on
+screen, and the census turned from a comment with six wrong filenames in it
+into a table a test compares against what a save actually produced);
 the drill mod (the selection box this game never had — twelve opaque bars of
 cyan light standing off the aimed block, dim when you are looking and
 overbright when the bit is in, with a plane of light rising through the block
@@ -4117,7 +4279,12 @@ notable ones being: saves store a whole chunk snapshot per modified chunk;
 water is alpha-blended without depth sorting; only one drone and one flier are
 ever created; selling is not on the journal, so a session replays to the same
 ground but not to the same books; the played session steers rather than paths,
-so a route with a doorway in it needs the doorway named; the sonar's markers
+so a route with a doorway in it needs the doorway named; a save costs about
+six milliseconds, which is most of a frame at sixty, so an autosave is a small
+visible hitch and threading it is its own round; a region damaged *in place* by
+the disk is damaged in the kept fallback too, since that holds regions by hard
+link; SIGTERM and SIGINT are still unhandled, so a `kill` loses whatever the
+autosave has not written; the sonar's markers
 cannot be drawn through rock, because the object pass is opaque geometry with
 a depth test, so buried ore is reported on the panel rather than lit in the
 world; and there is no player-carried inventory, so everything routes through

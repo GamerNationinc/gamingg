@@ -307,8 +307,7 @@ impl Wells {
     }
 
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("wells.dat"))?);
+        let mut file = crate::keeping::begin(directory, "wells.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         file.write_all(&(self.holes.len() as u32).to_le_bytes())?;
@@ -334,7 +333,7 @@ impl Wells {
             file.write_all(&hole.total_drill.to_le_bytes())?;
             file.write_all(&hole.pumped_for.to_le_bytes())?;
         }
-        file.flush()
+        file.commit()
     }
 
     /// Load the holes, tolerating absence and damage.

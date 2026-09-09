@@ -49,8 +49,7 @@ pub struct Whereabouts {
 
 /// Write it to `whereabouts.dat`.
 pub fn save(at: Whereabouts, directory: &Path) -> std::io::Result<()> {
-    let mut file =
-        std::io::BufWriter::new(std::fs::File::create(directory.join("whereabouts.dat"))?);
+    let mut file = crate::keeping::begin(directory, "whereabouts.dat")?;
     file.write_all(MAGIC)?;
     file.write_all(&VERSION.to_le_bytes())?;
     file.write_all(&at.position.x.to_le_bytes())?;
@@ -58,7 +57,7 @@ pub fn save(at: Whereabouts, directory: &Path) -> std::io::Result<()> {
     file.write_all(&at.position.z.to_le_bytes())?;
     file.write_all(&at.yaw.to_le_bytes())?;
     file.write_all(&at.pitch.to_le_bytes())?;
-    file.flush()
+    file.commit()
 }
 
 /// Read it back, tolerating absence and damage.

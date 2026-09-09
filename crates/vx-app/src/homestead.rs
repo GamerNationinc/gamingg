@@ -79,8 +79,7 @@ impl Homestead {
     }
 
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("homestead.dat"))?);
+        let mut file = crate::keeping::begin(directory, "homestead.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
 
@@ -98,7 +97,7 @@ impl Homestead {
         }
         write_pile(&mut file, &self.chest)?;
         write_pile(&mut file, &self.mailbox)?;
-        file.flush()
+        file.commit()
     }
 
     pub fn load(&mut self, directory: &Path) {

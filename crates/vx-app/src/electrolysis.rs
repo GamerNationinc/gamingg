@@ -221,8 +221,7 @@ impl Electrolyser {
     }
 
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("electrolyser.dat"))?);
+        let mut file = crate::keeping::begin(directory, "electrolyser.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         match self.at {
@@ -234,7 +233,7 @@ impl Electrolyser {
             }
             None => file.write_all(&[0u8])?,
         }
-        file.flush()
+        file.commit()
     }
 
     /// Load where the machine stands. A run in progress is not persisted —

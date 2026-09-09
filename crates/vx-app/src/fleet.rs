@@ -54,7 +54,7 @@ const MAX_SCAN_DEPTH: i32 = 4_096;
 /// Write the fliers, the scanner's reach and every survey to `fleet.dat`.
 pub fn save(fleet: &Fleet, directory: &Path) -> std::io::Result<()> {
     let air = fleet.snapshot();
-    let mut file = std::io::BufWriter::new(std::fs::File::create(directory.join("fleet.dat"))?);
+    let mut file = crate::keeping::begin(directory, "fleet.dat")?;
     file.write_all(MAGIC)?;
     file.write_all(&VERSION.to_le_bytes())?;
     file.write_all(&air.scan_depth.to_le_bytes())?;
@@ -89,7 +89,7 @@ pub fn save(fleet: &Fleet, directory: &Path) -> std::io::Result<()> {
             file.write_all(&hover.to_le_bytes())?;
         }
     }
-    file.flush()
+    file.commit()
 }
 
 /// Read it back, tolerating absence and damage.

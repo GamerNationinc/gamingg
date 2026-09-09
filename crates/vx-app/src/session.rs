@@ -123,6 +123,8 @@ pub struct Session {
     pub drillmod: crate::drillmod::Switches,
     /// The last sonar reading, so a fixture can photograph one.
     pub ping: Option<crate::sonar::Reading>,
+    /// Which save this session is on, for the manifest.
+    pub generation: u64,
     /// Ticks the session has advanced.
     pub tick: u64,
     /// Blocks that came out of the ground with nowhere to go. The bug this
@@ -174,6 +176,7 @@ impl Session {
             digging: None,
             drillmod: crate::drillmod::Switches::default(),
             ping: None,
+            generation: 0,
             tick: 0,
             lost: 0,
             last_move: None,
@@ -204,6 +207,7 @@ impl Session {
         crate::dig::save(&self.mining, root)?;
         self.garage.save(root)?;
         self.drillmod.save(root)?;
+        crate::pumps::save(&[], root)?;
         crate::whereabouts::save(
             crate::whereabouts::Whereabouts {
                 position: self.player.position,
@@ -212,6 +216,11 @@ impl Session {
             },
             root,
         )?;
+        // The stamp, last, exactly as the live game writes it: a session that
+        // sealed differently from the game would be a session testing a
+        // different save format.
+        self.generation += 1;
+        crate::keeping::seal(root, self.generation)?;
         Ok(())
     }
 
@@ -240,6 +249,17 @@ impl Session {
             session.pitch = at.pitch;
         }
         session.drillmod.load(root);
+        // Refuse a save that never finished writing, exactly as the live boot
+        // does — one discipline, not two.
+        if let crate::keeping::Verdict::Torn { generation, disagreed } =
+            crate::keeping::inspect(root)
+        {
+            log::warn!("save {generation} did not finish ({}); falling back", disagreed.join(", "));
+            let _ = crate::keeping::roll_back(root);
+        }
+        if let crate::keeping::Verdict::Whole { generation } = crate::keeping::inspect(root) {
+            session.generation = generation;
+        }
         // Pull the saved ground back in place of the generated ground. The
         // same free function the live game's boot uses, so a chunk that was
         // dug in the last session comes back dug.
@@ -272,12 +292,13 @@ impl Session {
         session.skills.load(root);
         session.economy.load(root);
         session.mining.tank.load(root);
-        crate::pile::load(&mut session.mining.fleet, root);
-        crate::fleet::load(&mut session.mining.fleet, root);
         session.garage.load(root);
-        // Last, and with the world: restoring a dispatch re-pins its ground,
-        // which needs chunks that are already back in place.
-        crate::dig::load(&mut session.mining, &mut session.world, root);
+        // The pile, the air side and the crew, in the one order that works —
+        // and through the same function the live game boots with, because
+        // this having been its own hand-written copy is exactly how the live
+        // one came to drop the goods a broken container was holding. See
+        // `keeping::restore_the_fleet`.
+        crate::keeping::restore_the_fleet(&mut session.mining, &mut session.world, root);
         Ok(session)
     }
 
@@ -2200,7 +2221,7 @@ mod tests {
     /// module docs is the human-readable half of the same promise.
     #[test]
     fn the_census_covers_every_saved_subsystem() {
-        const EXPECTED: [&str; 11] = [
+        const EXPECTED: [&str; 13] = [
             "log.dat",
             "wallet.dat",
             "player.dat",
@@ -2212,6 +2233,8 @@ mod tests {
             "garage.dat",
             "whereabouts.dat",
             "drillmod.dat",
+            "pumps.dat",
+            "manifest.dat",
         ];
 
         let directory = scratch("census");
@@ -2240,6 +2263,41 @@ mod tests {
                  then add it here and to main.rs's table"
             );
         }
+    }
+
+    /// **A patch you marked out but had not sent anybody at survives.**
+    ///
+    /// `dig.dat` carried a *running* dispatch from stage 52 and nothing else,
+    /// so the two corners you picked by eye — which is a decision, and the
+    /// step every dispatch starts from — were binned by the save that was
+    /// meant to be protecting them.
+    #[test]
+    fn a_patch_you_marked_but_never_dug_survives_a_save() {
+        let directory = scratch("marked");
+        let mut session = ready();
+        let at = session.player.position;
+        let corner = BlockPos::new(at.x.floor() as i32 + 3, at.y.floor() as i32 - 1, at.z.floor() as i32);
+        let far = BlockPos::new(corner.x + 4, corner.y - 2, corner.z + 4);
+        session.mining.mark(&mut session.world, corner);
+        session.mining.mark(&mut session.world, far);
+        let (marked, _) = session.mining.marked();
+        assert_eq!(marked, [corner, far], "the fixture did not mark anything");
+        let area = session.mining.area().expect("two corners make an area");
+
+        session.save_to(&directory).expect("save");
+        drop(session);
+
+        let reloaded = Session::load_from(&directory).expect("load");
+        assert_eq!(
+            reloaded.mining.marked().0,
+            [corner, far],
+            "the corners were binned by the save"
+        );
+        assert_eq!(
+            reloaded.mining.area(),
+            Some(area),
+            "the area came back as a different area"
+        );
     }
 
     /// Where you were standing survives a save.

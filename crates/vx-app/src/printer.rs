@@ -511,8 +511,7 @@ impl Printer {
     }
 
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("printer.dat"))?);
+        let mut file = crate::keeping::begin(directory, "printer.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         // Where it stands persists; a half-finished print does not. The
@@ -527,7 +526,7 @@ impl Printer {
             }
             None => file.write_all(&[0u8; 13])?,
         }
-        file.flush()
+        file.commit()
     }
 
     pub fn load(&mut self, directory: &Path) {

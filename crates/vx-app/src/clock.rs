@@ -191,11 +191,11 @@ const SEASON_SKY: f32 = 0.34;
 
 /// Write the hour beside the world save.
 pub fn save(time: TimeOfDay, directory: &Path) -> std::io::Result<()> {
-    let mut file = std::io::BufWriter::new(std::fs::File::create(directory.join("clock.dat"))?);
+    let mut file = crate::keeping::begin(directory, "clock.dat")?;
     file.write_all(MAGIC)?;
     file.write_all(&VERSION.to_le_bytes())?;
     file.write_all(&time.fraction().to_le_bytes())?;
-    file.flush()
+    file.commit()
 }
 
 /// Read it back, tolerating absence and damage — a broken clock is dawn,

@@ -59,7 +59,7 @@ const MAX_ROWS: u32 = 4_096;
 /// file simply has none, which is exactly true of a save written before the
 /// goods were kept.
 pub fn save(fleet: &Fleet, directory: &Path) -> std::io::Result<()> {
-    let mut file = std::io::BufWriter::new(std::fs::File::create(directory.join("pile.dat"))?);
+    let mut file = crate::keeping::begin(directory, "pile.dat")?;
     file.write_all(MAGIC)?;
     file.write_all(&VERSION.to_le_bytes())?;
     match &fleet.base {
@@ -79,7 +79,7 @@ pub fn save(fleet: &Fleet, directory: &Path) -> std::io::Result<()> {
         None => file.write_all(&[0u8])?,
     }
     write_rows(&mut file, fleet.orphaned())?;
-    file.flush()
+    file.commit()
 }
 
 /// A stockpile's rows. Off a `BTreeMap`, so already sorted and stable.

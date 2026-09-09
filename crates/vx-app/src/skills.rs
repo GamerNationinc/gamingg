@@ -169,8 +169,7 @@ impl Skills {
 
     /// Write the sheet beside the world save.
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("player.dat"))?);
+        let mut file = crate::keeping::begin(directory, "player.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         file.write_all(&(self.xp.len() as u32).to_le_bytes())?;
@@ -180,7 +179,7 @@ impl Skills {
             file.write_all(bytes)?;
             file.write_all(&xp.to_le_bytes())?;
         }
-        file.flush()
+        file.commit()
     }
 
     /// Load the sheet, tolerating absence and damage — a corrupt file is a

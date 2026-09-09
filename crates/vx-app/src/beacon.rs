@@ -298,8 +298,7 @@ impl Ledger {
     }
 
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("postings.dat"))?);
+        let mut file = crate::keeping::begin(directory, "postings.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
 
@@ -321,7 +320,7 @@ impl Ledger {
             file.write_all(&x.to_le_bytes())?;
             file.write_all(&z.to_le_bytes())?;
         }
-        file.flush()
+        file.commit()
     }
 
     /// Read the ledger back, tolerating absence and damage: a broken sheet is

@@ -45,7 +45,14 @@ use vx_world::World;
 use crate::mining::Mining;
 
 const MAGIC: &[u8; 4] = b"VXDG";
-const VERSION: u32 = 1;
+/// Version 2 adds the marked-but-undispatched area — the corners you picked
+/// by eye before sending anybody at them, which a save used to bin.
+///
+/// A version-1 file still loads: the reader takes the dispatch and defaults
+/// the mark. Refusing an old file would mean this stage — whose whole point is
+/// that nothing is lost — losing somebody's running crew on the way past.
+const VERSION: u32 = 2;
+const VERSION_WITHOUT_THE_MARK: u32 = 1;
 
 /// Caps, so a damaged file cannot ask for an enormous allocation and cannot
 /// assert a crew or a board the game could never have produced.
@@ -68,17 +75,31 @@ const MAX_CAPACITY: u64 = 1_000_000;
 /// behind, so a dispatch that was cancelled stays cancelled instead of being
 /// resurrected by a stale file from two saves ago.
 pub fn save(mining: &Mining, directory: &Path) -> std::io::Result<()> {
-    let mut file = std::io::BufWriter::new(std::fs::File::create(directory.join("dig.dat"))?);
+    let mut file = crate::keeping::begin(directory, "dig.dat")?;
+    write_dig(mining, &mut file)?;
+    file.commit()
+}
+
+fn write_dig(mining: &Mining, file: &mut impl Write) -> std::io::Result<()> {
     file.write_all(MAGIC)?;
     file.write_all(&VERSION.to_le_bytes())?;
+    // The mark first, so it is written whether or not anybody is digging —
+    // the two are independent, and the commonest case for a mark to matter is
+    // exactly the case where there is no dispatch yet.
+    let (corners, chosen) = mining.marked();
+    file.write_all(&(corners.len().min(2) as u8).to_le_bytes())?;
+    for corner in corners.iter().take(2) {
+        write_pos(file, *corner)?;
+    }
+    file.write_all(&(chosen as u32).to_le_bytes())?;
     let Some(dig) = mining.operation_snapshot() else {
-        return file.write_all(&[0u8]).and_then(|()| file.flush());
+        return file.write_all(&[0u8]);
     };
     file.write_all(&[1u8])?;
-    write_pos(&mut file, dig.home)?;
+    write_pos(file, dig.home)?;
     file.write_all(&dig.fields_built.to_le_bytes())?;
-    write_option_u32(&mut file, dig.controlled.map(|index| index as u32))?;
-    write_pile(&mut file, &dig.stockpile)?;
+    write_option_u32(file, dig.controlled.map(|index| index as u32))?;
+    write_pile(file, &dig.stockpile)?;
 
     file.write_all(&(dig.board.entries.len() as u32).to_le_bytes())?;
     file.write_all(&dig.board.next_id.to_le_bytes())?;
@@ -88,29 +109,29 @@ pub fn save(mining: &Mining, directory: &Path) -> std::io::Result<()> {
             JobKind::Access => 0u8,
             JobKind::Extract => 1,
         }])?;
-        write_pos(&mut file, job.region.min)?;
-        write_pos(&mut file, job.region.max)?;
+        write_pos(file, job.region.min)?;
+        write_pos(file, job.region.max)?;
         file.write_all(&job.priority.to_le_bytes())?;
-        write_option_u32(&mut file, claimed_by.map(|drone| drone.0))?;
+        write_option_u32(file, claimed_by.map(|drone| drone.0))?;
     }
 
     file.write_all(&(dig.drones.len() as u32).to_le_bytes())?;
     for drone in &dig.drones {
         file.write_all(&drone.id.0.to_le_bytes())?;
-        write_pos(&mut file, drone.position)?;
-        write_pos(&mut file, drone.previous_position)?;
-        write_state(&mut file, drone.state)?;
-        write_pile(&mut file, &drone.cargo)?;
+        write_pos(file, drone.position)?;
+        write_pos(file, drone.previous_position)?;
+        write_state(file, drone.state)?;
+        write_pile(file, &drone.cargo)?;
         file.write_all(&drone.capacity.to_le_bytes())?;
         file.write_all(&drone.grade.to_le_bytes())?;
-        write_option_u64(&mut file, drone.job.map(|job| job.0))?;
+        write_option_u64(file, drone.job.map(|job| job.0))?;
         file.write_all(&(drone.denied.len() as u32).to_le_bytes())?;
         for pos in &drone.denied {
-            write_pos(&mut file, *pos)?;
+            write_pos(file, *pos)?;
         }
-        write_option_u64(&mut file, drone.denied_job.map(|job| job.0))?;
+        write_option_u64(file, drone.denied_job.map(|job| job.0))?;
     }
-    file.flush()
+    Ok(())
 }
 
 /// Read it back and put the crew to work, tolerating absence and damage.
@@ -120,13 +141,30 @@ pub fn save(mining: &Mining, directory: &Path) -> std::io::Result<()> {
 pub fn load(mining: &mut Mining, world: &mut World, directory: &Path) {
     let path = directory.join("dig.dat");
     match read(&path) {
-        Ok(Some(dig)) => mining.restore_operation(world, dig),
+        Ok(Some(stored)) => {
+            // The mark first: `restore_operation` takes the ground, and
+            // `Mining::mark` refuses to run once a dispatch exists — which is
+            // the same rule the live game plays by, so putting them back in
+            // the other order would silently drop the mark.
+            mining.restore_mark(world, &stored.corners, stored.chosen);
+            if let Some(dig) = stored.dig {
+                mining.restore_operation(world, dig);
+            }
+        }
         Ok(None) => {}
         Err(error) => log::warn!("ignoring damaged dig at {}: {error}", path.display()),
     }
 }
 
-fn read(path: &Path) -> std::io::Result<Option<OperationSnapshot>> {
+/// What `dig.dat` holds: an area you marked, and a crew you sent, either of
+/// which can be present without the other.
+struct StoredDig {
+    corners: Vec<BlockPos>,
+    chosen: usize,
+    dig: Option<OperationSnapshot>,
+}
+
+fn read(path: &Path) -> std::io::Result<Option<StoredDig>> {
     let mut file = match std::fs::File::open(path) {
         Ok(file) => std::io::BufReader::new(file),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -137,13 +175,23 @@ fn read(path: &Path) -> std::io::Result<Option<OperationSnapshot>> {
     if &magic != MAGIC {
         return Err(std::io::Error::other("not a dig file"));
     }
-    if read_u32(&mut file)? != VERSION {
-        return Ok(None);
-    }
+    let version = read_u32(&mut file)?;
+    // A version-1 file has no mark in it, and that is fine: it loads with an
+    // empty one. Refusing it would mean this round, whose whole point is that
+    // nothing is lost, losing somebody's running crew on the way past.
+    let (corners, chosen) = match version {
+        VERSION => read_mark(&mut file)?,
+        VERSION_WITHOUT_THE_MARK => (Vec::new(), 0),
+        _ => return Ok(None),
+    };
     let mut present = [0u8; 1];
     file.read_exact(&mut present)?;
     if present[0] == 0 {
-        return Ok(None);
+        return Ok(Some(StoredDig {
+            corners,
+            chosen,
+            dig: None,
+        }));
     }
 
     let home = read_pos(&mut file)?;
@@ -227,14 +275,34 @@ fn read(path: &Path) -> std::io::Result<Option<OperationSnapshot>> {
         return Err(std::io::Error::other("the wheel is held by nobody"));
     }
 
-    Ok(Some(OperationSnapshot {
-        board: BoardSnapshot { entries, next_id },
-        stockpile,
-        home,
-        drones,
-        fields_built,
-        controlled,
+    Ok(Some(StoredDig {
+        corners,
+        chosen,
+        dig: Some(OperationSnapshot {
+            board: BoardSnapshot { entries, next_id },
+            stockpile,
+            home,
+            drones,
+            fields_built,
+            controlled,
+        }),
     }))
+}
+
+/// The marked corners and the chosen method. Two corners at most, because
+/// two corners is what an area is.
+fn read_mark(file: &mut impl Read) -> std::io::Result<(Vec<BlockPos>, usize)> {
+    let mut count = [0u8; 1];
+    file.read_exact(&mut count)?;
+    if count[0] > 2 {
+        return Err(std::io::Error::other("an area with more than two corners"));
+    }
+    let mut corners = Vec::with_capacity(count[0] as usize);
+    for _ in 0..count[0] {
+        corners.push(read_pos(file)?);
+    }
+    let chosen = read_u32(file)? as usize;
+    Ok((corners, chosen))
 }
 
 fn write_pos(file: &mut impl Write, pos: BlockPos) -> std::io::Result<()> {

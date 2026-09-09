@@ -167,13 +167,12 @@ impl Dose {
 
     /// Write the dose to `dose.dat`.
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("dose.dat"))?);
+        let mut file = crate::keeping::begin(directory, "dose.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         file.write_all(&self.rads.to_le_bytes())?;
         file.write_all(&self.since_burn.to_le_bytes())?;
-        file.flush()
+        file.commit()
     }
 
     /// Read it back, tolerating absence and damage.

@@ -485,8 +485,7 @@ impl Register {
     }
 
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("elections.dat"))?);
+        let mut file = crate::keeping::begin(directory, "elections.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
 
@@ -524,7 +523,7 @@ impl Register {
             file.write_all(&z.to_le_bytes())?;
             file.write_all(&day.to_le_bytes())?;
         }
-        file.flush()
+        file.commit()
     }
 
     pub fn load(&mut self, directory: &Path) {

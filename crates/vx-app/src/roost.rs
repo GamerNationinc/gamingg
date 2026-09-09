@@ -126,6 +126,26 @@ impl Roost {
         }
     }
 
+    /// The three hack deadlines, for [`crate::intrusion`] to write down.
+    ///
+    /// Blinding, silencing or tapping a watch box costs a spoofer charge, and
+    /// the charge is saved — `intrusion.dat` has carried the kit since stage
+    /// 15. The *effect* was not, so until stage 54 a save between placing a
+    /// hack and using it charged you for nothing: you paid the coil, quit,
+    /// came back, and the box was watching again. Paying across a save and
+    /// not receiving across the same save is the asymmetry, and it is the
+    /// reason these three numbers are worth eight bytes each.
+    pub fn hacks(&self) -> (u64, u64, u64) {
+        (self.blinded_until, self.silenced_until, self.tapped_until)
+    }
+
+    /// Put them back.
+    pub fn restore_hacks(&mut self, (blinded, silenced, tapped): (u64, u64, u64)) {
+        self.blinded_until = blinded;
+        self.silenced_until = silenced;
+        self.tapped_until = tapped;
+    }
+
     /// Whether the eye is in the sky right now.
     pub fn aloft(&self) -> bool {
         !matches!(self.state, State::Boxed { .. })

@@ -818,8 +818,7 @@ impl Economy {
     }
 
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("economy.dat"))?);
+        let mut file = crate::keeping::begin(directory, "economy.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
 
@@ -856,7 +855,7 @@ impl Economy {
                 Owner::Mail => 2,
             }])?;
         }
-        file.flush()
+        file.commit()
     }
 
     /// Read the books back, tolerating absence and damage.

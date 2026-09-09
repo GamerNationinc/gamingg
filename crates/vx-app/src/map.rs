@@ -150,7 +150,7 @@ impl MapState {
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
         // Written atomically enough for a cosmetic file: a torn write is
         // caught by the tolerant loader and simply forgotten.
-        let mut file = std::io::BufWriter::new(std::fs::File::create(directory.join("explored.dat"))?);
+        let mut file = crate::keeping::begin(directory, "explored.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         file.write_all(&(self.explored.len() as u64).to_le_bytes())?;
@@ -161,7 +161,7 @@ impl MapState {
             file.write_all(&chunk.x.to_le_bytes())?;
             file.write_all(&chunk.z.to_le_bytes())?;
         }
-        file.flush()
+        file.commit()
     }
 
     /// Load the explored set, tolerating absence and damage.

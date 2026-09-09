@@ -98,8 +98,7 @@ impl Wallet {
 
     /// Write the wallet beside the world save.
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("wallet.dat"))?);
+        let mut file = crate::keeping::begin(directory, "wallet.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         file.write_all(&self.credits.to_le_bytes())?;
@@ -110,7 +109,7 @@ impl Wallet {
             file.write_all(bytes)?;
             file.write_all(&level.to_le_bytes())?;
         }
-        file.flush()
+        file.commit()
     }
 
     /// Load the wallet, tolerating absence and damage.

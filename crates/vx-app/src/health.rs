@@ -183,13 +183,12 @@ impl Health {
     }
 
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("health.dat"))?);
+        let mut file = crate::keeping::begin(directory, "health.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         file.write_all(&[self.hits])?;
         file.write_all(&[self.medkits])?;
-        file.flush()
+        file.commit()
     }
 
     /// Read it back. A missing or damaged file is a whole player, which is

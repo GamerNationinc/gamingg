@@ -189,13 +189,12 @@ impl Reputation {
     }
 
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("reputation.dat"))?);
+        let mut file = crate::keeping::begin(directory, "reputation.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         file.write_all(&self.compact.to_le_bytes())?;
         file.write_all(&self.holdouts.to_le_bytes())?;
-        file.flush()
+        file.commit()
     }
 
     /// Read it back. Absence or damage is a stranger nobody has an opinion

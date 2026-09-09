@@ -37,7 +37,10 @@ use vx_world::town::plan::Tier;
 use crate::skills;
 
 const MAGIC: &[u8; 4] = b"VXIN";
-const VERSION: u32 = 1;
+/// Version 2 adds the watch box's three hack deadlines. A version-1 file
+/// still loads, with no hacks standing — see [`Intrusions::save`].
+const VERSION: u32 = 2;
+const VERSION_WITHOUT_THE_HACKS: u32 = 1;
 
 /// The coil a small airframe takes: the kestrel, and nothing heavier.
 pub const LIGHT_COIL: &str = "light coil";
@@ -313,6 +316,11 @@ pub struct Intrusions {
     /// nobody an old save: this file is new, and a new file needs no
     /// migration.
     pub roost_at: Option<BlockPos>,
+    /// The town watch box's three hack deadlines, carried across a save.
+    ///
+    /// They belong to the roost, and they live here because the spoofer
+    /// charge that bought them lives here. See [`Intrusions::save`].
+    pub hacks: (u64, u64, u64),
 }
 
 impl Intrusions {
@@ -382,9 +390,20 @@ impl Intrusions {
         self.impounded.take()
     }
 
+    /// Write the kit down.
+    ///
+    /// From stage 54 that includes the watch box's three hack deadlines. They
+    /// are the roost's numbers, not the kit's, but they belong in this file:
+    /// the *charge* that bought them has been saved here since stage 15, and
+    /// splitting a purchase from what it purchased across two files is how a
+    /// player came to pay a coil and get nothing for it.
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("intrusion.dat"))?);
+        let mut file = crate::keeping::begin(directory, "intrusion.dat")?;
+        self.write_kit(&mut file)?;
+        file.commit()
+    }
+
+    fn write_kit(&self, file: &mut impl Write) -> std::io::Result<()> {
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         // A job in flight is not saved: it is seconds of standing still, and
@@ -400,15 +419,20 @@ impl Intrusions {
             }
             None => file.write_all(&[0u8; 13])?,
         }
-        file.flush()
+        let (blinded, silenced, tapped) = self.hacks;
+        file.write_all(&blinded.to_le_bytes())?;
+        file.write_all(&silenced.to_le_bytes())?;
+        file.write_all(&tapped.to_le_bytes())?;
+        Ok(())
     }
 
     pub fn load(&mut self, directory: &Path) {
         let path = directory.join("intrusion.dat");
         match read_intrusions(&path) {
-            Ok(Some((owed, roost_at))) => {
+            Ok(Some((owed, roost_at, hacks))) => {
                 self.impounded = (owed > 0).then_some(owed);
                 self.roost_at = roost_at;
+                self.hacks = hacks;
             }
             Ok(None) => {}
             Err(error) => {
@@ -419,7 +443,7 @@ impl Intrusions {
     }
 }
 
-type Saved = (u64, Option<BlockPos>);
+type Saved = (u64, Option<BlockPos>, (u64, u64, u64));
 
 fn read_intrusions(path: &Path) -> std::io::Result<Option<Saved>> {
     let mut file = match std::fs::File::open(path) {
@@ -434,7 +458,8 @@ fn read_intrusions(path: &Path) -> std::io::Result<Option<Saved>> {
     }
     let mut word = [0u8; 4];
     file.read_exact(&mut word)?;
-    if u32::from_le_bytes(word) != VERSION {
+    let version = u32::from_le_bytes(word);
+    if version != VERSION && version != VERSION_WITHOUT_THE_HACKS {
         return Err(std::io::Error::other("unknown version"));
     }
     let mut owed = [0u8; 8];
@@ -447,7 +472,19 @@ fn read_intrusions(path: &Path) -> std::io::Result<Option<Saved>> {
         let word = |n: usize| i32::from_le_bytes([at[n], at[n + 1], at[n + 2], at[n + 3]]);
         BlockPos::new(word(0), word(4), word(8))
     });
-    Ok(Some((u64::from_le_bytes(owed), roost_at)))
+    // A version-1 file simply has no hacks in it, and none standing is the
+    // honest reading: it was written by a build that could not keep them.
+    let mut hacks = (0u64, 0u64, 0u64);
+    if version == VERSION {
+        let mut stamp = [0u8; 8];
+        file.read_exact(&mut stamp)?;
+        hacks.0 = u64::from_le_bytes(stamp);
+        file.read_exact(&mut stamp)?;
+        hacks.1 = u64::from_le_bytes(stamp);
+        file.read_exact(&mut stamp)?;
+        hacks.2 = u64::from_le_bytes(stamp);
+    }
+    Ok(Some((u64::from_le_bytes(owed), roost_at, hacks)))
 }
 
 #[cfg(test)]

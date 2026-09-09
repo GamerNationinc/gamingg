@@ -302,8 +302,7 @@ impl Arsenal {
 
     /// Write the arsenal beside the world save.
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("arsenal.dat"))?);
+        let mut file = crate::keeping::begin(directory, "arsenal.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         file.write_all(&[u8::from(self.owned)])?;
@@ -321,7 +320,7 @@ impl Arsenal {
             file.write_all(&(crash.good as u32).to_le_bytes())?;
             file.write_all(&crash.amount.to_le_bytes())?;
         }
-        file.flush()
+        file.commit()
     }
 
     /// Load the arsenal, tolerating absence and damage.

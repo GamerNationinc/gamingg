@@ -42,27 +42,37 @@
 //! | The kestrel's contact report | `marks.dat` |
 //! | What the deep ore has done to you | `dose.dat` |
 //! | Where you left the drill mod's two switches | `drillmod.dat` |
+//! | Which shelters you have finished with | `garrisons.dat` |
+//! | Which pumps you left running | `pumps.dat` |
+//! | The stamp that makes the set one save | `manifest.dat` |
 //! | Your condition | `health.dat` |
 //! | Standing with the Compact and the holdouts | `reputation.dat` |
-//! | Town vaults | `bank.dat` |
+//! | Town vaults | `vaults.dat` |
 //! | Who knows you, and how well | `friends.dat` |
 //! | Contracts taken and settled | `postings.dat` |
-//! | The map you have painted in | `map.dat` |
+//! | The map you have painted in | `explored.dat` |
 //! | The hour | `clock.dat` |
-//! | Warrants, elections, charters | `warrants.dat`, `ballot.dat`, `charter.dat` |
+//! | Warrants, elections, charters | `warrants.dat`, `elections.dat`, `charters.dat` |
 //! | The launcher and its satchel | `arsenal.dat` |
-//! | The spoofer kit, the fabricator, the optics, the electrolyser | `intrusion.dat`, `printer.dat`, `optics.dat`, `electrolysis.dat` |
+//! | The spoofer kit and the hacks it is holding, the fabricator, the optics, the electrolyser | `intrusion.dat`, `printer.dat`, `optics.dat`, `electrolyser.dat` |
 //! | The arcade cartridge and its record | `arcade.dat` |
-//! | Stands growing back after a burn | `succession.dat` |
+//! | Stands growing back after a burn | `stands.dat` |
 //!
 //! **Deliberately live-only**, and why:
 //!
-//! - `shots`, `falls`, `water`, `fires`, `pumps` — things mid-flight. The
-//!   journal re-derives them from tick zero, and a slug saved in the air would
-//!   land twice.
-//! - `posse`, `garrisons`, `dark` — they read the world and spend health;
-//!   they never write a block, so the hash never hears about them and a fresh
-//!   callout on load is the honest outcome.
+//! - `shots`, `falls`, `water`, `fires` — things mid-flight. The journal
+//!   re-derives them from tick zero, and a slug saved in the air would land
+//!   twice. **`pumps` used to be on this line and did not belong**: a pump you
+//!   switched on is a standing decision, not a thing in the air, and filing it
+//!   here is how it survived three rounds of persistence work coming back off
+//!   every time. It has `pumps.dat` now; only `pump_step`, which is genuinely
+//!   mid-stroke, stayed behind.
+//! - `posse`, `dark`, and a garrison's *squads* — they read the world and
+//!   spend health; they never write a block, so the hash never hears about
+//!   them and a fresh callout on load is the honest outcome. A garrison's
+//!   **cleared list** is a different thing and is saved: re-mustering a
+//!   shelter you fought through undoes the afternoon, and since the capture
+//!   pay is banked it also made a reload a payday.
 //! - `cut_rate` — a measurement of *this session*, not a fact about the world.
 //! - `movement`, `digging`, `aimed`, `last_move` — stance, a half-drilled
 //!   block, a ray cast this frame and a held key. You arrive stood up and
@@ -113,6 +123,7 @@ mod hud;
 mod intro;
 mod intrusion;
 mod journal;
+mod keeping;
 mod map;
 mod mining;
 mod people;
@@ -127,6 +138,7 @@ mod office;
 mod optics;
 mod osk;
 mod printer;
+mod pumps;
 mod rain;
 mod reputation;
 mod rig;
@@ -195,6 +207,7 @@ const WARD_SLOT: usize = 17;
 const OSK_SLOT: usize = 18;
 /// The drill sonar's scope, up for a few seconds after a ping.
 const SCOPE_SLOT: usize = 19;
+use keeping::Kept;
 use mining::Mining;
 use streaming::{chunk_at, ChunkStreamer, StreamingConfig};
 
@@ -318,6 +331,9 @@ struct Options {
     /// The drill mod, in five beats: the cage, the cut, the ping, the dark
     /// and the same frame with both switches down.
     drillmod: bool,
+    /// Durability: save, snapshot, tear, fall back — and the first timings
+    /// this game has ever taken of its own save.
+    keeping: bool,
     /// Draw the terminal over the capture, with a session's worth of log.
     terminal: bool,
     /// Market day in the hometown, with the roster and a word on the
@@ -415,6 +431,7 @@ fn parse_args() -> Result<Options, String> {
         gimbal: false,
         haul: false,
         drillmod: false,
+        keeping: false,
         terminal: false,
         people: false,
         pad: false,
@@ -523,6 +540,7 @@ fn parse_args() -> Result<Options, String> {
             "--gimbal" => options.gimbal = true,
             "--haul" => options.haul = true,
             "--drillmod" => options.drillmod = true,
+            "--keeping" => options.keeping = true,
             "--payroll" => options.payroll = true,
             "--terminal" => options.terminal = true,
             "--osk" => {
@@ -966,6 +984,12 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     // sonar's answer through the rock around it.
     if options.drillmod {
         return photograph_the_drill_mod(&context, &mut renderer, &mut camera, options, path);
+    }
+
+    // Durability: a save torn on purpose, and the world coming back from the
+    // one before it — with the save cost measured on the way past.
+    if options.keeping {
+        return keep_the_world(&context, &mut renderer, &mut camera, options, path);
     }
 
     // A capture's sky is normally the hour alone. The weather fixtures set
@@ -2309,6 +2333,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         // fixture walks the clock forward until `weather::at` says this
         // region is under rain or a storm, so the sky in the picture is one
         // the seed actually produces on a tick the game would have run.
+
         let seed = world.seed();
         let mut found = None;
         for step in 0..40_000u64 {
@@ -4721,6 +4746,163 @@ fn photograph_the_drill_mod(
     Ok(())
 }
 
+/// Durability, played and measured: a save, a snapshot, a save torn on
+/// purpose, and the world coming back whole from the one before it.
+///
+/// Also the first timing this game has ever taken of its own save. No
+/// instrumentation existed on that path, which is a poor position to add an
+/// autosave from, so the numbers get printed rather than assumed.
+fn keep_the_world(
+    context: &GpuContext,
+    renderer: &mut Renderer,
+    camera: &mut Camera,
+    options: &Options,
+    path: &str,
+) -> Result<(), String> {
+    let stem = path.strip_suffix(".ppm").unwrap_or(path);
+    let root = std::env::temp_dir().join(format!("vx-keeping-{}", std::process::id()));
+    std::fs::remove_dir_all(&root).ok();
+
+    let mut session = session::Session::open(options.seed);
+    let home = session.home();
+    let chest = vx_world::town::chest_position(&home);
+    session.place_base(vx_core::BlockPos::new(chest.x, chest.y, chest.z));
+
+    // Something worth losing: a hole, a pile, and goods orphaned by a broken
+    // container — the exact thing the live boot used to bin.
+    // A trench rather than a shaft: stepping sideways keeps the next block
+    // underfoot in reach, where falling down a hole does not, and it dirties
+    // more than one chunk — which is the case the save cost below is about.
+    let start = session.player.position;
+    for step in 0..24 {
+        session.player.position = start + glam::DVec3::new(f64::from(step % 6), 0.0, f64::from(step / 6));
+        let under = vx_core::BlockPos::new(
+            session.player.position.x.floor() as i32,
+            session.player.position.y.floor() as i32 - 1,
+            session.player.position.z.floor() as i32,
+        );
+        session.look_at(under);
+        session.drill_through(64 * 8);
+    }
+    let cut = session.pile().map(|pile| pile.total()).unwrap_or(0);
+    let held = session.mining.fleet.clear_base();
+    println!("  cut {cut} blocks by hand, then broke the container on {held} of them");
+
+    // --- The save, timed -------------------------------------------------
+    let began = Instant::now();
+    session
+        .save_to(&root)
+        .map_err(|error| format!("could not save: {error}"))?;
+    let first = began.elapsed();
+    let sidecars: u64 = keeping::FILES
+        .iter()
+        .filter_map(|(name, _)| std::fs::metadata(root.join(name)).ok())
+        .map(|meta| meta.len())
+        .sum();
+    println!(
+        "  save 1: {:.1} ms, {} sidecar bytes over {} files",
+        first.as_secs_f32() * 1000.0,
+        sidecars,
+        keeping::FILES.len()
+    );
+    match keeping::inspect(&root) {
+        keeping::Verdict::Whole { generation } => println!("  stamped whole, generation {generation}"),
+        other => return Err(format!("a fresh save read back as {other:?}")),
+    }
+
+    // A second save with nothing new in it: the case an autosave hits most.
+    let quiet = Instant::now();
+    session
+        .save_to(&root)
+        .map_err(|error| format!("could not save: {error}"))?;
+    println!(
+        "  save 2 (nothing dug since): {:.1} ms",
+        quiet.elapsed().as_secs_f32() * 1000.0
+    );
+
+    let kept = keeping::snapshot(&root).map_err(|error| format!("could not snapshot: {error}"))?;
+    println!("  fallback save kept: {kept} files");
+
+    // --- Tear it, the way a kill mid-save would --------------------------
+    session
+        .save_to(&root)
+        .map_err(|error| format!("could not save: {error}"))?;
+    std::fs::write(root.join("pile.dat"), b"cut off").map_err(|error| format!("{error}"))?;
+    match keeping::inspect(&root) {
+        keeping::Verdict::Torn { generation, disagreed } => {
+            println!("  save {generation} reads as torn: {}", disagreed.join(", "));
+        }
+        other => return Err(format!("a torn save read back as {other:?}")),
+    }
+
+    // --- And back ---------------------------------------------------------
+    let reloaded = session::Session::load_from(&root)
+        .map_err(|error| format!("could not load the save back: {error}"))?;
+    match keeping::inspect(&root) {
+        keeping::Verdict::Whole { generation } => {
+            println!("  fell back to generation {generation}, whole again");
+        }
+        other => return Err(format!("the rollback left {other:?}")),
+    }
+    let back = reloaded.mining.fleet.orphaned().total();
+    println!("  the broken container's {back} goods came back with it");
+    if back != held {
+        return Err(format!("orphaned goods went from {held} to {back}"));
+    }
+    if !root.join("torn").join("pile.dat").is_file() {
+        return Err("the torn generation was thrown away".into());
+    }
+    println!("  and the wreck is kept under torn/ for a bug report");
+
+    // --- The picture ------------------------------------------------------
+    let mut session = reloaded;
+    let here = vx_core::BlockPos::new(
+        session.player.position.x.floor() as i32,
+        session.player.position.y.floor() as i32,
+        session.player.position.z.floor() as i32,
+    )
+    .chunk();
+    session.world.load_around(here, 4);
+    let dropped: Vec<vx_core::ChunkPos> = session
+        .world
+        .loaded_chunks()
+        .filter(|pos| (pos.x - here.x).abs() > 5 || (pos.z - here.z).abs() > 5)
+        .collect();
+    for pos in dropped {
+        renderer.remove_chunk(pos);
+    }
+    session.world.unload_beyond(here, 5);
+    remesh_all(context, renderer, &mut session.world);
+
+    let eye = session.player.eye_position();
+    let subject = eye + (session.forward() * 9.0).as_dvec3();
+    camera.pitch = session.pitch;
+    camera.position = eye;
+    look_at(camera, subject);
+    camera.position =
+        view::camera_placement(&session.world, camera, eye, view::ViewMode::ThirdPerson);
+    look_at(camera, subject);
+    renderer.update_camera(&context.queue, camera);
+
+    let origin = renderer.render_origin().as_dvec3();
+    let feet = (session.player.position - origin).as_vec3();
+    let body: Vec<vx_render::Object> = rig::Rig::player()
+        .objects(feet, session.yaw, 0.0)
+        .into_iter()
+        .map(|object| object.already_relative())
+        .collect();
+    renderer.set_objects(&context.device, &context.queue, &body);
+
+    let out = format!("{stem}-01-recovered.ppm");
+    capture_frame(context, renderer, options.width, options.height)
+        .write_ppm(&out)
+        .map_err(|error| format!("could not write {out}: {error}"))?;
+    println!("  beat 1: recovered -> {out}");
+
+    std::fs::remove_dir_all(&root).ok();
+    Ok(())
+}
+
 /// Point `camera` at `target` from where it stands.
 ///
 /// Derived from the same yaw/pitch convention `Camera::forward` uses, so a
@@ -5995,6 +6177,16 @@ struct Active {
     ping: Option<(sonar::Reading, Instant)>,
     /// The tick the last ping went out on, for `drillmod::PING_REST`.
     pinged_at: u64,
+    /// Which save this world is on. Read off the manifest at boot and
+    /// stepped by every save, so a torn generation can be named.
+    generation: u64,
+    /// When the fallback save was last taken.
+    snapshotted: Instant,
+    /// When the world was last written down.
+    saved_at: Instant,
+    /// Set by an order worth not repeating, and acted on at the top of the
+    /// next frame rather than in the middle of the verb that set it.
+    save_soon: bool,
     /// When this session started drawing, for effects that shimmer.
     ///
     /// Wall clock, and only ever wall clock: everything it drives moves a
@@ -6278,6 +6470,11 @@ impl App {
 
         self.poll_pad(dt);
 
+        // At the top of the frame, before anything this frame changes: a save
+        // that landed halfway through a verb would be a save of a world
+        // halfway through a verb.
+        self.autosave_if_it_is_time();
+
         // Disjoint field borrows: the controllers and input are separate
         // fields from `active`, so this is fine and lets the camera be mutated
         // in place rather than through a copy.
@@ -6391,7 +6588,7 @@ impl App {
                     .laden(load);
 
                 if active.last_move != Some(command) {
-                    active.journal.record(journal::Command::moving(command));
+                    record_order(active, journal::Command::moving(command));
                     active.last_move = Some(command);
                 }
 
@@ -6457,7 +6654,7 @@ impl App {
             // told to do, so replay ran them with nobody at the controls and
             // every hand-dug block failed to appear.
             if active.last_pilot != Some(command) {
-                active.journal.record(Command::piloting(command));
+                record_order(active, Command::piloting(command));
                 active.last_pilot = Some(command);
             }
             active.mining.set_pilot_command(command);
@@ -6505,7 +6702,7 @@ impl App {
                     continue;
                 };
                 if active.world.set_block(at, block).is_some() {
-                    active.journal.record(Command::Place {
+                    record_order(active, Command::Place {
                         at,
                         block: name.to_string(),
                     });
@@ -7283,7 +7480,7 @@ impl App {
         let quantised =
             movement::MoveCommand::looking(0, active.camera.yaw, active.camera.pitch);
         let muzzle = arsenal::muzzle_of(&active.player);
-        active.journal.record(Command::Fire {
+        record_order(active, Command::Fire {
             muzzle: muzzle.to_array(),
             yaw_q: quantised.yaw_q,
             pitch_q: quantised.pitch_q,
@@ -7583,7 +7780,7 @@ impl App {
         }
         let lean = felling::lean_at(&active.world, tree.base.x, tree.base.z);
         let (direction, chair) = felling::aim(face, lean);
-        active.journal.record(Command::Fell {
+        record_order(active, Command::Fell {
             at: stump,
             face: face as u8,
         });
@@ -8006,7 +8203,7 @@ impl App {
         };
         match active.printer.begin(index, &mut base.stockpile, level, &active.wallet) {
             Ok(()) => {
-                active.journal.record(Command::Print {
+                record_order(active, Command::Print {
                     recipe: index as u32,
                 });
                 let label = printer::recipe(index).map_or("", |recipe| recipe.label);
@@ -8676,7 +8873,7 @@ impl App {
         if !active.mining.wear.repair(machine, &mut base.stockpile) {
             return vec![format!("{name} IS FRESH ALREADY")];
         }
-        active.journal.record(Command::Repair { machine: tag });
+        record_order(active, Command::Repair { machine: tag });
         vec![format!("{name} MENDED - {} PARTS SPENT", wear::PARTS_PER_REPAIR)]
     }
 
@@ -8792,7 +8989,7 @@ impl App {
         let tick = active.journal.tick();
         let day = (tick / schedule::TICKS_PER_DAY) as u32;
         let (head, tail) = name.indices();
-        active.journal.record(Command::Found {
+        record_order(active, Command::Found {
             x: at.0,
             z: at.1,
             head,
@@ -8851,7 +9048,7 @@ impl App {
         }
         let tick = active.journal.tick();
         let day = (tick / schedule::TICKS_PER_DAY) as u32;
-        active.journal.record(Command::Take { town: town.centre });
+        record_order(active, Command::Take { town: town.centre });
         active.elections.seize(town.centre, day);
         for office in office::OFFICES {
             active.permits.borrow_mut().take_office(town.centre, office);
@@ -8888,7 +9085,7 @@ impl App {
         let holds = active.elections.player_holds(town.centre, office);
         let on = !(active.elections.is_standing(town.centre, office) || holds);
         active.elections.stand(town.centre, office, on);
-        active.journal.record(Command::Stand {
+        record_order(active, Command::Stand {
             town: town.centre,
             office: match office {
                 permits::Office::Mayor => 0,
@@ -9103,7 +9300,7 @@ impl App {
         let person = people::person(&site, index);
 
         active.friends.talk(key, day);
-        active.journal.record(Command::Talk {
+        record_order(active, Command::Talk {
             town: site.centre,
             person: index as u8,
         });
@@ -9163,7 +9360,7 @@ impl App {
         let given = active.friends.gift(key, &person, &good, day);
         let band = active.reputation.with_compact(reputation::GIFT_COMPACT);
         Self::note_band(active, "THE TOWNS", band);
-        active.journal.record(Command::Gift {
+        record_order(active, Command::Gift {
             town: site.centre,
             person: index as u8,
             good: good.clone(),
@@ -9228,7 +9425,7 @@ impl App {
             terminal::Order::Cancel => {
                 if let Some(active) = &mut self.active {
                     active.mining.cancel(&mut active.world);
-                    active.journal.record(Command::Cancel);
+                    record_order(active, Command::Cancel);
                     active.terminal.say(terminal::Kind::Note, "PLAN DROPPED");
                 }
             }
@@ -9252,10 +9449,24 @@ impl App {
                 }
             }
             terminal::Order::Save => {
-                self.save_world();
+                // "WORLD WRITTEN OUT" used to be printed whether or not a
+                // single byte had been written. It is earned now.
+                let kept = self.save_world();
+                let line = match kept.complaint() {
+                    Some(complaint) => (terminal::Kind::Warn, complaint),
+                    None => (
+                        terminal::Kind::Note,
+                        format!(
+                            "WORLD WRITTEN OUT - SAVE {} IN {} MS",
+                            kept.generation,
+                            (kept.took.as_secs_f32() * 1000.0).round() as u64
+                        ),
+                    ),
+                };
                 if let Some(active) = &mut self.active {
-                    active.terminal.say(terminal::Kind::Note, "WORLD WRITTEN OUT");
+                    active.terminal.say(line.0, line.1);
                 }
+                self.report_the_save(&kept);
             }
             terminal::Order::Scout(scout) => {
                 let label = format!("{scout:?}").to_uppercase();
@@ -9302,7 +9513,7 @@ impl App {
             );
             return;
         }
-        active.journal.record(Command::Bank {
+        record_order(active, Command::Bank {
             town,
             good: good.clone(),
             amount: moved,
@@ -9333,7 +9544,7 @@ impl App {
             .begin(index, &mut base.stockpile, level, dry_shore)
         {
             Ok(()) => {
-                active.journal.record(Command::Electrolyse {
+                record_order(active, Command::Electrolyse {
                     run: index as u32,
                 });
                 active.electrolyser.feedback = Some("RUNNING".into());
@@ -9461,7 +9672,7 @@ impl App {
         };
         match active.mining.wells.spud(at, seed, &mut base.stockpile) {
             Ok(()) => {
-                active.journal.record(Command::Spud { at });
+                record_order(active, Command::Spud { at });
                 let line = "SPUDDED IN - THE STRING IS GOING DOWN".to_string();
                 active.well_panel.feedback = Some(line.clone());
                 active.greeting = Some((line, Instant::now()));
@@ -9632,7 +9843,7 @@ impl App {
                 if let Some(id) = active.world.registry().id_of("engine:roost") {
                     if active.world.set_block(at, id).is_some() {
                         active.intrusion.roost_at = Some(at);
-                        active.journal.record(Command::Place {
+                        record_order(active, Command::Place {
                             at,
                             block: "engine:roost".to_string(),
                         });
@@ -10186,10 +10397,10 @@ impl App {
                 let crate_here = active.world.registry().get_or_air(hit.id).name
                     == "engine:supply_cache";
                 if crate_here {
-                    active.journal.record(Command::Salvage { at: hit.block });
+                    record_order(active, Command::Salvage { at: hit.block });
                     Self::pay_out_cache(active, hit.block);
                 } else {
-                    active.journal.record(Command::Break { at: hit.block });
+                    record_order(active, Command::Break { at: hit.block });
                 }
                 // Cut into a lake and the lake notices. The break is already
                 // the order, so the replay wakes the same water on the same
@@ -10482,7 +10693,7 @@ impl App {
         // Placing a container declares it the fleet's base.
         if let Ok(position) = result {
             let name = active.world.registry().get_or_air(block).name.clone();
-            active.journal.record(Command::Place {
+            record_order(active, Command::Place {
                 at: position,
                 block: name,
             });
@@ -11429,7 +11640,10 @@ impl App {
                     }
                 }
             }
-            KeyCode::F5 => self.save_world(),
+            KeyCode::F5 => {
+                let kept = self.save_world();
+                self.report_the_save(&kept);
+            }
             KeyCode::KeyM => self.mark_target(),
             KeyCode::Tab => {
                 if let Some(active) = &mut self.active {
@@ -11476,7 +11690,7 @@ impl App {
             KeyCode::Backspace => {
                 if let Some(active) = &mut self.active {
                     active.mining.cancel(&mut active.world);
-                    active.journal.record(Command::Cancel);
+                    record_order(active, Command::Cancel);
                     log::info!("mining plan cancelled");
                 }
             }
@@ -11593,7 +11807,7 @@ impl App {
         match active.mining.start(&mut active.world, crew) {
             Some(method) => {
                 if let Some(area) = area {
-                    active.journal.record(Command::Dispatch { area, method, crew });
+                    record_order(active, Command::Dispatch { area, method, crew });
                 }
                 log::info!("digging: {} with a crew of {crew}", method.name());
             }
@@ -11764,7 +11978,7 @@ impl App {
                     journal::wake_water(&mut active.water, &mut active.world, hit.block);
                     "PUMP RUNNING - IT LIFTS WHAT IT CAN REACH OUT OF THE TOP".into()
                 };
-                active.journal.record(Command::Pump {
+                record_order(active, Command::Pump {
                     at: hit.block,
                     on: !running,
                 });
@@ -11806,7 +12020,7 @@ impl App {
                 }
                 match break_block(&mut active.world, &active.events, hit.block) {
                     Ok(_) => {
-                        active.journal.record(Command::Salvage { at: hit.block });
+                        record_order(active, Command::Salvage { at: hit.block });
                         Self::pay_out_cache(active, hit.block);
                     }
                     Err(error) => {
@@ -12020,7 +12234,7 @@ impl App {
         if kestrel.order(mode) {
             // Accepted orders go in the log; a refused one changed nothing
             // and records nothing.
-            active.journal.record(Command::Scout(order));
+            record_order(active, Command::Scout(order));
             active.device.feedback = Some(label);
         } else {
             active.device.feedback = Some(format!(
@@ -12071,7 +12285,7 @@ impl App {
             Some(reason) => active.device.feedback = Some(reason),
             None => {
                 active.intrusion.begin(&attempt);
-                active.journal.record(Command::Intrude(order));
+                record_order(active, Command::Intrude(order));
                 active.device.feedback = Some(label);
             }
         }
@@ -12086,7 +12300,7 @@ impl App {
             if active.mining.take_control(machine) {
                 // Recorded only once the simulation has granted it, so the
                 // log never claims a wheel that was refused.
-                active.journal.record(Command::Wheel {
+                record_order(active, Command::Wheel {
                     machine: Some(journal::MachineTag::any(machine)),
                 });
                 active.device.feedback = Some("CONTROL TAKEN".into());
@@ -12099,7 +12313,7 @@ impl App {
             }
         } else {
             active.mining.release_control();
-            active.journal.record(Command::Wheel { machine: None });
+            record_order(active, Command::Wheel { machine: None });
             active.last_pilot = None;
             active.device.feedback = Some("CONTROL RELEASED".into());
             log::info!("handed {machine:?} back");
@@ -12127,7 +12341,7 @@ impl App {
             active.mining.release_control();
             // Hanging up is a release like any other, and the log has to hear
             // about it or replay keeps driving a machine nobody is holding.
-            active.journal.record(Command::Wheel { machine: None });
+            record_order(active, Command::Wheel { machine: None });
             active.last_pilot = None;
         }
         active.camera.yaw = active.body_yaw;
@@ -12513,7 +12727,7 @@ impl App {
     #[cfg(feature = "gold")]
     fn gold_order(active: &mut Active, order: journal::Admin) {
         use journal::Admin;
-        active.journal.record(Command::Admin(order.clone()));
+        record_order(active, Command::Admin(order.clone()));
         let line = match &order {
             Admin::Give { good, amount } => {
                 match active.mining.fleet.base.as_mut() {
@@ -12593,7 +12807,7 @@ impl App {
     /// the operator's ambition.
     #[cfg(feature = "gold")]
     fn gold_advance(active: &mut Active, ticks: u32) {
-        active.journal.record(Command::Advance { ticks });
+        record_order(active, Command::Advance { ticks });
         active.mining.advance(&mut active.world, &active.events, ticks);
         let command = active.last_move.unwrap_or_default();
         for _ in 0..ticks {
@@ -13449,38 +13663,89 @@ impl App {
     }
 
     /// Write the world to disk, reporting how it went.
-    fn save_world(&mut self) {
-        let Some(active) = &mut self.active else { return };
-        let Some(save) = active.save.as_ref() else {
-            return;
+    /// Write the whole world down, and say so if any of it did not go.
+    ///
+    /// # What changed in stage 54
+    ///
+    /// Three things, none of them in the middle. The **snapshot** at the top
+    /// takes a cheap copy of the last save that was whole, so a bad one has
+    /// somewhere to fall back to. Every writer in between now publishes by
+    /// rename rather than by truncating its own destination. And the
+    /// **manifest** at the bottom, written last, is the instant the set of
+    /// thirty-six files becomes a save rather than thirty-six files.
+    ///
+    /// The fourth is that failures are collected instead of logged and
+    /// forgotten. This function used to answer a full disk, an ejected card
+    /// or a read-only directory by writing a line into a log nobody opens and
+    /// carrying on, so a player could spend an hour on a session that was not
+    /// being recorded and find out at the end of it.
+    fn save_world(&mut self) -> Kept {
+        let Some(active) = &mut self.active else {
+            return Kept::default();
         };
+        let Some(save) = active.save.as_ref() else {
+            // No save directory at all, which means this session has never
+            // written anything and never will. Said out loud rather than
+            // returned to silently, because it is the worst outcome here and
+            // it used to be the quietest.
+            return Kept {
+                impossible: true,
+                ..Kept::default()
+            };
+        };
+        let began = Instant::now();
+        let root = save.root().to_path_buf();
+
+        // The rollback point, before anything is overwritten. Guarded on a
+        // cadence: the ledgers are copied and the regions are linked, which is
+        // cheap, but it is not free on a world with thousands of regions and
+        // an autosave every couple of minutes.
+        if active.snapshotted.elapsed() >= keeping::SNAPSHOT_EVERY || active.generation == 0 {
+            match keeping::snapshot(&root) {
+                Ok(count) => {
+                    log::info!("kept {count} files as the fallback save");
+                    active.snapshotted = Instant::now();
+                }
+                Err(error) => log::warn!("could not keep a fallback save: {error}"),
+            }
+        }
+
+        // A free function rather than a closure so that the direct pushes
+        // below — the three writers whose shape does not fit — can share the
+        // same list without fighting the borrow checker over it.
+        fn note(failed: &mut Vec<&'static str>, what: &'static str, outcome: std::io::Result<()>) {
+            if let Err(error) = outcome {
+                log::error!("could not save {what}: {error}");
+                failed.push(what);
+            }
+        }
+        let mut failed: Vec<&'static str> = Vec::new();
+
+        let mut chunks = 0;
         match save.save_world(&mut active.world) {
             Ok(0) => log::info!("nothing to save"),
-            Ok(count) => log::info!("saved {count} chunks to {}", save.root().display()),
-            Err(error) => log::error!("could not save the world: {error}"),
+            Ok(count) => {
+                chunks = count;
+                log::info!("saved {count} chunks to {}", root.display());
+            }
+            Err(error) => {
+                log::error!("could not save the world: {error}");
+                failed.push("the ground");
+            }
         }
         match active.map.save(save.root()) {
             Ok(()) => log::info!("saved the map ({} explored chunks)", active.map.explored_count()),
-            Err(error) => log::error!("could not save the map: {error}"),
+            Err(error) => {
+                log::error!("could not save the map: {error}");
+                failed.push("the map");
+            }
         }
-        if let Err(error) = active.skills.save(save.root()) {
-            log::error!("could not save the skill sheet: {error}");
-        }
-        if let Err(error) = active.wallet.save(save.root()) {
-            log::error!("could not save the wallet: {error}");
-        }
-        if let Err(error) = clock::save(active.clock, save.root()) {
-            log::error!("could not save the clock: {error}");
-        }
-        if let Err(error) = active.ledger.save(save.root()) {
-            log::error!("could not save the posting ledger: {error}");
-        }
-        if let Err(error) = active.homestead.save(save.root()) {
-            log::error!("could not save the homestead: {error}");
-        }
-        if let Err(error) = active.permits.borrow().save(save.root()) {
-            log::error!("could not save the permits: {error}");
-        }
+        note(&mut failed, "the skill sheet", active.skills.save(save.root()));
+        note(&mut failed, "the wallet", active.wallet.save(save.root()));
+        note(&mut failed, "the clock", clock::save(active.clock, save.root()));
+        note(&mut failed, "the posting ledger", active.ledger.save(save.root()));
+        note(&mut failed, "the homestead", active.homestead.save(save.root()));
+        note(&mut failed, "the permits", active.permits.borrow().save(save.root()));
         // The region files above are the keyframe; the journal is everything
         // ordered since. Both are written every save for now — the journal
         // earns its keep as a determinism oracle first, and only once it has
@@ -13493,66 +13758,50 @@ impl App {
         if active.journal.wants_keyframe() {
             active.journal.keyframed(vx_world::world_hash(&active.world));
         }
-        if let Err(error) = active.journal.save(save.root()) {
-            log::error!("could not save the command journal: {error}");
+        note(&mut failed, "the command journal", active.journal.save(save.root()));
+        note(&mut failed, "the garage", active.garage.save(save.root()));
+        note(&mut failed, "the arsenal", active.arsenal.save(save.root()));
+        // The watch box's hacks ride in the kit's file, beside the charge that
+        // bought them — carried across here because the roost owns the
+        // numbers and the kit owns the ledger.
+        if let Some(roost) = active.roost.as_ref() {
+            active.intrusion.hacks = roost.hacks();
         }
-        if let Err(error) = active.garage.save(save.root()) {
-            log::error!("could not save the garage: {error}");
-        }
-        if let Err(error) = active.arsenal.save(save.root()) {
-            log::error!("could not save the arsenal: {error}");
-        }
-        if let Err(error) = active.intrusion.save(save.root()) {
-            log::error!("could not save the intrusion kit: {error}");
-        }
-        if let Err(error) = active.printer.save(save.root()) {
-            log::error!("could not save the fabricator: {error}");
-        }
-        if let Err(error) = active.optics.save(save.root()) {
-            log::error!("could not save the optics kit: {error}");
-        }
-        if let Err(error) = active.electrolyser.save(save.root()) {
-            log::error!("could not save the electrolyser: {error}");
-        }
-        if let Err(error) = active.mining.tank.save(save.root()) {
-            log::error!("could not save the fleet's tank: {error}");
-        }
+        note(&mut failed, "the intrusion kit", active.intrusion.save(save.root()));
+        note(&mut failed, "the fabricator", active.printer.save(save.root()));
+        note(&mut failed, "the optics kit", active.optics.save(save.root()));
+        note(&mut failed, "the electrolyser", active.electrolyser.save(save.root()));
+        note(&mut failed, "the fleet's tank", active.mining.tank.save(save.root()));
         // The pile, which everything else in the game already remembered
         // better than the game did: the wallet, the town's books and the
         // house chest all survived a save and the one pile the shop sells out
         // of did not. It also feeds the tank above it, so a forgotten pile is
         // a fleet that stops working.
-        if let Err(error) = pile::save(&active.mining.fleet, save.root()) {
-            log::error!("could not save the base pile: {error}");
-        }
+        note(&mut failed, "the base pile", pile::save(&active.mining.fleet, save.root()));
         // The crew, which is the one thing in this game you are meant to walk
         // away from and the one thing that did not survive walking away.
-        if let Err(error) = dig::save(&active.mining, save.root()) {
-            log::error!("could not save the dispatch: {error}");
-        }
+        note(&mut failed, "the dispatch", dig::save(&active.mining, save.root()));
         // And the air side beside it: the fliers, and every sector already
         // swept. A sweep burns fuel off the pile, so a survey is bought and
         // paid for — and used to be thrown away at the next save.
-        if let Err(error) = fleet::save(&active.mining.fleet, save.root()) {
-            log::error!("could not save the fleet: {error}");
-        }
+        note(&mut failed, "the fleet", fleet::save(&active.mining.fleet, save.root()));
         // What the pack scout learned. The one bought thing in the game that
         // kept nothing across a save until stage 52.
-        if let Err(error) = active.marks.save(save.root()) {
-            log::error!("could not save the scout's marks: {error}");
-        }
+        note(&mut failed, "the scout's marks", active.marks.save(save.root()));
         // And what the deep ore has done to you — which a reload used to wash
         // off, making the menu screen a free ward cot.
-        if let Err(error) = active.dose.save(save.root()) {
-            log::error!("could not save the dose: {error}");
-        }
+        note(&mut failed, "the dose", active.dose.save(save.root()));
         // Where you left the drill mod's two switches. Two bools and the
         // smallest file in the game, and it still gets its own: one concern
         // per file is the rule that stops a version bump on somebody else's
         // ledger silently erasing this one.
-        if let Err(error) = active.drillmod.save(save.root()) {
-            log::error!("could not save the drill mod: {error}");
-        }
+        note(&mut failed, "the drill mod", active.drillmod.save(save.root()));
+        // Which shelters are finished with. Not the firefight — that is
+        // genuinely mid-flight and re-musters from the bunker's own seed —
+        // but the *outcome*, which nothing derived and nothing wrote down.
+        note(&mut failed, "the garrisons", active.garrisons.save(save.root()));
+        // And which pumps you left running.
+        note(&mut failed, "the pumps", pumps::save(&active.pumps, save.root()));
         // And you. The boot below used to plant the body at the spawn every
         // time, whatever the save said, because the save had never been asked
         // to say anything: walk to another town, sell up, quit, come back, and
@@ -13566,45 +13815,116 @@ impl App {
             save.root(),
         ) {
             log::error!("could not save where you were standing: {error}");
+            failed.push("where you were standing");
         }
-        if let Err(error) = active.mining.wear.save(save.root()) {
-            log::error!("could not save the wear ledger: {error}");
-        }
-        if let Err(error) = active.mining.wells.save(save.root()) {
-            log::error!("could not save the wells: {error}");
-        }
-        if let Err(error) = active.arcade.save(save.root()) {
-            log::error!("could not save the arcade: {error}");
-        }
-        if let Err(error) = active.health.save(save.root()) {
-            log::error!("could not save the player's condition: {error}");
-        }
+        note(&mut failed, "the wear ledger", active.mining.wear.save(save.root()));
+        note(&mut failed, "the wells", active.mining.wells.save(save.root()));
+        note(&mut failed, "the arcade", active.arcade.save(save.root()));
+        note(&mut failed, "the player's condition", active.health.save(save.root()));
         // The one part of the weather that outlives a session: which stands
         // something cleared, and how far back they have come.
-        if let Err(error) = active.stands.save(save.root()) {
-            log::error!("could not save the disturbed stands: {error}");
-        }
-        if let Err(error) = active.warrants.save(save.root()) {
-            log::error!("could not save the towns' warrants: {error}");
-        }
-        if let Err(error) = active.elections.save(save.root()) {
-            log::error!("could not save the towns' elections: {error}");
-        }
-        if let Err(error) = active.charters.save(save.root()) {
-            log::error!("could not save the charters: {error}");
-        }
-        if let Err(error) = active.reputation.save(save.root()) {
-            log::error!("could not save the player's reputation: {error}");
-        }
-        if let Err(error) = active.banks.save(save.root()) {
-            log::error!("could not save the town vaults: {error}");
-        }
-        if let Err(error) = active.friends.save(save.root()) {
-            log::error!("could not save the friendship ledger: {error}");
-        }
+        note(&mut failed, "the disturbed stands", active.stands.save(save.root()));
+        note(&mut failed, "the towns' warrants", active.warrants.save(save.root()));
+        note(&mut failed, "the towns' elections", active.elections.save(save.root()));
+        note(&mut failed, "the charters", active.charters.save(save.root()));
+        note(&mut failed, "the player's reputation", active.reputation.save(save.root()));
+        note(&mut failed, "the town vaults", active.banks.save(save.root()));
+        note(&mut failed, "the friendship ledger", active.friends.save(save.root()));
         match active.economy.save(save.root()) {
             Ok(()) => log::info!("saved {} town markets", active.economy.tracked()),
-            Err(error) => log::error!("could not save the town books: {error}"),
+            Err(error) => {
+                log::error!("could not save the town books: {error}");
+                failed.push("the town books");
+            }
+        }
+
+        // Last, and only last: the stamp that makes the thirty-six files one
+        // save. A crash before this leaves a generation that never happened
+        // and the loader falls back; a crash after it leaves one that wholly
+        // did.
+        active.generation += 1;
+        if let Err(error) = keeping::seal(&root, active.generation) {
+            log::error!("could not stamp the save: {error}");
+            failed.push("the save's own stamp");
+        }
+
+        let took = began.elapsed();
+        log::info!(
+            "save {} took {:.1} ms ({chunks} chunks)",
+            active.generation,
+            took.as_secs_f32() * 1000.0
+        );
+        Kept {
+            generation: active.generation,
+            chunks,
+            took,
+            failed,
+            impossible: false,
+        }
+    }
+
+    /// Tell the player how a save went, and only bother them when it matters.
+    ///
+    /// A failure is loud in both places a player might be looking — the
+    /// greeting strip and the terminal's scrollback — because a save that did
+    /// not happen is the one message in this game that cannot afford to be
+    /// missed. A success says a short line and gets out of the way; an
+    /// autosave that announced itself every two minutes would train you to
+    /// stop reading exactly the strip the failure arrives on.
+    fn report_the_save(&mut self, kept: &Kept) {
+        let complaint = kept.complaint();
+        let Some(active) = &mut self.active else { return };
+        match complaint {
+            Some(line) => {
+                active.terminal.say(terminal::Kind::Warn, line.clone());
+                active.greeting = Some((line, Instant::now()));
+            }
+            None => {
+                active.greeting = Some((
+                    format!("SAVED. {} CHUNKS", kept.chunks),
+                    Instant::now(),
+                ));
+            }
+        }
+    }
+
+    /// Save because time has passed or because something happened worth not
+    /// repeating.
+    ///
+    /// # Why there is an autosave at all
+    ///
+    /// Until stage 54 there was not one. `save_world` was reachable from
+    /// `F5`, the terminal, and closing the window, and all three of those are
+    /// a *cooperative* shutdown the player chooses. Everything else — a
+    /// crash, an out-of-memory kill, a compositor telling the process to go,
+    /// a battery — took the whole session. On the Steam Deck this build
+    /// targets, those are not the exotic ways a session ends. They are the
+    /// ordinary ones.
+    ///
+    /// Two triggers, because a clock alone and an event list alone each miss
+    /// the case the other covers. The clock bounds how much a quiet stretch
+    /// of digging can cost; the events mean the expensive minute — a sale, a
+    /// crew sent out, a level — is never the one you lose. A save is skipped
+    /// outright when nothing has changed, so standing still writes nothing.
+    fn autosave_if_it_is_time(&mut self) {
+        let Some(active) = &self.active else { return };
+        if !active.journal.unsaved() {
+            return;
+        }
+        let due = active.save_soon || active.saved_at.elapsed() >= keeping::AUTOSAVE_EVERY;
+        if !due {
+            return;
+        }
+        let kept = self.save_world();
+        if let Some(active) = &mut self.active {
+            active.saved_at = Instant::now();
+            active.save_soon = false;
+            active.journal.marked_saved();
+        }
+        // Only a failure interrupts. The whole point of an autosave is that
+        // you do not have to think about it.
+        if !kept.went_well() {
+            self.report_the_save(&kept);
         }
     }
 
@@ -13679,6 +13999,48 @@ impl ApplicationHandler for App {
                 );
                 None
             }
+        };
+
+        // **Was the last save whole?**
+        //
+        // Every file in it is atomic on its own now, but a save is the whole
+        // set and the set is what a crash can tear: some files renamed, some
+        // not, and every loader in this game tolerant enough to shrug at the
+        // difference. The manifest is written last and stamped from what the
+        // save actually produced, so a mismatch here means a generation that
+        // never finished — and the answer to one is to fall back to the last
+        // that did, keeping the wreck for a bug report.
+        //
+        // A world with no manifest is **old, not broken**. Every save written
+        // before this stage is in that state, and calling them all torn would
+        // do far more damage than the bug this guards against.
+        let opening_generation = match save.as_ref().map(|save| keeping::inspect(save.root())) {
+            Some(keeping::Verdict::Whole { generation }) => generation,
+            Some(keeping::Verdict::Torn { generation, disagreed }) => {
+                log::warn!(
+                    "save {generation} did not finish writing ({}); falling back",
+                    disagreed.join(", ")
+                );
+                let root = save.as_ref().expect("a torn save has a root").root();
+                match keeping::roll_back(root) {
+                    Ok(true) => match keeping::inspect(root) {
+                        keeping::Verdict::Whole { generation } => {
+                            log::warn!("fell back to save {generation}");
+                            generation
+                        }
+                        _ => 0,
+                    },
+                    Ok(false) => {
+                        log::warn!("nothing to fall back to; loading what is there");
+                        generation
+                    }
+                    Err(error) => {
+                        log::error!("could not fall back: {error}");
+                        generation
+                    }
+                }
+            }
+            Some(keeping::Verdict::Unstamped) | None => 0,
         };
 
         // An existing world keeps its own seed, so reloading gives back the
@@ -13806,9 +14168,6 @@ impl ApplicationHandler for App {
         let mut tank = fuel::Tank::default();
         let mut crew_wear = wear::Wear::default();
         let mut holes = well::Wells::default();
-        // A bare fleet to read the saved pile into, so the base and its goods
-        // can be grafted onto the real one below.
-        let mut base_pile = vx_agent::Fleet::new();
         let mut cabinet = arcade::Arcade::default();
         let mut stands = succession::Ledger::default();
         let mut warrants = warrant::Docket::default();
@@ -13821,6 +14180,7 @@ impl ApplicationHandler for App {
         let mut sightings = scout::Marks::default();
         let mut rads = dose::Dose::default();
         let mut drillmod = drillmod::Switches::default();
+        let mut held = garrison::Garrisons::default();
         if let Some(save) = &save {
             map.load(save.root());
             skills.load(save.root());
@@ -13846,7 +14206,6 @@ impl ApplicationHandler for App {
             // And the pile the tank burns out of, for the tank's own reason:
             // no pile is no fuel, no fuel is a fleet that does not turn, and
             // a fleet that does not turn cuts different ground.
-            pile::load(&mut base_pile, save.root());
             // And the holes, for the tank's reason exactly: a well puts
             // goods on the pile the fleet burns, so a reload that forgot one
             // would dig a different hole than the journal says it dug.
@@ -13875,6 +14234,11 @@ impl ApplicationHandler for App {
             // Not scrubbed by a reload any more: see `dose`'s module note.
             rads.load(save.root());
             drillmod.load(save.root());
+            // The shelters already taken. Without this a bunker you fought
+            // through came back fully manned, and — since the capture pay had
+            // already gone into the wallet, which does survive — could be
+            // cleared again for the money.
+            held.load(save.root());
         }
         if self.sheriff {
             // The hometown's badge, which is what this override always meant:
@@ -13910,16 +14274,36 @@ impl ApplicationHandler for App {
         // that started fresh would hand back a worn-out fleet's youth.
         mining.wear = crew_wear;
         mining.wells = holes;
-        // The container you placed is still standing in the region file; this
-        // is what makes it mean something again.
-        mining.fleet.base = base_pile.base;
+        // A world with no save directory at all — taken before `save` moves
+        // into the struct below.
+        let cannot_save = save.is_none();
+
+        // What the spoofer kit still has standing over the town's watch box,
+        // taken before the kit moves into the struct below.
+        let standing_hacks = kit.hacks;
+
+        // Which pumps you left switched on, read here rather than in the
+        // struct literal because it wants the world while it is still a local.
+        // Empty for a world saved before stage 54 and for a fresh one — but no
+        // longer empty simply because the game was restarted.
+        let running_pumps = save
+            .as_ref()
+            .map(|save| pumps::load(&world, save.root()))
+            .unwrap_or_default();
+
         if let Some(save) = &save {
-            // The air side: the fliers, how deep the scanner reaches, and
-            // every sector already swept. A sweep costs HHO, and until stage
-            // 52 the pings it bought were binned at the next save.
-            fleet::load(&mut mining.fleet, save.root());
-            // And the crew, which is the thing you are meant to leave working.
-            dig::load(&mut mining, &mut world, save.root());
+            // The container you placed and everything the fleet was holding —
+            // the pile, the goods orphaned by a broken container, the air side
+            // and the crew — through the **same** function the headless
+            // session boots with.
+            //
+            // This used to be four lines written out here by hand, and they
+            // were not the four lines the session used. The difference was
+            // `mining.fleet.base = base_pile.base`, which took the base out of
+            // the loaded pile and dropped everything else on the floor: the
+            // orphaned goods were written on every save, read back correctly,
+            // and binned. Two copies of a restore is one copy too many.
+            keeping::restore_the_fleet(&mut mining, &mut world, save.root());
         }
         // Only *after* the fleet is back, or a restored flier is joined by a
         // free one every time the world opens.
@@ -13951,6 +14335,10 @@ impl ApplicationHandler for App {
             drillmod,
             ping: None,
             pinged_at: 0,
+            generation: opening_generation,
+            snapshotted: Instant::now(),
+            saved_at: Instant::now(),
+            save_soon: false,
             started: Instant::now(),
             level_up: None,
             clock,
@@ -13972,12 +14360,21 @@ impl ApplicationHandler for App {
             villager_rigs: Villagers::rigs(),
             health: condition,
             posse: hostile::Posse::default(),
-            garrisons: garrison::Garrisons::default(),
+            garrisons: held,
             reputation: name,
             jam_warned: false,
             debug_open: false,
             warrant_check: 0.0,
-            greeting: None,
+            // A world with no save directory is a session that will never
+            // write anything, and that used to be a line in a log file. It is
+            // the first thing you see now, because there is no worse thing
+            // this game could fail to tell you.
+            greeting: cannot_save.then(|| {
+                (
+                    "THIS WORLD CANNOT BE SAVED. CHECK THE SAVE FOLDER".to_string(),
+                    Instant::now(),
+                )
+            }),
             wallet,
             shop: shop::Shop::new(),
             board: board::Board::new(),
@@ -14010,7 +14407,7 @@ impl ApplicationHandler for App {
             shots: Vec::new(),
             falls: Vec::new(),
             water: Vec::new(),
-            pumps: Vec::new(),
+            pumps: running_pumps,
             pump_step: 0,
             fires: Vec::new(),
             stands,
@@ -14048,11 +14445,16 @@ impl ApplicationHandler for App {
                     .into_iter()
                     .find(|building| building.role == vx_world::town::plan::Role::Security)
                     .map(|office| {
-                        roost::Roost::new(vx_core::BlockPos::new(
+                        let mut roost = roost::Roost::new(vx_core::BlockPos::new(
                             office.max.x - 2,
                             office.max.y,
                             office.max.z - 2,
-                        ))
+                        ));
+                        // Whatever the spoofer kit was still holding over it.
+                        // Without this you paid a charge, saved, and came back
+                        // to a box that was watching again.
+                        roost.restore_hacks(standing_hacks);
+                        roost
                     })
             },
         });
@@ -14068,10 +14470,12 @@ impl ApplicationHandler for App {
         event: WindowEvent,
     ) {
         match event {
-            WindowEvent::CloseRequested => {
+            WindowEvent::CloseRequested | WindowEvent::Destroyed => {
                 // Save before tearing down, or everything built this session
-                // is lost on quit.
-                self.save_world();
+                // is lost on quit. `Destroyed` is here for the same reason
+                // and used to fall into the catch-all arm below: a window
+                // taken away rather than closed is still a session ending.
+                let _ = self.save_world();
                 event_loop.exit();
             }
 
@@ -14191,9 +14595,44 @@ impl ApplicationHandler for App {
         }
     }
 
+    /// The lid closed, or the compositor put the game to sleep.
+    ///
+    /// On a Steam Deck this is not an edge case, it is how a session usually
+    /// pauses — and the process may never be resumed. Until stage 54 this
+    /// method did not exist, so winit's no-op default applied and everything
+    /// since the last manual save went with it.
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        log::info!("suspended; writing the world out first");
+        let _ = self.save_world();
+    }
+
+    /// The event loop is finishing. Belt to `CloseRequested`'s braces: a
+    /// shutdown that arrives some other way still writes the world down, and
+    /// a save with nothing to write is cheap.
+    fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        let _ = self.save_world();
+    }
+
     fn about_to_wait(&mut self, _event_loop: &ActiveEventLoop) {
         if let Some(active) = &self.active {
             active.window.request_redraw();
         }
     }
+}
+
+/// Record an order, and note whether it is one worth not repeating.
+///
+/// Every `journal.record` in the live game goes through here. The recording
+/// half is what it always was; the second half asks
+/// [`keeping::worth_saving_now`] whether this is the sort of order a player
+/// would resent doing twice — a sale, a print, a crew sent out — and if it is,
+/// arms a save for the top of the next frame.
+///
+/// A free function rather than a method on `App` because most call sites are
+/// already holding `&mut Active` and cannot reach `self`.
+fn record_order(active: &mut Active, command: journal::Command) {
+    if keeping::worth_saving_now(&command) {
+        active.save_soon = true;
+    }
+    active.journal.record(command);
 }

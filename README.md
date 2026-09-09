@@ -179,6 +179,15 @@ build in it, and it survives quitting — skills included.
   slope would want stepped footings, and no building stands on a slope yet.
 - A town's vault charges no fee and pays no interest, so banking is pure
   convenience rather than a decision with a price on it.
+- A save costs about six milliseconds, which is most of a frame, so an
+  autosave is a small visible hitch. Moving it off the main thread is its own
+  round; the number is measured in `--keeping` rather than guessed at.
+- The kept fallback holds region files by hard link, so a region damaged *in
+  place* by the disk itself is damaged in the backup too. Guarding that means
+  copying the whole world every save, which is a stall rather than a backup.
+- SIGTERM and SIGINT are unhandled: a `kill` or a Ctrl-C in a terminal loses
+  whatever the autosave has not written yet. Closing the lid, closing the
+  window and the window being taken away are all covered.
 - The sonar cannot draw a marker through rock. The object pass is opaque
   geometry with a depth test, and a second pass just for hologram markers is
   more renderer than the feature is worth, so ore with no exposed face is
@@ -1062,6 +1071,75 @@ blocks cut and 25 goods on the pile; save, drop the whole session, load it back
 — **25 goods still on it**; then 206 blocks over the hills to a depot that has
 no ore of its own and pays **405 credits** for yours. Four pictures come out of
 it, one per beat.
+
+### Nothing you did is lost
+
+You said this one was a gate: if progress doesn't save, it isn't really a game.
+You were right, and it was worse than either of us thought. I went through
+every single thing the game holds — a hundred and four of them — and every one
+of the thirty-four files it writes, and checked what actually happens to each
+when you quit.
+
+**There was no autosave. None at all.** It wrote your world when you pressed
+F5, when you typed SAVE, and when you closed the window. That was the lot —
+and all three of those are you politely asking it to stop. Everything else took
+the session with it: the thing crashing, running out of memory, being told to
+shut down, you closing the lid. On a Deck those aren't accidents, that's just
+how you stop playing. It saves itself now, every couple of minutes and right
+after anything you'd hate to redo — a sale, a drone bought, a crew sent out, a
+level, a town founded. And it saves when the lid closes, when the window goes,
+and on its way out.
+
+**When it did save, it could hurt you.** The ground was written carefully — to
+a spare file, pushed to the disk properly, then swapped in — so a crash
+couldn't catch it half done. The other thirty-four files weren't. Straight over
+the top, one after another. So a power cut mid-save didn't just lose the last
+bit: it could leave one file chopped off, and because every one of those files
+is written to be forgiving, a chopped-off wallet doesn't complain, it just sets
+your money to zero. Or it could leave your *money* from after you sold the ore
+sitting next to your *ore* from before it, and nothing anywhere compared the
+two. Every file goes to a spare name and gets swapped in now, and there's a
+stamp written across the whole set at the very end — so a mixed-up save is
+spotted and refused instead of quietly loaded, and there's a kept copy of the
+last good one to drop back to. The broken one isn't binned either; it's set
+aside in case it says something useful.
+
+**And if a save failed, nobody told you.** Disk full, card popped out, folder
+gone read-only — a line into a log you'll never open. Worse: if it couldn't set
+the save up when you started, it silently never saved *at all* and still said
+"WORLD WRITTEN OUT" when you asked. Now a failed save is red on screen and in
+the terminal, the "written out" line is earned and tells you which save and how
+long it took, and a world that can't be saved says so the moment you start it.
+
+Then the things that were just plain being lost:
+
+- **Break your container and everything in it was gone on reload.** The game
+  wrote those goods down on every single save and threw them away every single
+  time it read them back. It's been doing that since the feature shipped.
+  There's even a test proving it works — it just tests a different bit of code
+  than the one you play. There's one bit of code now, and both use it.
+- **Clear out a bunker, save, and they're all back up.** Restocked, including
+  the ones you'd put down. You keep the money, so you could sit there clearing
+  the same shelter for pay all day. That's a thing you lost *and* a thing you
+  could cheat with, out of one missing file.
+- **A pump you built and switched on came back switched off.** Pump's there,
+  water isn't moving, nothing says why.
+- **Hack a watch box and the hack was gone on load** — but the charge you spent
+  on it wasn't. You paid and got nothing.
+- **Mark out a patch to dig and quit before sending the crew: gone.**
+
+Last bit, the unglamorous one. There's a list in the code that's supposed to
+say what gets saved. It had **six filenames in it that have never existed**.
+Nothing was checking, because it was a comment. Now the game writes down what
+it actually saved, and a test compares that against the list and against the
+comment. It can't drift again.
+
+I played the whole thing to prove it: cut two dozen blocks, broke the
+container on them, saved, kept a fallback, tore the next save on purpose the
+way a crash would, and watched it come back from the one before with all
+twenty-four goods still there. A save takes about **six milliseconds** — the
+first time this game has ever measured that, because there was nothing
+measuring it, which is a poor place to be adding an autosave from.
 
 ### The drill knows what it's looking at
 

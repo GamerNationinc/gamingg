@@ -138,8 +138,7 @@ impl Marks {
     /// In sighting order, which is the order they were made in and therefore
     /// stable: the same report writes the same bytes twice.
     pub fn save(&self, directory: &Path) -> std::io::Result<()> {
-        let mut file =
-            std::io::BufWriter::new(std::fs::File::create(directory.join("marks.dat"))?);
+        let mut file = crate::keeping::begin(directory, "marks.dat")?;
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
         file.write_all(&(self.marks.len() as u32).to_le_bytes())?;
@@ -153,7 +152,7 @@ impl Marks {
             file.write_all(&mark.position.z.to_le_bytes())?;
             file.write_all(&mark.seen.to_le_bytes())?;
         }
-        file.flush()
+        file.commit()
     }
 
     /// Read it back, tolerating absence and damage.
