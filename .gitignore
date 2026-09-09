@@ -11,3 +11,9 @@ Cargo.lock.orig
 # Local worlds and user data
 /run/
 /saves/
+
+# Capture working directory: the PPMs each round's fixtures write, the PNGs
+# they are converted to, and the little converter itself. Tens of megabytes a
+# round, regenerable from the `--` flags README documents, and never part of
+# the tree — this is the line that says so out loud.
+/scratchpad/
