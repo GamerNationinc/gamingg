@@ -235,11 +235,27 @@ build in it, and it survives quitting — skills included.
   `--replay` cannot see wealth: a session that mined and sold replays to the
   same *ground* but not to the same books. Found while building the played
   session; it wants a round of its own rather than a corner of one.
-- The played session walks by holding forward and working along a face when it
-  is stuck. That is honest about what legs can do and it is not a pathfinder:
-  a route with a doorway in it needs the doorway named as a waypoint, which is
-  why the house's and the shop's are. A real path-finder for the player would
-  make the harness able to go anywhere a person can.
+- The played session walks by holding forward, working along a face when it is
+  stuck, and — since stage 50 — sweeping the ground it can see when that stops
+  working. It is still not a route planner: it can only see as far as the
+  chunks that are loaded, so a detour longer than about thirty-five blocks is
+  one it has to find in pieces, and a route with a doorway in it still needs
+  the doorway named as a waypoint, which is why the house's, the shop's and
+  each town's gateway are.
+- Placing your first base container is the moment your fleet starts wanting
+  fuel: `Mining::fuelled` reports a machine as fuelled only while there is *no*
+  base to burn from, so declaring one quietly grounds the flier unless there is
+  HHO on the pile. Nothing says so. It is the same shape of trap as the ore
+  that used to vanish when you mined with no container, and it wants the same
+  answer — a line on the screen — rather than a rule change.
+- The pile itself persists now (`pile.dat`), but its *deposits* are not on the
+  journal any more than hand-mining's are, so a replayed session's pile
+  diverges from a live one's for the same reason the wallet does. Two holes of
+  one family; they want one round between them.
+- A town's ditch is crossable only at its gateways. Anywhere else it is three
+  blocks deep with a two-block mantle available, which is the point of a ditch
+  — but it also means a player who drops into one has to walk it round to a
+  gate, and nothing on the screen says that is what has happened.
 - There is no player inventory, so everything routes through the fleet's base
   pile — which is also what the movement system weighs you down by. Mining
   sixty blocks makes you walk at 0.55× until you sell, with the "pack" sat in a
@@ -970,6 +986,61 @@ only reaches for the jump when it is genuinely stuck, and "am I at the counter"
 is a raycast at the till, the same question the game asks, rather than a
 distance. And the third could not get past that cliff at all until it learned
 to walk along a face instead of bouncing off it.
+
+### Nobody could ever walk into a town
+
+The ask was simple enough: go scouting, dig something up, **save the game,
+load it back**, then take the goods to a different village and sell them. Two
+things fell out, and the second one had been sitting there since the day the
+walls went up.
+
+**Your pile does not survive saving.** You mine a load of ore, it goes on your
+pile, you save, you quit, you come back — and it is gone. Not moved, gone. And
+the game has also forgotten you ever put a container down, so the *next* block
+you dig vanishes too, which is the silent loss from a couple of rounds back
+turning up again the moment you reload. What makes it daft is what *does*
+survive: your money, the prices you shifted at the counter, and every single
+thing in the chest in your house. The one pile the shop actually sells out of
+was the only thing in the game that forgot. It has its own little save file
+now, the same as the fuel tank and the wear ledger, and it matters more than
+"some ore went missing" — the fuel your drones burn comes off that pile, so a
+pile that forgets is a fleet that stops.
+
+**And then the haul could not get there.** Every town out here is walled, and
+outside the wall is a ditch three blocks deep. There is one way through a
+curtain wall and that is the gateway — and the ditch ran **straight across the
+gateway**, because the note in the code said a causeway would be a cheat and a
+drawbridge is a mechanism this game has not got. A body can pull itself up
+about two blocks. Three is one too many. So the gate was a hole in the wall
+with a trench in front of it, and **no player has been able to walk into a
+town, or back into the one they started in, since forts shipped.** Nobody
+noticed, because you wake up inside your own walls and everything that ever
+got tested happened in there.
+
+The note was wrong twice. A real fort built without a bridge is built with an
+**uncut causeway** at the gate — a strip of ground left in place — which is a
+fortification detail, not a compromise. And it made the entire town layer
+unreachable on foot. The gates have their causeways now, and a test walks each
+one from outside the ditch to inside the wall and fails the build if the ground
+is broken anywhere along it.
+
+**The walker also learned to stop and look.** It used to hold forward and
+sidestep, which is what a person does and is plenty inside a town; two hundred
+blocks of open country is another matter, and widening the sidestep or
+doubling the allowance only ever got it pacing the same ridge for longer. So
+when the legs run out of ideas it now sweeps the ground it can actually see —
+the same breadth-first search the drones have used since the beginning, but
+with a *body's* rules rather than a machine's: two blocks of headroom, a climb
+of two, and a drop of six. That difference is the whole difference between a
+wall and a staircase on a hillside, and the drones' own version had said 2,673
+cells out of 218,000 were reachable and none of them any use.
+
+The run, end to end: the flier sweeps a sector in 792 ticks and comes back with
+two pings, the best of them 322 columns of ore under no overburden at all; 20
+blocks cut and 25 goods on the pile; save, drop the whole session, load it back
+— **25 goods still on it**; then 206 blocks over the hills to a depot that has
+no ore of its own and pays **405 credits** for yours. Four pictures come out of
+it, one per beat.
 
 ### The body stays out of the wall
 
@@ -2057,6 +2128,12 @@ cargo run --release -p vx-app -- --screenshot gimbal.ppm --gimbal --at 0,10
 # ore, cut it, home, sold — and photograph all four beats. Writes
 # play-01-door.ppm, play-02-out.ppm, play-03-ore.ppm and play-04-counter.ppm
 cargo run --release -p vx-app -- --screenshot play.ppm --play --seed 2024 --at 146,30
+
+# the same loop, but through a save and out to a *different* town: scout with
+# the flier, cut what it found, save and reload, then haul it over the hills
+# and sell it at a counter that is not yours. Writes haul-01-ping.ppm,
+# haul-02-cut.ppm, haul-03-reloaded.ppm and haul-04-sold.ppm
+cargo run --release -p vx-app -- --screenshot haul.ppm --haul --seed 2024 --at 146,30
 
 # put a bigger crew on the next dispatch
 cargo run --release -p vx-app -- --drones 8

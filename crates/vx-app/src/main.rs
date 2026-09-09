@@ -8,6 +8,7 @@
 //!   display, so it works over SSH, in CI, and against a software Vulkan
 //!   driver — and is how the whole stack gets smoke-tested without a GPU.
 
+mod afoot;
 mod arcade;
 mod arsenal;
 mod audio;
@@ -45,6 +46,7 @@ mod map;
 mod mining;
 mod people;
 mod permits;
+mod pile;
 mod electrolysis;
 mod fuel;
 mod movement;
@@ -234,6 +236,8 @@ struct Options {
     play: bool,
     /// Look through a machine's gimbal, and at where it hangs.
     gimbal: bool,
+    /// Scout, collect, save, load, and haul the goods to another town.
+    haul: bool,
     /// Draw the terminal over the capture, with a session's worth of log.
     terminal: bool,
     /// Market day in the hometown, with the roster and a word on the
@@ -328,6 +332,7 @@ fn parse_args() -> Result<Options, String> {
         footing: false,
         play: false,
         gimbal: false,
+        haul: false,
         terminal: false,
         people: false,
         pad: false,
@@ -434,6 +439,7 @@ fn parse_args() -> Result<Options, String> {
             "--footing" => options.footing = true,
             "--play" => options.play = true,
             "--gimbal" => options.gimbal = true,
+            "--haul" => options.haul = true,
             "--terminal" => options.terminal = true,
             "--osk" => {
                 options.terminal = true;
@@ -858,6 +864,12 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     // it now sees — and, beside it, where it hangs. Two beats, one process.
     if options.gimbal {
         return photograph_the_gimbal(&context, &mut renderer, &mut camera, options, path);
+    }
+
+    // The long loop: scout, collect, save, load, and take it somewhere that
+    // pays. The round's whole point is the save in the middle of it.
+    if options.haul {
+        return haul_it_somewhere(&context, &mut renderer, &mut camera, options, path);
     }
 
     // A capture's sky is normally the hour alone. The weather fixtures set
@@ -4730,13 +4742,13 @@ fn play_the_loop(
     photograph(context, renderer, camera, &mut session, "ore", face)?;
 
     // --- 4. Home, and paid ---------------------------------------------
-    let back = session.walk_route(&session.counter_route(), 8 * 400);
+    let back = session.walk_route(&session.counter_route(&home), 8 * 400);
     println!(
         "  home again: {back:?} ({} ticks laden, {} out)",
         back.ticks(),
         went.ticks() + leg.ticks() + there.ticks()
     );
-    if !back.reached() || !session.at_the_counter() {
+    if !back.reached() || !session.at_the_counter(&home) {
         return Err(format!(
             "could not get back to the counter to trade: {back:?}, standing at {:?}",
             session.player.position
@@ -4761,6 +4773,252 @@ fn play_the_loop(
         session.journal.entries().len(),
         session.lost
     );
+    Ok(())
+}
+
+/// Scout, collect, save, load, haul, sell — the long loop, photographed.
+///
+/// The round's reason for existing is the save in the middle: the fleet's base
+/// pile used to be the one thing a player owned that a save forgot, so the
+/// beats either side of the reload are the picture worth having.
+fn haul_it_somewhere(
+    context: &GpuContext,
+    renderer: &mut Renderer,
+    camera: &mut Camera,
+    options: &Options,
+    path: &str,
+) -> Result<(), String> {
+    let stem = path.strip_suffix(".ppm").unwrap_or(path);
+    let mut shot = 0;
+
+    let mut photograph = |context: &GpuContext,
+                          renderer: &mut Renderer,
+                          camera: &mut Camera,
+                          session: &mut session::Session,
+                          beat: &str,
+                          subject: glam::DVec3|
+     -> Result<(), String> {
+        shot += 1;
+        let here = vx_core::BlockPos::new(
+            session.player.position.x.floor() as i32,
+            session.player.position.y.floor() as i32,
+            session.player.position.z.floor() as i32,
+        )
+        .chunk();
+        session.world.load_around(here, 4);
+        let dropped: Vec<vx_core::ChunkPos> = session
+            .world
+            .loaded_chunks()
+            .filter(|pos| (pos.x - here.x).abs() > 5 || (pos.z - here.z).abs() > 5)
+            .collect();
+        for pos in dropped {
+            renderer.remove_chunk(pos);
+        }
+        session.world.unload_beyond(here, 5);
+        remesh_all(context, renderer, &mut session.world);
+
+        // Frame it the way a person stood there would: level with the eye and
+        // far enough off to see something. A subject at your own feet — the
+        // seam you walked to, the till you are leaning on — pitches the
+        // follow camera straight down and fills the picture with the back of
+        // your own head, which is what the first four beats came out as.
+        let eye = session.player.eye_position();
+        let mut bearing = subject - eye;
+        bearing.y = 0.0;
+        let subject = if bearing.length() < 0.5 {
+            eye + session.forward().as_dvec3() * 8.0
+        } else {
+            eye + bearing.normalize() * bearing.length().max(8.0)
+        };
+        camera.position = eye;
+        look_at(camera, subject);
+        camera.position = view::camera_placement(
+            &session.world,
+            camera,
+            eye,
+            view::ViewMode::ThirdPerson,
+        );
+        look_at(camera, subject);
+        renderer.update_camera(&context.queue, camera);
+
+        let third_person = camera.position != eye;
+        let drawn: Vec<vx_render::Object> = if third_person {
+            let origin = renderer.render_origin().as_dvec3();
+            let feet = (session.player.position - origin).as_vec3();
+            rig::Rig::player()
+                .objects(feet, session.yaw, 0.0)
+                .into_iter()
+                .map(|object| object.already_relative())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        renderer.set_objects(&context.device, &context.queue, &drawn);
+
+        let out = format!("{stem}-{shot:02}-{beat}.ppm");
+        capture_frame(context, renderer, options.width, options.height)
+            .write_ppm(&out)
+            .map_err(|error| format!("could not write {out}: {error}"))?;
+        println!("  beat {shot}: {beat} -> {out}");
+        Ok(())
+    };
+
+    let root = std::env::temp_dir().join(format!("vx-haul-{}", std::process::id()));
+    std::fs::remove_dir_all(&root).ok();
+
+    let mut session = session::Session::open(options.seed);
+    let home = session.home();
+    let chest = vx_world::town::chest_position(&home);
+    session.place_base(vx_core::BlockPos::new(chest.x, chest.y, chest.z));
+    // Fuel first, or declaring that base is what grounds the flier.
+    session.fuel_the_fleet(6);
+
+    // --- Scouting ------------------------------------------------------
+    let target = (options.at.0.max(120), options.at.1.max(30));
+    let ticks = session
+        .scan_sector(target, 8 * 900)
+        .ok_or("the flier never finished its sweep")?;
+    let pings = session.pings();
+    println!(
+        "swept the sector around {target:?} in {ticks} ticks: {} pings",
+        pings.len()
+    );
+    let ping = pings
+        .iter()
+        .max_by_key(|ping| ping.ore_columns)
+        .ok_or("the sweep found nothing to dig")?;
+    println!(
+        "  richest: {:?}, {} columns, {} blocks of overburden",
+        ping.position, ping.ore_columns, ping.depth
+    );
+
+    let seam = glam::DVec3::new(
+        f64::from(ping.position.x) + 0.5,
+        f64::from(ping.position.y),
+        f64::from(ping.position.z) + 0.5,
+    );
+    let went = session.walk_route(&[session.doorstep(), seam], 8 * 400);
+    println!("  walked to the ping: {went:?}");
+    photograph(context, renderer, camera, &mut session, "ping", seam)?;
+
+    // --- Collecting ----------------------------------------------------
+    let body = vx_agent::find_body(&session.world, (ping.position.x, ping.position.z), 48);
+    let mut cut = 0;
+    if let Some(body) = body {
+        for _ in 0..20 {
+            let Some(next) = body
+                .blocks()
+                .filter(|pos| vx_agent::is_ore(&session.world, *pos))
+                .filter(|pos| {
+                    (glam::DVec3::new(
+                        f64::from(pos.x) + 0.5,
+                        f64::from(pos.y) + 0.5,
+                        f64::from(pos.z) + 0.5,
+                    ) - session.eye())
+                    .length()
+                        < f64::from(session::REACH) - 0.5
+                })
+                .min_by_key(|pos| -pos.y)
+            else {
+                break;
+            };
+            session.look_at(next);
+            if matches!(session.drill_through(600), Some(drill::Deposited::Piled(_))) {
+                cut += 1;
+            } else {
+                break;
+            }
+        }
+    }
+    let before = session.pile().map_or(0, |pile| pile.total());
+    println!("  cut {cut} blocks; the pile holds {before}");
+    let ahead = session.player.position + (session.forward() * 4.0).as_dvec3();
+    photograph(context, renderer, camera, &mut session, "cut", ahead)?;
+
+    // --- Save, and load it straight back -------------------------------
+    session
+        .save_to(&root)
+        .map_err(|error| format!("could not save: {error}"))?;
+    let credits_before = session.wallet.credits();
+    drop(session);
+
+    let mut session = session::Session::load_from(&root)
+        .map_err(|error| format!("could not load the save back: {error}"))?;
+    std::fs::remove_dir_all(&root).ok();
+    let after = session.pile().map_or(0, |pile| pile.total());
+    println!("  saved and reloaded: the pile holds {after} (was {before})");
+    if after != before {
+        return Err(format!("the pile lost {} goods across a save", before - after));
+    }
+    let doorstep = session.doorstep();
+    photograph(context, renderer, camera, &mut session, "reloaded", doorstep)?;
+
+    // --- Somewhere that pays -------------------------------------------
+    let towns = session.world.towns_near((0, 0), 4_000);
+    let elsewhere = towns
+        .iter()
+        .find(|site| !site.is_home())
+        .ok_or("no other town on this frontier")
+        .copied()?;
+    let away = ((elsewhere.centre.0 as f64).powi(2) + (elsewhere.centre.1 as f64).powi(2)).sqrt();
+    println!(
+        "  nearest other town: {:?} {:?}, {away:.0} blocks off",
+        elsewhere.speciality, elsewhere.centre
+    );
+
+    // Walk it in legs so each gets its own detour allowance.
+    let counter = vx_world::town::counter_position(&elsewhere);
+    // Out of the door first, and then *clear of it*. Reloading a save stands
+    // you back in your own house — the live game does the same — so a route
+    // that sets off on the bearing of a town two hundred blocks away walks
+    // into the kitchen wall. The doorstep alone is not enough: the town the
+    // goods are going to is west of here and the door faces east, so a walker
+    // that turns the moment it is over the threshold turns straight back
+    // through it. The lane outside is the first place a bearing is safe.
+    let doorstep = session.doorstep();
+    let clear = doorstep + glam::DVec3::new(6.0, 0.0, 0.0);
+    let to = glam::DVec3::new(
+        f64::from(counter.x) + 0.5,
+        doorstep.y,
+        f64::from(counter.z) + 0.5,
+    );
+    // Out of the house, out of the *town*, across, in through the far gate,
+    // and only then at the counter. Both walls are the reason for this shape:
+    // a bearing taken on the plaza points at the inside of your own rampart.
+    let home_gate = session.gateway_toward(&home, to);
+    let far_gate = session.gateway_toward(&elsewhere, clear);
+    let mut legs: Vec<glam::DVec3> = vec![doorstep, clear, home_gate];
+    let from = home_gate;
+    let steps = ((far_gate - from).length() / 90.0).ceil().max(1.0) as i32;
+    for step in 1..=steps {
+        let along = f64::from(step) / f64::from(steps);
+        legs.push(from + (far_gate - from) * along);
+    }
+    legs.extend_from_slice(&session.counter_route(&elsewhere));
+    let hauled = session.walk_route(&legs, 8 * 6_000);
+    println!("  hauled it there: {hauled:?}");
+    let earned = if hauled.reached() && session.at_the_counter(&elsewhere) {
+        session.sell_everything_at(&elsewhere)
+    } else {
+        println!(
+            "  stopped {:.0} blocks short at {:?}",
+            (to - session.player.position).length(),
+            session.player.position.round()
+        );
+        0
+    };
+    println!(
+        "  sold for {earned} CR; the wallet holds {} (was {credits_before})",
+        session.wallet.credits()
+    );
+    let till = glam::DVec3::new(
+        f64::from(counter.x) + 0.5,
+        f64::from(counter.y) + 0.5,
+        f64::from(counter.z) + 0.5,
+    );
+    photograph(context, renderer, camera, &mut session, "sold", till)?;
+
+    println!("played {} ticks over the whole loop", session.tick);
     Ok(())
 }
 
@@ -12214,6 +12472,14 @@ impl App {
         if let Err(error) = active.mining.tank.save(save.root()) {
             log::error!("could not save the fleet's tank: {error}");
         }
+        // The pile, which everything else in the game already remembered
+        // better than the game did: the wallet, the town's books and the
+        // house chest all survived a save and the one pile the shop sells out
+        // of did not. It also feeds the tank above it, so a forgotten pile is
+        // a fleet that stops working.
+        if let Err(error) = pile::save(&active.mining.fleet, save.root()) {
+            log::error!("could not save the base pile: {error}");
+        }
         if let Err(error) = active.mining.wear.save(save.root()) {
             log::error!("could not save the wear ledger: {error}");
         }
@@ -12436,6 +12702,9 @@ impl ApplicationHandler for App {
         let mut tank = fuel::Tank::default();
         let mut crew_wear = wear::Wear::default();
         let mut holes = well::Wells::default();
+        // A bare fleet to read the saved pile into, so the base and its goods
+        // can be grafted onto the real one below.
+        let mut base_pile = vx_agent::Fleet::new();
         let mut cabinet = arcade::Arcade::default();
         let mut stands = succession::Ledger::default();
         let mut warrants = warrant::Docket::default();
@@ -12467,6 +12736,10 @@ impl ApplicationHandler for App {
             // journal says it did.
             tank.load(save.root());
             crew_wear.load(save.root());
+            // And the pile the tank burns out of, for the tank's own reason:
+            // no pile is no fuel, no fuel is a fleet that does not turn, and
+            // a fleet that does not turn cuts different ground.
+            pile::load(&mut base_pile, save.root());
             // And the holes, for the tank's reason exactly: a well puts
             // goods on the pile the fleet burns, so a reload that forgot one
             // would dig a different hole than the journal says it dug.
@@ -12542,6 +12815,9 @@ impl ApplicationHandler for App {
                 // fleet's youth.
                 mining.wear = crew_wear;
                 mining.wells = holes;
+                // The container you placed is still standing in the region
+                // file; this is what makes it mean something again.
+                mining.fleet.base = base_pile.base;
                 mining
             },
             map,

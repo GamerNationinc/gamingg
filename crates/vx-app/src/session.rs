@@ -32,9 +32,11 @@
 
 use glam::{DVec3, Vec3};
 
+use std::path::Path;
+
 use vx_agent::Stockpile;
 use vx_core::{BlockPos, EventBus};
-use vx_world::{break_block, raycast_solid, PlayerBody, World};
+use vx_world::{break_block, raycast_solid, PlayerBody, World, WorldSave};
 
 use crate::drill::{self, Deposited};
 use crate::economy::Economy;
@@ -118,6 +120,10 @@ pub struct Session {
     pub lost: u64,
     last_move: Option<MoveCommand>,
     loaded: Option<vx_core::ChunkPos>,
+    /// The save this session was opened from, if any. Held so ground the
+    /// walker reaches later still comes off disk rather than being
+    /// regenerated over the top of what a previous session dug.
+    save: Option<WorldSave>,
 }
 
 impl Session {
@@ -159,7 +165,75 @@ impl Session {
             lost: 0,
             last_move: None,
             loaded: Some(chunk),
+            save: None,
         }
+    }
+
+    /// Write the session to a save directory, the way quitting does.
+    ///
+    /// The same set of files `App::save_world` writes, minus the ones a
+    /// `Session` does not own. The world's modified chunks are the keyframe;
+    /// the journal is the oracle beside them.
+    pub fn save_to(&mut self, root: &Path) -> std::io::Result<()> {
+        let save = WorldSave::create(root)
+            .map_err(|error| std::io::Error::other(format!("{error}")))?;
+        save.write_meta(self.world.seed())
+            .map_err(|error| std::io::Error::other(format!("{error}")))?;
+        save.save_world(&mut self.world)
+            .map_err(|error| std::io::Error::other(format!("{error}")))?;
+        self.journal.save(root)?;
+        self.wallet.save(root)?;
+        self.skills.save(root)?;
+        self.economy.save(root)?;
+        self.mining.tank.save(root)?;
+        crate::pile::save(&self.mining.fleet, root)?;
+        Ok(())
+    }
+
+    /// Open a session back up from a save directory.
+    ///
+    /// A second constructor rather than a flag on [`Session::open`], because
+    /// the two genuinely differ: `open` generates a world from a seed and
+    /// stands the player in the doorway, and this one reads the seed off the
+    /// save, pulls the chunks back through it rather than regenerating them,
+    /// and restores everything that was written beside them.
+    pub fn load_from(root: &Path) -> std::io::Result<Session> {
+        let save = WorldSave::create(root)
+            .map_err(|error| std::io::Error::other(format!("{error}")))?;
+        let seed = save
+            .read_meta()
+            .map_err(|error| std::io::Error::other(format!("{error}")))?;
+
+        let mut session = Session::open(seed);
+        // Pull the saved ground back in place of the generated ground. The
+        // same free function the live game's boot uses, so a chunk that was
+        // dug in the last session comes back dug.
+        let around: Vec<vx_core::ChunkPos> = session.world.loaded_chunks().collect();
+        for pos in around {
+            session.world.unload_beyond(pos, i32::MAX);
+        }
+        let here = BlockPos::new(
+            session.player.position.x.floor() as i32,
+            session.player.position.y.floor() as i32,
+            session.player.position.z.floor() as i32,
+        )
+        .chunk();
+        for dx in -KEEP_LOADED..=KEEP_LOADED {
+            for dz in -KEEP_LOADED..=KEEP_LOADED {
+                let pos = vx_core::ChunkPos::new(here.x + dx, here.z + dz);
+                crate::streaming::load_or_generate(&mut session.world, Some(&save), pos);
+            }
+        }
+        session.loaded = Some(here);
+        session.save = Some(save);
+
+        session.journal = crate::journal::CommandLog::load(root);
+        session.wallet.load(root);
+        session.skills.load(root);
+        session.economy.load(root);
+        session.mining.tank.load(root);
+        crate::pile::load(&mut session.mining.fleet, root);
+        Ok(session)
     }
 
     /// The town the house stands in.
@@ -246,7 +320,20 @@ impl Session {
         if self.loaded == Some(here) {
             return;
         }
-        self.world.load_around(here, KEEP_LOADED);
+        match &self.save {
+            // Saved ground first: a hole dug last session is still a hole.
+            Some(save) => {
+                for dx in -KEEP_LOADED..=KEEP_LOADED {
+                    for dz in -KEEP_LOADED..=KEEP_LOADED {
+                        let pos = vx_core::ChunkPos::new(here.x + dx, here.z + dz);
+                        crate::streaming::load_or_generate(&mut self.world, Some(save), pos);
+                    }
+                }
+            }
+            None => {
+                self.world.load_around(here, KEEP_LOADED);
+            }
+        }
         self.loaded = Some(here);
     }
 
@@ -272,6 +359,201 @@ impl Session {
             .clamp(-std::f32::consts::FRAC_PI_2, std::f32::consts::FRAC_PI_2);
     }
 
+    /// Walk to a place: blunder at it, and when blundering stops working,
+    /// stop and work out a way round before blundering at it again.
+    ///
+    /// # Why there are two halves
+    ///
+    /// [`Session::blunder_to`] is what a player pointing at the horizon and
+    /// holding W actually gets, sidesteps included, and it is enough for
+    /// everything inside a town. It is not enough for two hundred blocks of
+    /// open country: stage 50's first haul walked out of Stonehaven, crossed
+    /// forty blocks of hill, met a ridge at (-136, -110) and spent
+    /// twenty-four sidesteps pacing the same piece of it. Widening the
+    /// sidestep did not help and neither did doubling the allowance, because
+    /// the shape of the problem is not "there is a wall in front of me", it
+    /// is "the way through is not in the direction I am facing".
+    ///
+    /// So when the legs run out of ideas the walker sweeps the ground it can
+    /// actually see — [`crate::afoot::Ground`], the drones' breadth-first
+    /// search with a body's rules rather than a machine's — and walks to
+    /// whichever piece of it lies nearest the place it is going. Then it
+    /// blunders on from there. That gets it round anything smaller than the
+    /// loaded box, which on this frontier is most things.
+    ///
+    /// It is still not a pathfinder for the *player*: the game has no route
+    /// planner and a person on foot does not get one. It is a person walking
+    /// up to a ridge, looking along it, and going the way it opens.
+    pub fn walk_to(&mut self, target: DVec3, budget: u32) -> Arrival {
+        /// How many times the walker will stop and look before giving up.
+        const THINKS: u32 = 8;
+
+        let mut spent = 0;
+        let mut tried = Vec::new();
+        for _ in 0..THINKS {
+            match self.blunder_to(target, budget - spent) {
+                Arrival::Reached { ticks } => {
+                    return Arrival::Reached {
+                        ticks: spent + ticks,
+                    }
+                }
+                Arrival::Stuck { at, ticks } => {
+                    spent += ticks;
+                    if spent >= budget {
+                        return Arrival::Stuck { at, ticks: spent };
+                    }
+                    match self.feel_a_way_round(target, budget - spent, &mut tried) {
+                        Some(ticks) => spent += ticks,
+                        // Nothing loaded around the walker is any closer than
+                        // where it is standing. That is genuinely stuck.
+                        None => {
+                            return Arrival::Stuck {
+                                at: self.player.position,
+                                ticks: spent,
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Arrival::Stuck {
+            at: self.player.position,
+            ticks: spent,
+        }
+    }
+
+    /// Walk to the loaded ground nearest the target, and report what it cost.
+    /// `None` when there is nowhere better to stand than here.
+    ///
+    /// The sweep runs **from the walker outward**, not from the target: the
+    /// target is two hundred blocks away and not loaded, so a sweep from it
+    /// would label nothing. Sweeping from here labels every cell a body could
+    /// reach on foot, and the best of those is simply the reachable cell
+    /// closest to where it is going — which is the honest answer to "look
+    /// along the ridge and go the way it opens".
+    fn feel_a_way_round(
+        &mut self,
+        target: DVec3,
+        budget: u32,
+        tried: &mut Vec<BlockPos>,
+    ) -> Option<u32> {
+        /// Half-width of the ground the walker considers, in blocks. Kept
+        /// inside `KEEP_LOADED` chunks so every cell in it is real ground
+        /// rather than the air an unloaded chunk reads as.
+        const LOOK: i32 = 36;
+        /// Half-height. Deep enough for a gully, shallow enough that the
+        /// sweep stays cheap.
+        const RISE: i32 = 20;
+        /// Cells between the waypoints the route is boiled down to. Every
+        /// cell would be a waypoint a stride apart, which the walker would
+        /// spend its whole budget arriving at.
+        const STRIDE: usize = 6;
+        /// How far apart two ideas have to be to count as different ones, in
+        /// blocks. Also the least sideways ground a shoulder-of-the-hill
+        /// detour has to be worth before it is worth walking.
+        const SHRUG: i32 = 8;
+
+        self.keep_chunks_loaded();
+        let here = BlockPos::new(
+            self.player.position.x.floor() as i32,
+            self.player.position.y.floor() as i32,
+            self.player.position.z.floor() as i32,
+        );
+        let ground = crate::afoot::Ground::sweep(&self.world, here, LOOK, RISE);
+
+        let level = |x: i32, z: i32| {
+            let (dx, dz) = (f64::from(x) + 0.5 - target.x, f64::from(z) + 0.5 - target.z);
+            dx * dx + dz * dz
+        };
+        let start = level(here.x, here.z);
+        // Somewhere the walker has already been sent and got stuck from is not
+        // somewhere to send it again. Without this the walker paces: the ledge
+        // to the south looks best from the ridge, the ridge looks best from
+        // the ledge, and it spends the whole budget between them.
+        let fresh = |cell: &BlockPos, tried: &[BlockPos]| {
+            !tried.iter().any(|old| {
+                let (dx, dz) = (f64::from(cell.x - old.x), f64::from(cell.z - old.z));
+                dx * dx + dz * dz < f64::from(SHRUG * SHRUG)
+            })
+        };
+        // Ties are broken by position throughout, so the same ground gives the
+        // same answer every run — the walker is inside the replayed
+        // simulation and may not wander differently between them.
+        let order = |a: &(f64, BlockPos), b: &(f64, BlockPos)| {
+            a.0.total_cmp(&b.0)
+                .then_with(|| (a.1.x, a.1.y, a.1.z).cmp(&(b.1.x, b.1.y, b.1.z)))
+        };
+
+        let closer = ground
+            .reachable()
+            .filter(|cell| fresh(cell, tried))
+            .map(|cell| (level(cell.x, cell.z), cell))
+            .filter(|(score, _)| *score < start - 1.0)
+            .min_by(order)
+            .map(|(_, cell)| cell);
+
+        // Nothing in sight is closer. That is a *ledge*, not a dead end: the
+        // way on is round the shoulder of the hill, and the first half of
+        // going round is going the wrong way. So take the furthest ground
+        // that is at least broadly the right way and look again from there —
+        // which is exactly what a person does when the direct line runs into
+        // a bank they cannot climb.
+        let best = match closer {
+            Some(cell) => cell,
+            None => {
+                let bearing = {
+                    let (dx, dz) = (target.x - self.player.position.x, target.z - self.player.position.z);
+                    let length = (dx * dx + dz * dz).sqrt().max(1.0);
+                    (dx / length, dz / length)
+                };
+                ground
+                    .reachable()
+                    .filter(|cell| fresh(cell, tried))
+                    .map(|cell| {
+                        let (dx, dz) = (
+                            f64::from(cell.x - here.x),
+                            f64::from(cell.z - here.z),
+                        );
+                        // Negated, so the *most* sideways progress sorts
+                        // first under the same comparator.
+                        (-(dx * bearing.0 + dz * bearing.1), cell)
+                    })
+                    .filter(|(along, _)| *along < -f64::from(SHRUG))
+                    .min_by(order)
+                    .map(|(_, cell)| cell)?
+            }
+        };
+        tried.push(best);
+
+        let route = ground.route_to(best)?;
+        let mut spent = 0;
+        let legs: Vec<BlockPos> = route
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| index % STRIDE == 0)
+            .map(|(_, cell)| *cell)
+            .chain(std::iter::once(best))
+            .collect();
+        for cell in legs {
+            if spent >= budget {
+                break;
+            }
+            let leg = DVec3::new(
+                f64::from(cell.x) + 0.5,
+                f64::from(cell.y),
+                f64::from(cell.z) + 0.5,
+            );
+            match self.blunder_to(leg, budget - spent) {
+                Arrival::Reached { ticks } => spent += ticks,
+                Arrival::Stuck { ticks, .. } => {
+                    spent += ticks;
+                    break;
+                }
+            }
+        }
+        Some(spent)
+    }
+
     /// Walk toward a place, holding forward and letting the movement system do
     /// the rest.
     ///
@@ -281,7 +563,7 @@ impl Session {
     /// stopped by things. It gives up when the budget runs out or when a long
     /// stretch of walking has not closed any distance, and says where it was
     /// standing when it did.
-    pub fn walk_to(&mut self, target: DVec3, budget: u32) -> Arrival {
+    fn blunder_to(&mut self, target: DVec3, budget: u32) -> Arrival {
         // A slice is an eighth of a second of game time: long enough that a
         // vault or a mantle finishes inside one, short enough that a wall is
         // noticed almost at once.
@@ -289,16 +571,35 @@ impl Session {
         /// Slices of no ground gained before the walker decides it is stuck
         /// on something and tries going round.
         const STALL: u32 = 4;
-        /// How far off the bearing a detour goes. Sixty degrees is enough to
-        /// clear a corner without walking back the way it came.
+        /// How far off the bearing a detour goes.
+        ///
+        /// A right angle, not the sixty degrees this started with. Sixty is
+        /// enough to clear the corner of a building, and that is all this
+        /// walker was ever asked to do — but sixty degrees still has a
+        /// forward component, so against a *ridge* it skims the face and
+        /// bumps it again every few strides, and a hundred-block detour buys
+        /// twenty blocks of sideways. A right angle walks the face.
         const DETOUR_TURN: f32 = std::f32::consts::FRAC_PI_3;
+        /// The turn a walker makes when stepping aside has stopped working.
+        ///
+        /// A sixty-degree detour is an answer to a wall in front of you. It is
+        /// no answer at all to a *room* — and this frontier has rooms in it
+        /// nobody put a door on the far side of. The first haul that made it
+        /// out of town walked into a bunker at (-136, -110), forty blocks
+        /// short of its destination, and spent twenty-four detours pacing the
+        /// same three walls of the same dead end, because turning one way by
+        /// sixty degrees over and over only ever traces a room's inside.
+        /// Getting out of a dead end means going back the way you came in.
+        const BACK_OUT: f32 = 2.4;
         /// How long it commits to a detour before looking at the target
         /// again. Long enough to get past a building; short enough that it
         /// does not wander off.
         const DETOUR_SLICES: u32 = 56;
         /// How many times it will try going round before admitting it cannot
-        /// get there.
-        const DETOURS: u32 = 12;
+        /// get there. Twelve was enough for a walk across town; a haul to the
+        /// next town crosses open country with mountains in it, and a single
+        /// ridge can cost half a dozen on its own.
+        const DETOURS: u32 = 24;
 
         let level = |a: DVec3, b: DVec3| {
             let (dx, dz) = (a.x - b.x, a.z - b.z);
@@ -312,6 +613,7 @@ impl Session {
         // sides is what turns "walk into the cliff, sidestep, walk into the
         // cliff" into working along a face until it ends.
         let mut side = 1.0f32;
+        let mut turn = DETOUR_TURN;
         let mut detour_left = 0;
         let mut detours_used = 0;
 
@@ -325,7 +627,7 @@ impl Session {
             // again.
             self.look_toward(DVec3::new(target.x, self.eye().y, target.z));
             if detour_left > 0 {
-                self.yaw += side * DETOUR_TURN;
+                self.yaw += side * turn;
                 detour_left -= 1;
             }
 
@@ -358,6 +660,15 @@ impl Session {
             if now < best - 0.05 {
                 best = now;
                 since_progress = 0;
+                // A detour that worked does not count against the next one.
+                //
+                // `detours_used` used to be a *lifetime* cap on one call, so a
+                // five-hundred block haul to the next town was punished for a
+                // fence it had already climbed in the first fifty — twelve
+                // obstacles total, however far it went. Resetting on real
+                // progress keeps the cap meaning what it should: twelve tries
+                // at the thing in front of you, not twelve for the journey.
+                detours_used = 0;
                 continue;
             }
             // A detour is expected to lose ground; it is not a stall.
@@ -379,6 +690,9 @@ impl Session {
                 };
             }
             detours_used += 1;
+            // Step aside twice, then back out. Stepping aside answers a wall;
+            // backing out is the only thing that answers a room.
+            turn = if detours_used % 3 == 0 { BACK_OUT } else { DETOUR_TURN };
             detour_left = DETOUR_SLICES;
             since_progress = 0;
             // Commit to a side for two tries before trying the other one. A
@@ -444,16 +758,69 @@ impl Session {
         )
     }
 
+    /// The gateway of a town's mini-star that faces `target`, as a place to
+    /// walk to.
+    ///
+    /// Every town has been walled since stage 32, and a rampart does not care
+    /// which way you were going: a haul that sets off on the bearing of the
+    /// next town along walks out of its own front door, across the plaza, and
+    /// into the inside of its own wall. The first `--haul` run did exactly
+    /// that and stopped dead at (-28, -27), which is the trace, not terrain.
+    ///
+    /// The four gateways sit on the cardinal axes because that is where the
+    /// roads are, so leaving is a two-part move — reach the gate that faces
+    /// where you are going, then set off — and arriving is the same move
+    /// backwards. The y is the caller's: `walk_to` measures on the level and
+    /// the ground under a gateway is whatever the fort cut it to.
+    pub fn gateway_toward(&self, site: &vx_world::town::TownSite, target: DVec3) -> DVec3 {
+        let fort = vx_world::fort::fort_for(site);
+        let bearing = (
+            target.x - f64::from(site.centre.0),
+            target.z - f64::from(site.centre.1),
+        );
+        let gate = fort
+            .gateways()
+            .into_iter()
+            .max_by(|a, b| {
+                let dot = |(x, z): (i32, i32)| {
+                    let (dx, dz) = (
+                        f64::from(x - site.centre.0),
+                        f64::from(z - site.centre.1),
+                    );
+                    let length = (dx * dx + dz * dz).sqrt().max(1.0);
+                    (dx * bearing.0 + dz * bearing.1) / length
+                };
+                dot(*a).total_cmp(&dot(*b))
+            })
+            .unwrap_or(site.centre);
+        // A pace past the trace, so the waypoint is out in the gateway rather
+        // than in the thickness of the wall itself.
+        let (dx, dz) = (
+            f64::from(gate.0 - site.centre.0),
+            f64::from(gate.1 - site.centre.1),
+        );
+        let length = (dx * dx + dz * dz).sqrt().max(1.0);
+        DVec3::new(
+            f64::from(gate.0) + 0.5 + dx / length * 2.0,
+            self.player.position.y,
+            f64::from(gate.1) + 0.5 + dz / length * 2.0,
+        )
+    }
+
     /// The route into the shop and up to the counter: the doorway first, then
     /// the customer's side of the counter run.
     ///
     /// The counter is *inside* a building, so walking at the counter's own
     /// coordinates walks into the shop's north wall — which is exactly what
     /// the first played run did.
-    pub fn counter_route(&self) -> [DVec3; 3] {
-        let site = self.home();
-        let door = vx_world::town::shop_door_position(&site);
-        let stand = vx_world::town::counter_stand_position(&site);
+    ///
+    /// Takes the town rather than assuming the hometown, because the whole
+    /// point of hauling is that you sell somewhere else: a refinery is short
+    /// of ore and pays for it, a mine is sitting on a hill of the stuff and
+    /// does not.
+    pub fn counter_route(&self, site: &vx_world::town::TownSite) -> [DVec3; 3] {
+        let door = vx_world::town::shop_door_position(site);
+        let stand = vx_world::town::counter_stand_position(site);
         [
             // Outside, square on to the doorway.
             DVec3::new(
@@ -476,6 +843,76 @@ impl Session {
                 f64::from(stand.z) + 0.5,
             ),
         ]
+    }
+
+    /// Put the fleet's flier in the air over the player, if it has none.
+    pub fn ensure_flier(&mut self) {
+        let at = self.player.position;
+        self.mining.ensure_flier(at);
+    }
+
+    /// Order a sweep of the sector containing a column, and fly it to
+    /// completion.
+    ///
+    /// This is the game's actual ore-finder — the paid flier's sector scan,
+    /// not the kestrel, which watches people and machines and is documented
+    /// as finding no ore at all. The sweep is a serpentine lawnmower path over
+    /// 64×64 columns, reading real blocks down to the scanner's depth, so the
+    /// **chunks must be loaded first** or an unread column reads as "no ore"
+    /// rather than as an error.
+    ///
+    /// Returns how many ticks it took, or `None` if it never finished inside
+    /// the budget — which is what a dry tank looks like from out here.
+    pub fn scan_sector(&mut self, at: (i32, i32), budget: u32) -> Option<u32> {
+        // Every column the sweep will read, plus the swath overhang.
+        let sector = vx_agent::Sector::containing(at.0, at.1);
+        let corner = sector.min_column();
+        let across = vx_agent::SECTOR_SIZE / vx_core::CHUNK_SIZE;
+        for cx in -1..=across {
+            for cz in -1..=across {
+                let chunk = BlockPos::new(
+                    corner.0 + cx * vx_core::CHUNK_SIZE,
+                    0,
+                    corner.1 + cz * vx_core::CHUNK_SIZE,
+                )
+                .chunk();
+                self.world.load_around(chunk, 0);
+            }
+        }
+
+        self.ensure_flier();
+        if !self.mining.dispatch_scan(at.0, at.1) {
+            return None;
+        }
+        let held = self.command(0);
+        let mut ticks = 0;
+        while ticks < budget {
+            if self.mining.fleet.is_surveyed(sector) {
+                return Some(ticks);
+            }
+            self.advance(8, held);
+            ticks += 8;
+        }
+        None
+    }
+
+    /// What the sweep found: one ping per ore body it saw.
+    pub fn pings(&self) -> Vec<vx_agent::Ping> {
+        self.mining.fleet.pings()
+    }
+
+    /// Put fuel on the pile, the way buying or printing HHO cells does.
+    ///
+    /// Needed before a scan, and the reason is a trap worth knowing: the
+    /// fleet burns fuel *out of the base pile*, and `Mining::fuelled` returns
+    /// true only while there is **no** base at all. So declaring your first
+    /// container — the thing the game now tells you to do before mining — is
+    /// also the thing that grounds your flier, unless there is fuel on the
+    /// pile for it.
+    pub fn fuel_the_fleet(&mut self, cells: u64) {
+        if let Some(base) = self.mining.fleet.base.as_mut() {
+            base.stockpile.add(crate::fuel::CELL.to_string(), cells);
+        }
     }
 
     /// Declare the fleet's base where a container stands.
@@ -564,8 +1001,8 @@ impl Session {
     /// matters — the first played run finished on the shop's *roof*, four
     /// blocks above the till and comfortably inside any radius you like,
     /// which a raycast calls what it is.
-    pub fn at_the_counter(&mut self) -> bool {
-        let counter = vx_world::town::counter_position(&self.home());
+    pub fn at_the_counter(&mut self, site: &vx_world::town::TownSite) -> bool {
+        let counter = vx_world::town::counter_position(site);
         self.look_at(counter);
         let Some(hit) = raycast_solid(
             &self.world,
@@ -590,7 +1027,18 @@ impl Session {
     ///
     /// Returns the credits earned.
     pub fn sell_everything(&mut self) -> u64 {
-        let site = self.home();
+        let home = self.home();
+        self.sell_everything_at(&home)
+    }
+
+    /// Sell everything sellable at a named town's counter.
+    ///
+    /// Nothing here is hometown-specific: `Economy` keys its books on
+    /// `site.centre`, and a town's opening stock comes from its speciality —
+    /// so the same pile is worth different money in different places, which
+    /// is the only reason to walk anywhere with it.
+    pub fn sell_everything_at(&mut self, site: &vx_world::town::TownSite) -> u64 {
+        let site = *site;
         let now = self.journal.tick();
         let before = self.wallet.credits();
 
@@ -789,15 +1237,16 @@ mod tests {
     #[test]
     fn you_can_walk_from_the_door_to_the_counter() {
         let mut session = ready();
+        let home_town = session.home();
         let mut route = vec![session.doorstep()];
-        route.extend_from_slice(&session.counter_route());
+        route.extend_from_slice(&session.counter_route(&home_town));
         let arrival = session.walk_route(&route, seconds(60.0));
         assert!(
             arrival.reached(),
             "could not walk to the counter: {arrival:?}"
         );
         assert!(
-            session.at_the_counter(),
+            session.at_the_counter(&home_town),
             "arrived but out of reach at {:?}",
             session.player.position
         );
@@ -982,13 +1431,13 @@ mod tests {
         assert_eq!(session.lost, 0, "{} blocks were thrown away", session.lost);
 
         // --- Coming home -----------------------------------------------
-        let back = session.walk_route(&session.counter_route(), seconds(300.0));
+        let back = session.walk_route(&session.counter_route(&home), seconds(300.0));
         eprintln!(
             "walked home: {back:?} -> {:?}",
             session.player.position.round()
         );
         assert!(back.reached(), "could not get home to the counter: {back:?}");
-        assert!(session.at_the_counter(), "home but out of reach of the counter");
+        assert!(session.at_the_counter(&home), "home but out of reach of the counter");
         // On the shop's floor, not on its roof. An earlier run of this very
         // loop finished four blocks above the till, comfortably inside any
         // radius you like, trying to sell ore down through the ceiling.
@@ -1026,6 +1475,205 @@ mod tests {
             "journal: {} entries over {} ticks",
             session.journal.entries().len(),
             session.tick
+        );
+    }
+
+    /// A scratch directory that cleans up after itself, like `wear.rs`'s.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let directory = std::env::temp_dir().join(format!(
+            "vx-session-{name}-{}",
+            std::process::id()
+        ));
+        std::fs::remove_dir_all(&directory).ok();
+        std::fs::create_dir_all(&directory).unwrap();
+        directory
+    }
+
+    /// **The bug this round exists to fix.**
+    ///
+    /// Everything else a player owns survives a save: the wallet, the town's
+    /// shifted prices, the chest in the house. The one pile the shop actually
+    /// sells out of did not — `Fleet` has no save of any kind, and
+    /// `App::save_world` names the tank, the wear ledger and the wells and
+    /// stops. So you mined, saved, reloaded, and the goods were gone.
+    #[test]
+    fn the_pile_survives_a_save_and_a_reload() {
+        let directory = scratch("pile");
+        let (before, at) = {
+            let mut session = ready();
+            if let Some(base) = session.mining.fleet.base.as_mut() {
+                base.stockpile.add("engine:copper_ore".to_string(), 37);
+                base.stockpile.add("engine:stone".to_string(), 4);
+            }
+            session.save_to(&directory).unwrap();
+            (
+                session.pile().map(|pile| pile.total()),
+                session.mining.fleet.base.as_ref().map(|base| base.position),
+            )
+        };
+        assert_eq!(before, Some(41));
+
+        let reloaded = Session::load_from(&directory).unwrap();
+        std::fs::remove_dir_all(&directory).ok();
+
+        assert_eq!(
+            reloaded.mining.fleet.base.as_ref().map(|base| base.position),
+            at,
+            "the base was not declared after a reload"
+        );
+        let pile = reloaded.pile().expect("no pile after a reload");
+        assert_eq!(pile.count("engine:copper_ore"), 37, "the ore did not come back");
+        assert_eq!(pile.count("engine:stone"), 4);
+        assert_eq!(pile.total(), 41);
+    }
+
+    /// The second-order half of the same bug: with the base gone, the *next*
+    /// block mined reported `NoBase` and evaporated too — stage 48's silent
+    /// loss, reappearing across a save boundary.
+    #[test]
+    fn a_reloaded_session_can_still_mine() {
+        let directory = scratch("remine");
+        {
+            let mut session = ready();
+            session.save_to(&directory).unwrap();
+        }
+        let mut session = Session::load_from(&directory).unwrap();
+        std::fs::remove_dir_all(&directory).ok();
+
+        let under = BlockPos::new(
+            session.player.position.x.floor() as i32,
+            session.player.position.y.floor() as i32 - 1,
+            session.player.position.z.floor() as i32,
+        );
+        session.look_at(under);
+        let landed = session.drill_through(600);
+        assert!(
+            matches!(landed, Some(Deposited::Piled(_))),
+            "a block mined after a reload went nowhere: {landed:?}"
+        );
+        assert_eq!(session.lost, 0);
+    }
+
+    /// The things that already worked, so the fix cannot quietly break them.
+    #[test]
+    fn the_wallet_and_the_town_books_survive_too() {
+        let directory = scratch("books");
+        let (credits, price) = {
+            let mut session = ready();
+            if let Some(base) = session.mining.fleet.base.as_mut() {
+                base.stockpile.add("engine:copper_ore".to_string(), 30);
+            }
+            let earned = session.sell_everything();
+            assert!(earned > 0);
+            let site = session.home();
+            let now = session.journal.tick();
+            let price = crate::shop::sell_price(
+                session.economy.market(&site, now),
+                "engine:copper_ore",
+            );
+            session.save_to(&directory).unwrap();
+            (session.wallet.credits(), price)
+        };
+
+        let mut reloaded = Session::load_from(&directory).unwrap();
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(reloaded.wallet.credits(), credits, "the wallet forgot");
+        let site = reloaded.home();
+        let now = reloaded.journal.tick();
+        assert_eq!(
+            crate::shop::sell_price(reloaded.economy.market(&site, now), "engine:copper_ore"),
+            price,
+            "the town forgot the price a sale moved"
+        );
+    }
+
+    /// The flier finds ore the eye cannot: buried bodies, read through real
+    /// blocks down to the scanner's depth.
+    ///
+    /// It also exercises the trap: the fleet burns fuel out of the base pile,
+    /// and `fuelled()` is true only while there is *no* base — so the moment
+    /// you declare one, your flier stops flying unless you have put HHO on
+    /// it. The `fuel_the_fleet` call below is not scaffolding, it is what a
+    /// player has to do.
+    #[test]
+    fn a_scan_finds_ore_and_needs_fuel_to_do_it() {
+        let mut session = ready();
+        session.fuel_the_fleet(4);
+        let ticks = session
+            .scan_sector((146, 30), 8 * 900)
+            .expect("the sweep never finished");
+        let pings = session.pings();
+        eprintln!("swept in {ticks} ticks, {} pings", pings.len());
+        assert!(!pings.is_empty(), "a sector with a known outcrop pinged nothing");
+        // A ping names a place with ore under it, at a depth the scanner can
+        // actually reach.
+        for ping in &pings {
+            assert!(
+                ping.depth >= 0 && ping.depth <= vx_agent::SCAN_DEPTH + 12,
+                "a ping claims a depth of {} blocks",
+                ping.depth
+            );
+            assert!(ping.ore_columns > 0);
+        }
+
+        // And with no fuel on the pile the same order goes nowhere: the
+        // flier is grounded, not slow.
+        let mut dry = ready();
+        assert!(
+            dry.scan_sector((146, 30), 8 * 120).is_none(),
+            "a dry fleet finished a sweep"
+        );
+    }
+
+    /// Why you would walk anywhere: a refinery is short of ore and pays for
+    /// it, a mine is sitting on a hill of the stuff and does not.
+    #[test]
+    fn a_refinery_pays_more_for_ore_than_a_mine_does() {
+        use vx_world::town::Speciality;
+        let sites = vx_world::town::towns_near(SEED, (0, 0), 4_000, &|_, _| 90);
+        let mine = sites
+            .iter()
+            .find(|site| site.speciality == Speciality::Mine)
+            .expect("no mine on this frontier");
+        let refinery = sites
+            .iter()
+            .find(|site| site.speciality == Speciality::Refinery)
+            .expect("no refinery on this frontier");
+
+        let paid = |site: &vx_world::town::TownSite| {
+            let mut session = ready();
+            if let Some(base) = session.mining.fleet.base.as_mut() {
+                base.stockpile.add("engine:copper_ore".to_string(), 20);
+            }
+            session.sell_everything_at(site)
+        };
+        let at_mine = paid(mine);
+        let at_refinery = paid(refinery);
+        eprintln!(
+            "20 ore: {at_refinery} CR at the refinery {:?}, {at_mine} CR at the mine {:?}",
+            refinery.centre, mine.centre
+        );
+        assert!(
+            at_refinery > at_mine,
+            "a refinery paid {at_refinery} and a mine {at_mine} for the same load"
+        );
+    }
+
+    /// A long walk is not punished for a fence it already climbed.
+    ///
+    /// `detours_used` was a lifetime cap on one call, so a haul to the next
+    /// town — three to five times further than anything this walker had been
+    /// proved over — spent its whole allowance early and gave up short.
+    #[test]
+    fn a_long_walk_is_not_punished_for_obstacles_it_got_past() {
+        let mut session = ready();
+        let start = session.player.position;
+        // Far enough that the walk meets real ground rather than the plaza.
+        let target = start + DVec3::new(90.0, 0.0, 0.0);
+        let arrival = session.walk_to(target, seconds(400.0));
+        assert!(
+            arrival.reached(),
+            "gave up on a ninety-block walk: {arrival:?}"
         );
     }
 

@@ -125,7 +125,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 46b | `a1a0292` | The keyboard you never need, and the stick that creeps. Typing arrives on a window's text event, which `poll_pad` cannot raise, so no binding of any button to any key could ever produce a character — the pad gets a grid and a cursor instead, and what it picks goes into the same `type_char` the window's text lands in. And `MoveCommand` gains a quantised throttle byte, so the stick's *lean* reaches the simulation and is replayed with it: a gentle push is a gentle walk. Journal VERSION 30 |
 | 47 | `2e114eb` | The body does not pass through the world. Every collision test in the game is a *binary* predicate — inside a block or not — and none of them ever said how much room was left, so the millimetre skin the sweep promises was a promise nothing checked. Three places were not keeping it: a mantle walked the hull along a fixed arc with **no collision query at all** and only its destination validated, the follow camera's minimum-orbit floor overruled a wall and put the lens a quarter block inside it, and standing up under a ceiling asked only whether the taller hull collides — which, thanks to the inset in the block query, a head resting exactly on the plane does not. All three fixed, the block query made symmetric at both ends, and the margin family of tests that never existed written: the hull rests *exactly* `SKIN` off a wall and a floor, a mantle is outside the rock on every tick of the climb, and the orbit keeps its whole skin at every angle inside a three-block room |
 | 48 | `ee5249a` | The loop you can actually play. Asked to play a round — leave, collect, trade — and found that nothing could: every verb in the loop is a method on `App`, which owns a window, and `main.rs` has no tests and `vx-app` no library target, so the walk, the drill and the counter had never once been joined up. The drill's arithmetic comes out into `drill.rs` and a `Session` plays the game headlessly through the game's own functions — and the join turns out to be where the bug was: a block mined with no base container declared **evaporated in silence**, the only system in the game that produced goods and never said where they went. Played end to end on the shipped seed: out the door, 170 blocks to the copper outcrop, sixteen blocks cut at two seconds each, home slower than you left because the pile is the weight, and 224 credits over the counter — with four captures, and three walking bugs found by walking |
-| 49a | _this_ | The machine you look through. Driving a machine by hand was never written down — not the wheel, not the controls — while `Operation::pilot_tick` calls `break_block`, so a hand-dug hole replayed as untouched ground. Demonstrated at two different hashes over the same orders, then closed: `Wheel` and `Pilot` on the wire, journal VERSION 31, and `MachineTag` gaining the kestrel its own doc comment said would be "a version bump, loudly". And the camera comes off the hull it was sitting inside — a gimbal under the nose, measured off each rig's real parts, with the subject machine culled from its own feed and machine *heading* interpolated between ticks for the first time, so a nose-mounted camera glides instead of snapping |
+| 49a | `93a4cb6` | The machine you look through. Driving a machine by hand was never written down — not the wheel, not the controls — while `Operation::pilot_tick` calls `break_block`, so a hand-dug hole replayed as untouched ground. Demonstrated at two different hashes over the same orders, then closed: `Wheel` and `Pilot` on the wire, journal VERSION 31, and `MachineTag` gaining the kestrel its own doc comment said would be "a version bump, loudly". And the camera comes off the hull it was sitting inside — a gimbal under the nose, measured off each rig's real parts, with the subject machine culled from its own feed and machine *heading* interpolated between ticks for the first time, so a nose-mounted camera glides instead of snapping |
+| 50 | _this_ | The ditch you cannot climb out of. Asked to play the loop through a save — scout, dig, save, reload, haul it to another village and sell it — and it broke twice. The fleet's **base pile was never written to disk**: `Fleet` has no `save` or `load` anywhere in `vx-agent`, so a reload came back with an empty pile *and no declared base*, which re-armed stage 48's silent ore loss on the very next block. It gets `pile.dat` (`VXBP`), beside the tank and the wear ledger. Then the haul itself could not finish, and the reason was in the world: **every town is ringed by a three-block ditch that ran straight across its own gateway**, and a body mantles 2.2 — so no player could enter any town, or re-enter the one they started in, from the day forts shipped in stage 21. The gate gets the uncut causeway a fort with no drawbridge is actually built with. And the walker learns to stop and look: `afoot.rs` sweeps the ground a *body* can cross — two blocks of headroom, a climb of two, a drop of six — where the drones' one-block field said a mountainside was unreachable. Played end to end on the shipped seed: 792 ticks of sector scan, two pings, 322 ore columns, 20 blocks cut, 25 goods on the pile **before and after the save**, 206 blocks to the next town, and 405 credits over a stranger's counter |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -3110,6 +3111,93 @@ as well.
 **`--gimbal`** photographs both halves: the feed itself, which is now a clean
 downward view with no hull in it, and the same instant from outside.
 
+## Shipped — Stage 50: the ditch you cannot climb out of
+
+The ask was a specific loop: **scout for ore, collect it, save, load the save
+back, then haul the goods to a different village and sell them.** Playing it
+found two things sitting in the shipped build, and only the first was the one
+anybody expected.
+
+**The pile does not survive saving.** `Base { position, stockpile }` lives on
+`Fleet`, `Fleet` has no `save` or `load` anywhere in `vx-agent`, and
+`App::save_world` persists `mining.tank`, `.wear` and `.wells` and stops. On
+load, `Mining::default()` is built and exactly those three fields are grafted
+back, so `Fleet::default()` leaves `base: None`. Mine ore, save, quit, reload —
+the ore is gone *and the game has forgotten you ever placed a container*, so
+the very next block you dig evaporates in silence, which is stage 48's bug
+turning up again across a save boundary.
+
+What makes it worth a round is the asymmetry. The **wallet** survives. The
+town's **shifted prices** survive. The **house chest** survives, contents and
+all. The one pile the shop actually sells out of is the only thing in the game
+that forgets. And the pile is oracle-adjacent — `Mining::fuelled` burns fuel
+out of it, and a tick the fleet cannot pay for is a tick nobody works — which
+is the same argument `fuel.rs` and `wear.rs` make for living inside the
+replayed simulation. It gets `pile.dat`, MAGIC `VXBP`, VERSION 1, the tolerant
+loader every other side file has: absent is no base, damaged is logged and
+ignored, never a failed world.
+
+**Then the haul could not finish, and the reason was in the world.** Every town
+has been walled since stage 32 and ditched since 21. `Fort::part_at` carried
+this comment:
+
+> A gateway is a hole in the wall, but the ditch still runs across it — a
+> causeway would be a hole in the *argument*, and the drawbridge that would
+> answer it is a mechanism this game has not got.
+
+The ditch is three blocks deep. A body mantles 2.2. So the gateway — the only
+break in a curtain wall — had an uncrossable trench across it, and **no player
+could walk into any town on the frontier, or back into the one they started
+in, at any point since forts shipped**. Nobody noticed because you spawn inside
+your own walls and every previous test walked around inside them. The haul
+walked two hundred blocks, fell into the destination's ditch fourteen blocks
+from its gate, and could not get out of it or into the town.
+
+The argument was wrong twice. Historically, a fort built without a bridge is
+built with an **uncut causeway** at the gate: a strip of natural ground left in
+place, which is a fortification detail rather than a compromise. And in play it
+made the whole town layer unreachable. The ditch now stops at the gateway's
+edges, and a test walks each gate's own radius from outside the ditch to inside
+the wall and insists the ground is unbroken the whole way — the gate's lockbox
+excepted, because that is the door and is supposed to be in the way.
+
+**And the walker learned to stop and look.** `Session::walk_to` was a body
+holding W with a sidestep, which is honest — the game has no route planner for
+the player and a person on foot does not get one — and it is enough inside a
+town. It is not enough for two hundred blocks of open country. Widening the
+sidestep to a right angle made it worse; doubling the allowance to
+twenty-four just burned twice as long pacing the same ridge.
+
+So `afoot.rs`: the drones' breadth-first sweep with **a body's rules** rather
+than a machine's. `vx_agent::FlowField` answers a different question — one
+block occupied, a one-block step — and asked about a mountainside it said,
+correctly, that 2,673 cells out of a box of 218,000 were reachable and not one
+of them was closer to the next town. A body is two blocks tall, mantles more
+than twice a drone's step, and steps off things a drone would refuse because
+falling is free. On that slope the difference is the whole difference between
+a wall and a staircase. When the legs run out of ideas the walker sweeps what
+it can see, walks to the piece of it nearest where it is going — or, if
+nothing in sight is nearer, to the furthest ground that is at least broadly the
+right way, because the first half of going round a shoulder is going the wrong
+way — and blunders on from there, remembering where it has already been sent so
+it does not pace.
+
+**`--haul`** plays the whole thing in four beats on the shipped seed: the
+sector swept in 792 ticks for two pings, the richest 322 ore columns under no
+overburden; 20 blocks cut and 25 goods on the pile; the same session saved,
+dropped and reloaded with **25 goods still on it**; and 206 blocks to a Depot
+that pays **405 credits** for what a walk out of the front door was worth.
+
+Two smaller things came out on the way. The walker's twelve detours were a
+*lifetime* cap on one call, so a five-hundred-block haul was punished for a
+fence it climbed in the first fifty; the count resets whenever the walk closes
+real distance. And declaring your first base container is the moment the fleet
+starts wanting fuel — `Mining::fuelled` returns `true` only while there is *no*
+base — so placing a container quietly grounds your flier unless there is HHO on
+the pile. That is the same shape as the silent ore loss and it is in the
+rough-edges list rather than fixed, because it is a real cost that the game
+simply never mentions.
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -3466,7 +3554,10 @@ And 48 answered "play a round of it" by finding that nothing could, building
 the thing that can, and fixing the silent loss it turned up on the way.
 
 And 49a closed the replay hole under it: driving by hand is on the log now,
-and the camera has come off the hull it was sitting inside.
+and the camera has come off the hull it was sitting inside. Then 50 played the
+loop *through a save* and found the pile does not survive one — and, walking
+the two hundred blocks to the next village to sell, that no player has ever
+been able to walk into a town at all, because the ditch ran across the gate.
 
 One round is named now:
 
@@ -3479,7 +3570,7 @@ the next note says.
 
 ## The feature map
 
-The whole game at a glance, as of stage 49a.
+The whole game at a glance, as of stage 50.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);

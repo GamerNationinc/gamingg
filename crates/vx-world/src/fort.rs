@@ -351,9 +351,22 @@ impl Fort {
         let trace = self.radius_at(angle);
         let signed = distance - trace;
 
-        // A gateway is a hole in the wall, but the ditch still runs across it
-        // — a causeway would be a hole in the *argument*, and the drawbridge
-        // that would answer it is a mechanism this game has not got.
+        // A gateway is a hole in the wall, and since stage 50 the ditch stops
+        // at its edges rather than running across it.
+        //
+        // It used to run across, on the argument that a causeway would be a
+        // hole in the *argument* and the drawbridge that would answer it is a
+        // mechanism this game has not got. That was wrong twice over. It is
+        // wrong historically — a fort with no bridge is built with an
+        // *uncut causeway* at the gate, a strip of natural ground left in
+        // place, which is a fortification detail and not a compromise. And it
+        // was wrong in play, which is how it was found: the ditch is three
+        // blocks deep, a body mantles 2.2, and there is no other way through
+        // a curtain. Stage 50's haul walked two hundred blocks to sell its
+        // ore at the next town, fell into that town's ditch fourteen blocks
+        // from its gate, and could not get out of it or into the town — and
+        // neither could a player, at any town, ever, including the one they
+        // started in the moment they walked out of it.
         let gateway = self.in_gateway(angle, distance);
 
         if signed.abs() <= half {
@@ -392,7 +405,7 @@ impl Fort {
             return (y >= ground && y < ground + height).then_some(Part::Rampart);
         }
 
-        if signed > half && signed <= half + ditch && !self.breached(angle) {
+        if signed > half && signed <= half + ditch && !self.breached(angle) && !gateway {
             // A ditch is cut ground, not built ground: it only ever removes.
             return (y <= ground && y > ground - DITCH_DEPTH).then_some(Part::Ditch);
         }
@@ -526,6 +539,55 @@ mod tests {
             }
         }
         assert!(seen_mini, "no hamlet anywhere built a mini star");
+    }
+
+    /// A gate you can walk through, all the way through.
+    ///
+    /// The hole in the wall was never the hard part; the ditch outside it
+    /// was. Until stage 50 the ditch ran across the gateway, three blocks
+    /// deep, and a body that mantles 2.2 could neither leave a town nor
+    /// enter one. This walks the gate's own radius from outside the ditch to
+    /// inside the wall and insists the ground is unbroken the whole way.
+    #[test]
+    fn every_gate_has_ground_under_it_from_outside_the_ditch_to_in() {
+        let site = town::home_site();
+        for trace in [Trace::MiniStar, Trace::Palisade, Trace::FourPoint, Trace::SixPoint] {
+            let fort = Fort {
+                trace,
+                ruined: false,
+                ..fort_for(&site)
+            };
+            for (gx, gz) in fort.gateways() {
+                let (dx, dz) = (
+                    (gx - fort.centre.0) as f32,
+                    (gz - fort.centre.1) as f32,
+                );
+                let length = (dx * dx + dz * dz).sqrt().max(1.0);
+                let reach = (trace.half() + trace.ditch() + 2.0).ceil() as i32;
+                for step in -reach..=reach {
+                    let x = fort.centre.0
+                        + (dx / length * (length + step as f32)).round() as i32;
+                    let z = fort.centre.1
+                        + (dz / length * (length + step as f32)).round() as i32;
+                    // Nothing cut below the surface...
+                    assert_ne!(
+                        fort.part_at(x, site.ground, z, site.ground),
+                        Some(Part::Ditch),
+                        "{trace:?} cut its own gateway away at {x},{z}"
+                    );
+                    // ...and nothing standing in the two blocks above it
+                    // except the gate's own lock, which is the door and is
+                    // supposed to be in the way until it is opened.
+                    for up in 1..=2 {
+                        let part = fort.part_at(x, site.ground + up, z, site.ground);
+                        assert!(
+                            part.is_none() || part == Some(Part::GateLock),
+                            "{trace:?} blocked its own gateway at {x},{z} with {part:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]
