@@ -124,7 +124,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 46a | `63e69ce` | The pad is the game — every control reachable from a controller and every panel escapable from one. Stage 24's single bit of context becomes five layers: the world, a held `LB` for the block palette, a held `SELECT` for the second layer, a panel, and — the one that did not exist — looking through a machine, where the pad had been in *world* context with no button that hung up. About twenty bindings that no button could reach get homes, the sticks drive panel cursors and the arcade, the triggers stop digging through an open panel, and a table-driven test walks every `KeyCode` the game binds and fails the build if the pad cannot produce it |
 | 46b | `a1a0292` | The keyboard you never need, and the stick that creeps. Typing arrives on a window's text event, which `poll_pad` cannot raise, so no binding of any button to any key could ever produce a character — the pad gets a grid and a cursor instead, and what it picks goes into the same `type_char` the window's text lands in. And `MoveCommand` gains a quantised throttle byte, so the stick's *lean* reaches the simulation and is replayed with it: a gentle push is a gentle walk. Journal VERSION 30 |
 | 47 | `2e114eb` | The body does not pass through the world. Every collision test in the game is a *binary* predicate — inside a block or not — and none of them ever said how much room was left, so the millimetre skin the sweep promises was a promise nothing checked. Three places were not keeping it: a mantle walked the hull along a fixed arc with **no collision query at all** and only its destination validated, the follow camera's minimum-orbit floor overruled a wall and put the lens a quarter block inside it, and standing up under a ceiling asked only whether the taller hull collides — which, thanks to the inset in the block query, a head resting exactly on the plane does not. All three fixed, the block query made symmetric at both ends, and the margin family of tests that never existed written: the hull rests *exactly* `SKIN` off a wall and a floor, a mantle is outside the rock on every tick of the climb, and the orbit keeps its whole skin at every angle inside a three-block room |
-| 48 | _this_ | The loop you can actually play. Asked to play a round — leave, collect, trade — and found that nothing could: every verb in the loop is a method on `App`, which owns a window, and `main.rs` has no tests and `vx-app` no library target, so the walk, the drill and the counter had never once been joined up. The drill's arithmetic comes out into `drill.rs` and a `Session` plays the game headlessly through the game's own functions — and the join turns out to be where the bug was: a block mined with no base container declared **evaporated in silence**, the only system in the game that produced goods and never said where they went. Played end to end on the shipped seed: out the door, 170 blocks to the copper outcrop, sixteen blocks cut at two seconds each, home slower than you left because the pile is the weight, and 224 credits over the counter — with four captures, and three walking bugs found by walking |
+| 48 | `ee5249a` | The loop you can actually play. Asked to play a round — leave, collect, trade — and found that nothing could: every verb in the loop is a method on `App`, which owns a window, and `main.rs` has no tests and `vx-app` no library target, so the walk, the drill and the counter had never once been joined up. The drill's arithmetic comes out into `drill.rs` and a `Session` plays the game headlessly through the game's own functions — and the join turns out to be where the bug was: a block mined with no base container declared **evaporated in silence**, the only system in the game that produced goods and never said where they went. Played end to end on the shipped seed: out the door, 170 blocks to the copper outcrop, sixteen blocks cut at two seconds each, home slower than you left because the pile is the weight, and 224 credits over the counter — with four captures, and three walking bugs found by walking |
+| 49a | _this_ | The machine you look through. Driving a machine by hand was never written down — not the wheel, not the controls — while `Operation::pilot_tick` calls `break_block`, so a hand-dug hole replayed as untouched ground. Demonstrated at two different hashes over the same orders, then closed: `Wheel` and `Pilot` on the wire, journal VERSION 31, and `MachineTag` gaining the kestrel its own doc comment said would be "a version bump, loudly". And the camera comes off the hull it was sitting inside — a gimbal under the nose, measured off each rig's real parts, with the subject machine culled from its own feed and machine *heading* interpolated between ticks for the first time, so a nose-mounted camera glides instead of snapping |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -3045,6 +3046,70 @@ good reason that all it would show is the inside of your own head.
 `Command::Sell`; the wallet, the pile's contents and the market sit outside the
 replayed hash, so `--replay` cannot see wealth. That is a round of its own.
 
+## Shipped — Stage 49a: the machine you look through
+
+**The hole, demonstrated before it was closed.** `journal.rs` contained no
+pilot, wheel or override concept at all, while `Operation::pilot_tick` — the
+one pilot path that takes `&mut World` — calls `break_block` and can fell a
+tree. Live, `KeyR` and the per-frame pilot command reached `journal.record`
+nowhere; only `Advance { ticks }` was written. On replay that ran
+`mining.advance` on a `Mining` whose `piloted` is `None`, `pilot_sub_tick`
+matched `None => {}`, and every hand-dug block failed to reappear.
+
+It was proved rather than argued: a test that drove a drone exactly as the live
+game does, recording only what the live game recorded, played to
+`0xc217b149207d88fd` and replayed to `0x4f3c9afb4075ea33`. Same orders, two
+different worlds. The fix is the same test with the two new orders in it,
+passing.
+
+**`Wheel` and `Pilot`, tags 28 and 29, journal VERSION 31.** `Wheel` carries
+`Option<MachineTag>` — `None` is hands off — and is recorded only once the
+simulation has *granted* control, so the log never claims a wheel that was
+refused. Hanging up records a release too, or replay would keep driving a
+machine nobody is holding. `Pilot` is one byte (heading in bits 0-2, the cutter
+in bit 3, climb in bits 4-5), folded on change exactly as `Move` is and for the
+same reason: it is a held input, and `Advance` counts the ticks it covers. It
+deliberately does not name a machine — `Wheel` already said who is driving,
+the same way `Move` does not name the player.
+
+Replay needed **no new stepping code**: `Rebuilt.mining` already owned
+`piloted` and `pilot_command`, and `Mining::advance` already called
+`pilot_sub_tick`. The arms are three lines each, running the very mutators the
+key press runs.
+
+**`MachineTag` gains the kestrel**, which its own doc comment predicted: "the
+kestrel is absent here because it takes no wear, and if that ever changes it is
+a version bump, loudly." It still takes no wear — `MachineTag::of` refuses it
+and `Repair` still answers "THE KESTREL TAKES NO WEAR" — but it can be *flown*,
+so control needs a total constructor beside the upkeep one.
+
+**What is not on the wire**: where the pilot is looking. `set_pilot_look` feeds
+only the drawn nose and never reaches a world edit, so it is presentation. The
+code says so, because it is the obvious thing to add by mistake.
+
+**The gimbal.** `eye_height` — a bare lift up the Y axis — becomes
+`gimbal(machine)`, an offset in the rig's own frame, turned by the machine's
+heading and added to the same interpolated ground point the rig is drawn at.
+The old lift was wrong three different ways: the digger's eye sat *inside* its
+cab box (`y 0.66..0.92`), the flier's floated in the gap between hull roof
+(0.58) and rotor (0.83), and the kestrel's hovered above its own blades. Each
+new offset is measured off that rig's real parts, and a test asserts the
+property rather than the numbers: **the camera is outside every box its own rig
+draws**.
+
+**Two things fell out of moving it.** The machine you look through was never
+culled from its own feed — invisible only because the camera sat in an air
+pocket — so `Mining::objects` takes the feed and skips it. And machine
+*heading* was tick-snapped while position had always been interpolated, which
+nothing could notice while the camera ignored heading; a nose-mounted camera
+would have jolted on every turn. Headings now glide on the same clock, by the
+**short way round** (a nose crossing the wrap point moves a hair, not very
+nearly a full revolution), so the rigs you are merely watching stop snapping
+as well.
+
+**`--gimbal`** photographs both halves: the feed itself, which is now a clean
+downward view with no hull in it, and the same instant from outside.
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -3400,18 +3465,21 @@ sweep, and the margin the sweep promises is asserted rather than assumed.
 And 48 answered "play a round of it" by finding that nothing could, building
 the thing that can, and fixing the silent loss it turned up on the way.
 
-One round is named now, from playing the thing on a Deck:
+And 49a closed the replay hole under it: driving by hand is on the log now,
+and the camera has come off the hull it was sitting inside.
+
+One round is named now:
 
 | Stage | What | Why here |
 |---|---|---|
-| 49 | The drone you can lose | The FPV camera sits inside the machine's own hull; a machine cannot collide with anything, so it cannot crash; and — the one nobody meant — piloted digging calls `break_block` while neither taking the wheel nor the per-tick pilot command is journalled, so a hand-dug hole replays as untouched ground. Closing that comes first, because integrity is oracle state for the same reason wear is |
+| 49b | The drone you can lose | A machine cannot collide with anything, so it cannot crash. Integrity beside `wear.rs` and on the oracle for the same reason wear is; the flier's auto-climb off under manual control so it can be flown into a cliff, while the digger keeps the standability rule that stops a hand-driven drone stranding itself; gunfire through `segment_hits_box`; a persistent, mapped wreck you walk out to and salvage or rebuild; and `garage.rs`'s first `lose` mutator, since `grant` only ever added |
 
 Beyond those the board holds the outstanding engineering below, and whatever
 the next note says.
 
 ## The feature map
 
-The whole game at a glance, as of stage 48.
+The whole game at a glance, as of stage 49a.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -3589,6 +3657,12 @@ rather than pretending, the house's and the shop's doorways named so a body can
 aim at the gap, and a four-beat `--play` capture framed by the game's own
 follow camera) — and the silent loss it found, where a block mined with no base
 container declared evaporated without a word;
+the machine you look through (driving by hand on the log at last — the wheel
+and the held controls, journal 31, after the same orders were shown playing to
+one world and replaying to another — and the FPV camera moved off the hull it
+was sitting inside onto a gimbal under the nose, with the subject machine culled
+from its own feed and machine heading interpolated between ticks for the first
+time, so noses glide the short way round instead of snapping);
 a Steam Deck dist build every round.
 
 **Planned, in arc order:** the drone you can lose — and, first inside that

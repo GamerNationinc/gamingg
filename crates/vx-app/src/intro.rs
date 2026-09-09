@@ -231,7 +231,7 @@ mod tests {
         // reading the wrong part of the file.
         let lines = changelog();
         assert!(
-            lines.iter().any(|line| line.starts_with("48 ")),
+            lines.iter().any(|line| line.starts_with("49A ")),
             "the newest stage is missing from its own welcome panel: {lines:#?}"
         );
     }

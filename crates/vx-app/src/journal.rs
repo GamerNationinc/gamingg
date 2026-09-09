@@ -190,7 +190,14 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // angles beside it. A keyboard writes full tilt, so keyboard play is what it
 // always was; a log recorded under 29 is one byte short per `Move` and
 // restarts the oracle like every older log.
-const VERSION: u32 = 30;
+// 31: the wheel and the stick (stage 49a). Driving a machine by hand was
+// never written down — not taking the wheel, not what was held — and
+// `Operation::pilot_tick` calls `break_block`, so a hand-dug hole came back
+// on replay as untouched ground. That is a divergence, not a nicety: it was
+// demonstrated at two different hashes over the same orders before it was
+// fixed. `Wheel` and `Pilot` close it, and a log recorded under 30 replays a
+// session in which nobody ever took the controls.
+const VERSION: u32 = 31;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -371,20 +378,129 @@ pub enum Command {
     /// live game swept — a pure function of the tree, the direction and the
     /// tick, which is exactly why the fall is not a rigid body.
     Fell { at: BlockPos, face: u8 },
+    /// Who has the wheel, or `None` for hands off.
+    ///
+    /// Recorded because taking control *changes what the machine does with
+    /// the ticks that follow*: a drone under the wheel stops taking jobs off
+    /// the board and starts doing what it is told. Both sides run the same
+    /// `Mining::take_control` and `release_control`, so neither can drift
+    /// about which machine is being driven.
+    Wheel { machine: Option<MachineTag> },
+    /// The held pilot controls, folded on change exactly as [`Command::Move`]
+    /// is — and for the same reason: it is an input that persists until it
+    /// changes, and the ticks it applies to are counted by `Advance`.
+    ///
+    /// **This is the order that closes stage 49a's hole.** A piloted digger
+    /// cuts through `Operation::pilot_tick`, which is the one pilot path that
+    /// takes `&mut World` and calls `break_block`. Without this the log
+    /// recorded the *number* of ticks a hand-driven drone worked and nothing
+    /// about what it was told to do, so replay ran those ticks with nobody at
+    /// the controls and the hole was never dug.
+    ///
+    /// One byte: heading in bits 0-2 (`0` none, `1..=4` the cardinals), the
+    /// cutter in bit 3, climb in bits 4-5 (`0` hold, `1` up, `2` down). It
+    /// deliberately does not name a machine — [`Command::Wheel`] already said
+    /// who is driving, the same way `Move` does not name the player.
+    ///
+    /// What is *not* here: where the pilot is looking. That reaches only the
+    /// drawn nose (`Mining::set_pilot_look`) and never a world edit, so it is
+    /// presentation and stays off the wire.
+    Pilot { bits: u8 },
+}
+
+/// A machine tag on the wire: a kind byte and an index, fixed width so every
+/// order that names a machine reads the same way. The kestrel has no index —
+/// there is only ever one — and writes a zero to keep the shape.
+fn write_machine_tag(file: &mut impl Write, tag: MachineTag) -> std::io::Result<()> {
+    match tag {
+        MachineTag::Digger(index) => {
+            file.write_all(&[0u8])?;
+            file.write_all(&index.to_le_bytes())
+        }
+        MachineTag::Flier(index) => {
+            file.write_all(&[1u8])?;
+            file.write_all(&index.to_le_bytes())
+        }
+        MachineTag::Kestrel => {
+            file.write_all(&[2u8])?;
+            file.write_all(&0u32.to_le_bytes())
+        }
+    }
+}
+
+fn read_machine_tag(file: &mut impl Read) -> std::io::Result<MachineTag> {
+    let mut kind = [0u8; 1];
+    file.read_exact(&mut kind)?;
+    let index = read_u32(file)?;
+    match kind[0] {
+        0 => Ok(MachineTag::Digger(index)),
+        1 => Ok(MachineTag::Flier(index)),
+        2 => Ok(MachineTag::Kestrel),
+        other => Err(std::io::Error::other(format!("unknown machine tag {other}"))),
+    }
+}
+
+/// Pack a pilot's held controls into the byte the wire carries.
+pub fn pilot_bits(command: vx_agent::PilotCommand) -> u8 {
+    let heading = match command.heading {
+        None => 0u8,
+        Some(vx_agent::Heading::PosX) => 1,
+        Some(vx_agent::Heading::NegX) => 2,
+        Some(vx_agent::Heading::PosZ) => 3,
+        Some(vx_agent::Heading::NegZ) => 4,
+    };
+    let climb = match command.climb.signum() {
+        1 => 1u8,
+        -1 => 2,
+        _ => 0,
+    };
+    heading | (u8::from(command.cut) << 3) | (climb << 4)
+}
+
+/// Unpack the byte back into controls. Unknown codes read as "not asking",
+/// which is the tolerant reading every other loader here takes.
+pub fn pilot_from_bits(bits: u8) -> vx_agent::PilotCommand {
+    let heading = match bits & 0b111 {
+        1 => Some(vx_agent::Heading::PosX),
+        2 => Some(vx_agent::Heading::NegX),
+        3 => Some(vx_agent::Heading::PosZ),
+        4 => Some(vx_agent::Heading::NegZ),
+        _ => None,
+    };
+    let climb = match (bits >> 4) & 0b11 {
+        1 => 1,
+        2 => -1,
+        _ => 0,
+    };
+    vx_agent::PilotCommand {
+        heading,
+        cut: bits & 0b1000 != 0,
+        climb,
+    }
 }
 
 /// Which machine an order names, on the wire.
 ///
 /// A tag rather than [`crate::mining::MachineRef`] because the wire is a
-/// format and the enum is code: the kestrel is absent here because it takes
-/// no wear, and if that ever changes it is a version bump, loudly.
+/// format and the enum is code.
+///
+/// The kestrel used to be absent here, with a note saying that if it ever
+/// needed naming it would be "a version bump, loudly". Stage 49a is that bump:
+/// the kestrel takes no *wear*, which is why [`MachineTag::of`] still refuses
+/// it and `Repair` still answers "THE KESTREL TAKES NO WEAR" — but it can be
+/// **flown**, and the wheel has to be able to say which machine you took.
+/// Hence two constructors: `of` for orders about upkeep, [`MachineTag::any`]
+/// for orders about control.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MachineTag {
     Digger(u32),
     Flier(u32),
+    Kestrel,
 }
 
 impl MachineTag {
+    /// The tag for a machine that can be worn out and mended. `None` for the
+    /// kestrel, which cannot.
     pub fn of(machine: crate::mining::MachineRef) -> Option<MachineTag> {
         match machine {
             crate::mining::MachineRef::Digger(index) => Some(MachineTag::Digger(index as u32)),
@@ -393,10 +509,21 @@ impl MachineTag {
         }
     }
 
+    /// The tag for any machine at all. Total, because every machine in the
+    /// game can be driven even though only some can be repaired.
+    pub fn any(machine: crate::mining::MachineRef) -> MachineTag {
+        match machine {
+            crate::mining::MachineRef::Digger(index) => MachineTag::Digger(index as u32),
+            crate::mining::MachineRef::Flier(index) => MachineTag::Flier(index as u32),
+            crate::mining::MachineRef::Kestrel => MachineTag::Kestrel,
+        }
+    }
+
     pub fn machine(self) -> crate::mining::MachineRef {
         match self {
             MachineTag::Digger(index) => crate::mining::MachineRef::Digger(index as usize),
             MachineTag::Flier(index) => crate::mining::MachineRef::Flier(index as usize),
+            MachineTag::Kestrel => crate::mining::MachineRef::Kestrel,
         }
     }
 }
@@ -470,6 +597,13 @@ impl Command {
             pitch_q: command.pitch_q,
             throttle: command.throttle,
             load: command.load,
+        }
+    }
+
+    /// A `Pilot` carrying these held controls.
+    pub fn piloting(command: vx_agent::PilotCommand) -> Self {
+        Command::Pilot {
+            bits: pilot_bits(command),
         }
     }
 }
@@ -784,6 +918,23 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
         // outside the hash, so it draws the same line — and so does a word
         // with a neighbour: talk moves disposition, kept in its own ledger.
         Command::Scout(_) | Command::Intrude(_) | Command::Talk { .. } => {}
+        Command::Wheel { machine } => {
+            // One function, both sides. Taking the wheel takes a drone off
+            // the job board and a scout out of its standing order; releasing
+            // it hands both back. Replay runs the very same mutators the key
+            // press does, so neither side can disagree about who is driving.
+            match machine {
+                Some(tag) => {
+                    state.mining.take_control(tag.machine());
+                }
+                None => state.mining.release_control(),
+            }
+        }
+        Command::Pilot { bits } => {
+            // Sticky, like `Move`: it holds until the next one arrives, and
+            // the ticks it covers are counted by `Advance`.
+            state.mining.set_pilot_command(pilot_from_bits(*bits));
+        }
         Command::Repair { machine } => {
             // One function, both sides: the parts come off the pile and the
             // ledger resets, or neither happens.
@@ -1266,16 +1417,22 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
         }
         Command::Repair { machine } => {
             file.write_all(&[21u8])?;
+            write_machine_tag(file, *machine)?;
+        }
+        Command::Wheel { machine } => {
+            file.write_all(&[28u8])?;
             match machine {
-                MachineTag::Digger(index) => {
-                    file.write_all(&[0u8])?;
-                    file.write_all(&index.to_le_bytes())?;
-                }
-                MachineTag::Flier(index) => {
+                Some(tag) => {
                     file.write_all(&[1u8])?;
-                    file.write_all(&index.to_le_bytes())?;
+                    write_machine_tag(file, *tag)?;
                 }
+                // Hands off: one byte, no tag to follow.
+                None => file.write_all(&[0u8])?,
             }
+        }
+        Command::Pilot { bits } => {
+            file.write_all(&[29u8])?;
+            file.write_all(&[*bits])?;
         }
         Command::Gift { town, person, good } => {
             file.write_all(&[20u8])?;
@@ -1578,6 +1735,21 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
                 good,
             }
         }
+        28 => {
+            let mut present = [0u8; 1];
+            file.read_exact(&mut present)?;
+            let machine = if present[0] == 0 {
+                None
+            } else {
+                Some(read_machine_tag(file)?)
+            };
+            Command::Wheel { machine }
+        }
+        29 => {
+            let mut bits = [0u8; 1];
+            file.read_exact(&mut bits)?;
+            Command::Pilot { bits: bits[0] }
+        }
         21 => {
             let mut kind = [0u8; 1];
             file.read_exact(&mut kind)?;
@@ -1585,6 +1757,7 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
             let machine = match kind[0] {
                 0 => MachineTag::Digger(index),
                 1 => MachineTag::Flier(index),
+                2 => MachineTag::Kestrel,
                 other => {
                     return Err(std::io::Error::other(format!("unknown machine tag {other}")))
                 }
@@ -1684,6 +1857,8 @@ fn read_log(path: &Path) -> std::io::Result<Option<CommandLog>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::mining::MachineRef;
+    use vx_agent::{Heading, PilotCommand};
     use vx_core::ChunkPos;
     use vx_world::region_hash;
 
@@ -1768,6 +1943,75 @@ mod tests {
             played,
             replay_to_hash(&journal, area),
             "replaying the session produced a different world"
+        );
+    }
+
+    /// **The hole this round exists to close.**
+    ///
+    /// Taking the wheel of a drone and cutting with it edits the world:
+    /// `Operation::pilot_tick` is the one pilot path that takes `&mut World`,
+    /// and it calls `break_block`. None of it was recorded — not the wheel,
+    /// not the held controls — so `Advance` replayed on a `Mining` whose
+    /// `piloted` is `None` quietly dug nothing, and a hand-dug hole came back
+    /// as untouched ground.
+    ///
+    /// It is the same claim `a_recorded_session_replays_to_the_same_world`
+    /// makes, asked of the one input that was missing from the log.
+    #[test]
+    fn a_hand_dug_hole_replays_to_the_same_ground() {
+        let (mut world, area) = site();
+        let events = EventBus::new();
+        let mut journal = CommandLog::new();
+        let mut rebuilt = Rebuilt::default();
+
+        // A crew has to exist before one of them can be driven.
+        let dispatch = Command::Dispatch {
+            area,
+            method: MineMethod::Pit,
+            crew: 2,
+        };
+        apply(&dispatch, &mut world, &events, &mut rebuilt);
+        journal.record(dispatch);
+        for ticks in [5u32, 16] {
+            rebuilt.mining.advance(&mut world, &events, ticks);
+            journal.record(Command::Advance { ticks });
+        }
+
+        // Take the wheel and cut by hand, exactly as `R` and the trigger do.
+        let wheel = Command::Wheel {
+            machine: Some(MachineTag::any(MachineRef::Digger(0))),
+        };
+        apply(&wheel, &mut world, &events, &mut rebuilt);
+        journal.record(wheel);
+
+        for heading in [Heading::PosX, Heading::NegZ, Heading::PosX] {
+            let driving = Command::piloting(PilotCommand {
+                heading: Some(heading),
+                cut: true,
+                climb: 0,
+            });
+            apply(&driving, &mut world, &events, &mut rebuilt);
+            journal.record(driving);
+            for ticks in [8u32, 8, 8] {
+                rebuilt.mining.advance(&mut world, &events, ticks);
+                journal.record(Command::Advance { ticks });
+            }
+        }
+
+        let hands_off = Command::Wheel { machine: None };
+        apply(&hands_off, &mut world, &events, &mut rebuilt);
+        journal.record(hands_off);
+        for ticks in [16u32, 16] {
+            rebuilt.mining.advance(&mut world, &events, ticks);
+            journal.record(Command::Advance { ticks });
+        }
+
+        let span = vx_agent::working_span(area, area.min);
+        let played = region_hash(&world, span.min, span.max);
+        assert_eq!(
+            played,
+            replay_to_hash(&journal, area),
+            "the ground a hand-driven drone cut did not come back on replay"
         );
     }
 
@@ -2332,6 +2576,7 @@ mod admin_tests {
 #[cfg(test)]
 mod fire_tests {
     use super::*;
+    use vx_agent::{Heading, PilotCommand};
     use vx_core::ChunkPos;
     use vx_world::region_hash;
 
@@ -2890,6 +3135,100 @@ mod fire_tests {
         banks.deposit((0, 0), "engine:copper_ore", 240, &mut pile);
         assert_eq!(banks.stored((0, 0)), 240);
         assert_eq!(pile.count("engine:copper_ore"), 0);
+    }
+
+    /// Both new orders survive the wire, including the kestrel — which the
+    /// machine tag could not name until this round.
+    #[test]
+    fn the_wheel_and_the_stick_round_trip() {
+        let directory =
+            std::env::temp_dir().join(format!("vx-journal-wheel-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+
+        let mut orders = vec![
+            Command::Wheel {
+                machine: Some(MachineTag::Digger(0)),
+            },
+            Command::Wheel {
+                machine: Some(MachineTag::Flier(2)),
+            },
+            // The variant that forced the version bump.
+            Command::Wheel {
+                machine: Some(MachineTag::Kestrel),
+            },
+            Command::Wheel { machine: None },
+        ];
+        // Every packing of the control byte, so no combination is lost.
+        for heading in [
+            None,
+            Some(Heading::PosX),
+            Some(Heading::NegX),
+            Some(Heading::PosZ),
+            Some(Heading::NegZ),
+        ] {
+            for cut in [false, true] {
+                for climb in [-1, 0, 1] {
+                    orders.push(Command::piloting(PilotCommand {
+                        heading,
+                        cut,
+                        climb,
+                    }));
+                }
+            }
+        }
+
+        let mut journal = CommandLog::default();
+        for order in &orders {
+            journal.record(order.clone());
+        }
+        journal.save(&directory).unwrap();
+        let read_back = CommandLog::load(&directory);
+        std::fs::remove_dir_all(&directory).ok();
+
+        let recovered: Vec<Command> = read_back
+            .entries()
+            .iter()
+            .map(|entry| entry.command.clone())
+            .collect();
+        assert_eq!(recovered, orders, "the wheel or the stick did not survive the wire");
+    }
+
+    /// The control byte means the same thing coming back as it did going in.
+    #[test]
+    fn every_pilot_command_survives_its_byte() {
+        for heading in [
+            None,
+            Some(Heading::PosX),
+            Some(Heading::NegX),
+            Some(Heading::PosZ),
+            Some(Heading::NegZ),
+        ] {
+            for cut in [false, true] {
+                for climb in [-1, 0, 1] {
+                    let command = PilotCommand { heading, cut, climb };
+                    assert_eq!(
+                        pilot_from_bits(pilot_bits(command)),
+                        command,
+                        "{command:?} did not survive its byte"
+                    );
+                }
+            }
+        }
+        // A climb of any magnitude reads back as its sign: the wire carries
+        // the intent, not the number, and the machine's own climb rate is
+        // what decides how far it actually goes.
+        assert_eq!(
+            pilot_from_bits(pilot_bits(PilotCommand {
+                heading: None,
+                cut: false,
+                climb: 7,
+            }))
+            .climb,
+            1
+        );
+        // Nonsense reads as "not asking", the tolerant reading every loader
+        // here takes.
+        assert_eq!(pilot_from_bits(0b111).heading, None);
     }
 
     #[test]

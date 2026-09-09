@@ -37,6 +37,22 @@ use crate::rig::{self, Rig};
 pub(crate) const TICK_RATE: f64 = 8.0;
 
 /// Blocks of run per block of rise the starting drone's ramps are cut to.
+/// Turn `from` toward `to` by `fraction`, the short way round.
+///
+/// Angles wrap, so a nose swinging from just under π to just over -π is a
+/// hair's movement and must not be drawn as very nearly a full revolution.
+/// Wrapping the difference into ±π first is what makes it the short way.
+fn turned(from: f32, to: f32, fraction: f32) -> f32 {
+    let turn = std::f32::consts::TAU;
+    let mut delta = (to - from) % turn;
+    if delta > std::f32::consts::PI {
+        delta -= turn;
+    } else if delta < -std::f32::consts::PI {
+        delta += turn;
+    }
+    from + delta * fraction.clamp(0.0, 1.0)
+}
+
 const GRADE: i32 = vx_agent::DEFAULT_GRADE;
 
 /// Edge length of the cubes drawn at the corners of a marked area.
@@ -102,6 +118,15 @@ pub struct Mining {
     last_ticks: u32,
     drone_yaws: Vec<f32>,
     flier_yaws: Vec<f32>,
+    /// Where each nose pointed at the *last* tick.
+    ///
+    /// Position has always been interpolated between ticks and heading never
+    /// was, which nothing noticed while the camera ignored yaw entirely. Hang
+    /// the camera off the nose and the omission becomes a jolt on every turn,
+    /// so heading now glides on the same clock position does — and the rigs
+    /// you are merely watching stop snapping round as well.
+    previous_drone_yaws: Vec<f32>,
+    previous_flier_yaws: Vec<f32>,
     /// Drill/rotor angle, advanced while machines work.
     spin: f32,
     /// The rig shapes, built once.
@@ -119,6 +144,7 @@ pub struct Mining {
     kestrel_suspended: Option<vx_agent::KestrelMode>,
     kestrel_rig: Rig,
     kestrel_yaw: f32,
+    previous_kestrel_yaw: f32,
 }
 
 /// One of the fleet's machines, by kind and index.
@@ -170,6 +196,8 @@ impl Default for Mining {
             kestrel: None,
             drone_yaws: Vec::new(),
             flier_yaws: Vec::new(),
+            previous_drone_yaws: Vec::new(),
+            previous_flier_yaws: Vec::new(),
             spin: 0.0,
             digger_rig: Rig::digger(),
             flier_rig: Rig::flier(),
@@ -179,6 +207,7 @@ impl Default for Mining {
             kestrel_suspended: None,
             kestrel_rig: Rig::kestrel(),
             kestrel_yaw: 0.0,
+            previous_kestrel_yaw: 0.0,
         }
     }
 }
@@ -518,6 +547,14 @@ impl Mining {
 
     /// Update remembered nose directions from this tick's movement.
     fn remember_yaws(&mut self) {
+        // Last tick's headings, kept so this tick's can be glided into rather
+        // than snapped to. Taken before anything is written, which is the
+        // same moment `previous_position` is taken for the machines
+        // themselves.
+        self.previous_drone_yaws.clone_from(&self.drone_yaws);
+        self.previous_flier_yaws.clone_from(&self.flier_yaws);
+        self.previous_kestrel_yaw = self.kestrel_yaw;
+
         // A piloted machine points where the player is looking. Deriving its
         // nose from movement instead would leave a stationary drone facing
         // whatever direction its last step happened to take while the player
@@ -601,18 +638,58 @@ impl Mining {
         a + (b - a) * f64::from(fraction)
     }
 
-    /// Eye height above a machine's ground point, per kind.
-    fn eye_height(machine: MachineRef) -> f32 {
+    /// Where a machine's camera hangs, in the rig's own frame: +X forward,
+    /// +Y up, origin on the ground point under it.
+    ///
+    /// A gimbal under the nose, like a surveillance bird — which is what it
+    /// should always have been. It used to be a bare lift up the Y axis, and
+    /// every one of the three was wrong in its own way: the digger's sat
+    /// *inside* its cab box (`y 0.66..0.92`), the flier's floated in the gap
+    /// between its hull roof and its rotor, and the kestrel's hovered above
+    /// its own blades. You got away with it only because the camera happened
+    /// to land in air pockets and looked out through the back faces.
+    ///
+    /// Each offset is measured off the rig's real parts: forward of the
+    /// hull, below its floor, above the skids and clear of anything that
+    /// spins.
+    pub fn gimbal(machine: MachineRef) -> Vec3 {
         match machine {
-            // Roughly the digger's cab and the flier's canopy; the kestrel
-            // is a palm-sized thing whose camera is most of its body.
-            MachineRef::Digger(_) => 0.8,
-            MachineRef::Flier(_) => 0.65,
-            MachineRef::Kestrel => 0.3,
+            // Under the drill (which bottoms at 0.30) and ahead of the front
+            // wheels (which reach x 0.44).
+            MachineRef::Digger(_) => Vec3::new(0.58, 0.20, 0.0),
+            // Off the nose (hull ends at 0.45), below the hull floor (0.18),
+            // above the skids (0.09), well inside the rotor disc.
+            MachineRef::Flier(_) => Vec3::new(0.52, 0.13, 0.0),
+            // The whole machine is 0.44 long, so this is a small step off a
+            // small nose.
+            MachineRef::Kestrel => Vec3::new(0.25, 0.05, 0.0),
         }
     }
 
+    /// A machine's nose direction *right now*, gliding between ticks the same
+    /// way its position does.
+    fn heading(&self, machine: MachineRef) -> f32 {
+        let (from, to) = match machine {
+            MachineRef::Digger(index) => (
+                self.previous_drone_yaws.get(index).copied(),
+                self.drone_yaws.get(index).copied(),
+            ),
+            MachineRef::Flier(index) => (
+                self.previous_flier_yaws.get(index).copied(),
+                self.flier_yaws.get(index).copied(),
+            ),
+            MachineRef::Kestrel => (Some(self.previous_kestrel_yaw), Some(self.kestrel_yaw)),
+        };
+        let to = to.unwrap_or(0.0);
+        turned(from.unwrap_or(to), to, self.tick_fraction())
+    }
+
     /// Where a machine's camera sits this frame.
+    ///
+    /// The gimbal, turned by the nose it is bolted to and added to the same
+    /// interpolated ground point the rig is drawn at — so the view cannot
+    /// drift against the body between ticks, which is the property
+    /// `interpolated` exists to guarantee.
     pub fn machine_eye(&self, machine: MachineRef) -> Option<DVec3> {
         let base = match machine {
             MachineRef::Digger(index) => {
@@ -628,7 +705,8 @@ impl Mining {
                 self.interpolated(craft.previous_position, craft.position)
             }
         };
-        Some(base + DVec3::Y * f64::from(Self::eye_height(machine)))
+        let mount = glam::Quat::from_rotation_y(self.heading(machine)) * Self::gimbal(machine);
+        Some(base + mount.as_dvec3())
     }
 
     /// Where a machine is, in whole blocks.
@@ -787,7 +865,15 @@ impl Mining {
     /// The cubes to draw this frame: corner markers and drones, built in
     /// the camera's frame — `relative` measures a place from the render
     /// origin — and marked so.
-    pub fn objects(&self, relative: impl Fn(DVec3) -> Vec3) -> Vec<Object> {
+    /// `feed` names the machine the player is looking *through*, whose own
+    /// rig is skipped. It never mattered while the camera sat in an air
+    /// pocket inside the hull; hang it off the nose and the machine's own
+    /// body is the first thing in frame.
+    pub fn objects(
+        &self,
+        relative: impl Fn(DVec3) -> Vec3,
+        feed: Option<MachineRef>,
+    ) -> Vec<Object> {
         let mut objects = Vec::new();
         let marker = |centre: DVec3, size: f32| {
             let half = DVec3::splat(f64::from(size) * 0.5);
@@ -818,7 +904,10 @@ impl Mining {
 
         if let Some(operation) = &self.operation {
             for (index, drone) in operation.drones.iter().enumerate() {
-                let yaw = self.drone_yaws.get(index).copied().unwrap_or(0.0);
+                if feed == Some(MachineRef::Digger(index)) {
+                    continue;
+                }
+                let yaw = self.heading(MachineRef::Digger(index));
                 let spin = if matches!(drone.state, DroneState::Digging(_)) {
                     self.spin
                 } else {
@@ -834,15 +923,22 @@ impl Mining {
 
         // The scout, only while off the pack: a docked kestrel is stowed,
         // not a second hat on the player's head.
-        if let Some(kestrel) = self.kestrel.as_ref().filter(|kestrel| kestrel.aloft()) {
+        if let Some(kestrel) = self
+            .kestrel
+            .as_ref()
+            .filter(|kestrel| kestrel.aloft() && feed != Some(MachineRef::Kestrel))
+        {
             objects.extend(placed(self.kestrel_rig.objects(
                 lerp(kestrel.craft.previous_position, kestrel.craft.position),
-                self.kestrel_yaw,
+                self.heading(MachineRef::Kestrel),
                 self.spin * 3.0,
             )));
         }
         for (index, flier) in self.fleet.fliers.iter().enumerate() {
-            let yaw = self.flier_yaws.get(index).copied().unwrap_or(0.0);
+            if feed == Some(MachineRef::Flier(index)) {
+                continue;
+            }
+            let yaw = self.heading(MachineRef::Flier(index));
             objects.extend(placed(self.flier_rig.objects(
                 lerp(flier.previous_position, flier.position),
                 yaw,
@@ -1061,9 +1157,17 @@ mod tests {
     fn a_machine_eye_matches_where_its_rig_is_drawn() {
         // The view and the body must come from one interpolation, or a piloted
         // machine's camera drifts against its own hull between ticks.
+        //
+        // Stage 49a moved the camera off the hull and onto a gimbal under the
+        // nose, so the offset is no longer a bare lift — but the property is
+        // the one that always mattered and it is unchanged: whatever the
+        // sub-tick fraction, the eye is the drawn ground point plus the mount,
+        // turned by the same heading the rig is drawn with.
         let (_, mut mining) = flying_world();
         mining.fleet.fliers[0].previous_position = BlockPos::new(0, 90, 0);
         mining.fleet.fliers[0].position = BlockPos::new(4, 94, 4);
+        mining.previous_flier_yaws = vec![0.6];
+        mining.flier_yaws = vec![1.9];
 
         for fraction in [0.0f64, 0.25, 0.5, 0.9] {
             mining.pending = fraction;
@@ -1071,13 +1175,81 @@ mod tests {
                 mining.fleet.fliers[0].previous_position,
                 mining.fleet.fliers[0].position,
             );
+            let heading = mining.heading(MachineRef::Flier(0));
+            let mount = glam::Quat::from_rotation_y(heading) * Mining::gimbal(MachineRef::Flier(0));
             let eye = mining.machine_eye(MachineRef::Flier(0)).unwrap();
-            let lift = Mining::eye_height(MachineRef::Flier(0));
             assert!(
-                (eye - (drawn + DVec3::Y * f64::from(lift))).length() < 1.0e-5,
+                (eye - (drawn + mount.as_dvec3())).length() < 1.0e-5,
                 "eye {eye:?} does not sit on the drawn hull {drawn:?} at fraction {fraction}"
             );
         }
+    }
+
+    /// The bug the gimbal exists to fix, stated as a property: the camera is
+    /// **outside** the machine it is bolted to. The old lift put the digger's
+    /// eye inside its own cab box and the kestrel's above its own rotor.
+    #[test]
+    fn the_gimbal_hangs_outside_every_hull() {
+        let machines = [
+            (MachineRef::Digger(0), Rig::digger()),
+            (MachineRef::Flier(0), Rig::flier()),
+            (MachineRef::Kestrel, Rig::kestrel()),
+        ];
+        for (machine, rig) in machines {
+            let mount = Mining::gimbal(machine);
+            assert!(
+                mount.x > 0.0,
+                "{machine:?}'s camera is not ahead of its own centre"
+            );
+            assert!(mount.y > 0.0, "{machine:?}'s camera is underground");
+            for part in &rig.parts {
+                let half = part.size * 0.5;
+                let inside = (mount.x - part.centre.x).abs() < half.x
+                    && (mount.y - part.centre.y).abs() < half.y
+                    && (mount.z - part.centre.z).abs() < half.z;
+                assert!(
+                    !inside,
+                    "{machine:?}'s camera is inside its own {:?} at {mount:?}",
+                    part.centre
+                );
+            }
+        }
+    }
+
+    /// A nose swinging past the wrap point takes the short way round, not
+    /// very nearly a full revolution the other way.
+    #[test]
+    fn a_turning_nose_glides_and_takes_the_short_way() {
+        let quarter = std::f32::consts::FRAC_PI_2;
+        // An ordinary turn, halfway through.
+        assert!((turned(0.0, quarter, 0.5) - quarter * 0.5).abs() < 1.0e-6);
+        // Ends are exact.
+        assert!((turned(0.3, 2.0, 0.0) - 0.3).abs() < 1.0e-6);
+        assert!((turned(0.3, 2.0, 1.0) - 2.0).abs() < 1.0e-6);
+
+        // The wrap: just under +pi to just over -pi is a hair of movement.
+        let almost = std::f32::consts::PI - 0.05;
+        let over = -std::f32::consts::PI + 0.05;
+        let middle = turned(almost, over, 0.5);
+        let step = (middle - almost).abs();
+        assert!(
+            step < 0.2,
+            "the nose spun {step} the long way round instead of a hair"
+        );
+    }
+
+    /// You do not see the machine you are looking out of.
+    #[test]
+    fn a_machine_is_not_drawn_in_its_own_feed() {
+        let (_, mining) = flying_world();
+        let watching = mining.objects(|at| at.as_vec3(), None).len();
+        let through = mining
+            .objects(|at| at.as_vec3(), Some(MachineRef::Flier(0)))
+            .len();
+        assert!(
+            through < watching,
+            "the flier still drew {through} of its own parts on its own feed"
+        );
     }
 
     #[test]
@@ -1189,7 +1361,7 @@ mod tests {
         assert!(mining.area.is_none());
         assert!(mining.selected_plan().is_none());
         // Still worth drawing, so the player can see the click landed.
-        assert_eq!(mining.objects(|at| at.as_vec3()).len(), 1);
+        assert_eq!(mining.objects(|at| at.as_vec3(), None).len(), 1);
     }
 
     #[test]
@@ -1223,7 +1395,7 @@ mod tests {
 
         mining.cancel(&mut world);
         assert!(mining.area.is_none());
-        assert!(mining.objects(|at| at.as_vec3()).is_empty());
+        assert!(mining.objects(|at| at.as_vec3(), None).is_empty());
         assert!(!mining.is_running());
     }
 

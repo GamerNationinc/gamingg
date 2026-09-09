@@ -886,6 +886,42 @@ closed door. So there is a whole middle now between "nothing happened" and
 "there are four lads with guns coming over the hill", and you can talk, pay or
 run your way out of it.
 
+### The drone's camera comes off its own hull
+
+Look through one of your machines and the camera was sat **inside it**. The
+digger's was in its cab box. The flier's floated in the gap between its hull
+roof and its rotor. The little scout's hovered above its own blades. You never
+noticed because the camera happened to land in air pockets and you were looking
+out through the back faces of your own machine.
+
+It hangs under the nose now, on a mount, like a surveillance bird — measured
+off each rig's actual parts so it is forward of the hull, below its floor,
+above the skids and clear of anything that spins. Two things had to come with
+it. The machine you are looking *through* is no longer drawn, because a camera
+outside the hull sees the hull. And machines now **turn** smoothly instead of
+snapping: their position was always glided between ticks and their heading
+never was, which nothing could see while the camera ignored heading entirely —
+bolt a camera to the nose and you feel it on every corner. Every drone you
+merely watch turns better for it too.
+
+**And the thing nobody meant.** When you take the wheel of a drone and cut with
+it, the game **was not writing that down**. Not taking the wheel, not what you
+were holding. Only the number of ticks that passed. So the book the game
+replays your day out of had a hole in it exactly the shape of every hole you dug
+by hand: load it back and that ground was untouched.
+
+That is not a hypothetical. Before the fix, the same orders played out to one
+world and replayed to another — two different hashes over the same session, on
+purpose, in a test written to prove it. Both are recorded now: who has the
+wheel, and what they are holding, folded onto the log only when it changes,
+exactly the way walking already was. The test that proved the divergence now
+proves the agreement, and it sits beside every other "replays to the same
+ground" test in the file.
+
+Where the pilot is *looking* is deliberately not recorded: it only points the
+machine's drawn nose and never reaches a world edit. That is the sort of thing
+it is easy to add by mistake, so it says so in the code.
+
 ### You can play it with nobody at the keyboard
 
 Somebody asked me to play a round — walk out, dig something up, sell it — and
@@ -2013,6 +2049,9 @@ cargo run --release -p vx-app -- --screenshot market.ppm --at 0,4 --board
 
 # rebuild a saved world from its journal and check it against the ground on disk
 cargo run --release -p vx-app -- --replay --world myworld
+
+# look down a machine's gimbal, and at where the gimbal hangs
+cargo run --release -p vx-app -- --screenshot gimbal.ppm --gimbal --at 0,10
 
 # play a whole loop with nobody at the keyboard — out of the house, out to the
 # ore, cut it, home, sold — and photograph all four beats. Writes

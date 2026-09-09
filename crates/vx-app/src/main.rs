@@ -232,6 +232,8 @@ struct Options {
     /// Play a whole loop headlessly — leave the house, walk to the ore, cut it
     /// out, carry it home and sell it — photographing each beat.
     play: bool,
+    /// Look through a machine's gimbal, and at where it hangs.
+    gimbal: bool,
     /// Draw the terminal over the capture, with a session's worth of log.
     terminal: bool,
     /// Market day in the hometown, with the roster and a word on the
@@ -325,6 +327,7 @@ fn parse_args() -> Result<Options, String> {
         vault: false,
         footing: false,
         play: false,
+        gimbal: false,
         terminal: false,
         people: false,
         pad: false,
@@ -430,6 +433,7 @@ fn parse_args() -> Result<Options, String> {
             "--vault" => options.vault = true,
             "--footing" => options.footing = true,
             "--play" => options.play = true,
+            "--gimbal" => options.gimbal = true,
             "--terminal" => options.terminal = true,
             "--osk" => {
                 options.terminal = true;
@@ -848,6 +852,12 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     // output.
     if options.play {
         return play_the_loop(&context, &mut renderer, &mut camera, options, path);
+    }
+
+    // The camera came off the hull this round, so the round's picture is what
+    // it now sees — and, beside it, where it hangs. Two beats, one process.
+    if options.gimbal {
+        return photograph_the_gimbal(&context, &mut renderer, &mut camera, options, path);
     }
 
     // A capture's sky is normally the hour alone. The weather fixtures set
@@ -4754,6 +4764,95 @@ fn play_the_loop(
     Ok(())
 }
 
+/// Photograph a machine's gimbal: what it sees, and where it is bolted.
+///
+/// The first beat is the feed itself — the frame a pilot actually flies on,
+/// which before this round was taken from inside the machine's own hull. The
+/// second is the same instant from outside, so the mount is visible under the
+/// nose rather than merely asserted in a test.
+fn photograph_the_gimbal(
+    context: &GpuContext,
+    renderer: &mut Renderer,
+    camera: &mut Camera,
+    options: &Options,
+    path: &str,
+) -> Result<(), String> {
+    let stem = path.strip_suffix(".ppm").unwrap_or(path);
+
+    let mut world = World::new(options.seed);
+    let centre = vx_core::BlockPos::new(options.at.0, 0, options.at.1).chunk();
+    world.load_around(centre, 4);
+
+    // A flier over the ground the screenshots use, holding station.
+    let ground = world.surface_y(options.at.0, options.at.1).unwrap_or(80);
+    let mut mining = mining::Mining::default();
+    mining.ensure_flier(glam::DVec3::new(
+        f64::from(options.at.0),
+        f64::from(ground),
+        f64::from(options.at.1),
+    ));
+    let machine = mining::MachineRef::Flier(0);
+    if !mining.take_control(machine) {
+        return Err("the flier would not take the wheel".into());
+    }
+    // Fly it a few ticks so it has a heading to glide along rather than a
+    // cold zero, and so the camera is riding a real interpolation.
+    let events = EventBus::new();
+    mining.set_pilot_look(std::f32::consts::FRAC_PI_2);
+    mining.set_pilot_command(vx_agent::PilotCommand {
+        heading: Some(vx_agent::Heading::PosX),
+        cut: false,
+        climb: 0,
+    });
+    mining.advance(&mut world, &events, 6);
+
+    remesh_all(context, renderer, &mut world);
+    let eye = mining
+        .machine_eye(machine)
+        .ok_or("the flier has no camera to look through")?;
+
+    // Beat one: down the gimbal, with the machine's own rig culled exactly as
+    // the live feed culls it.
+    camera.position = eye;
+    camera.yaw = std::f32::consts::FRAC_PI_2;
+    camera.pitch = -0.45;
+    renderer.update_camera(&context.queue, camera);
+    let through = mining.objects(|at| renderer.relative(at), Some(machine));
+    renderer.set_objects(&context.device, &context.queue, &through);
+    let out = format!("{stem}-01-through.ppm");
+    capture_frame(context, renderer, options.width, options.height)
+        .write_ppm(&out)
+        .map_err(|error| format!("could not write {out}: {error}"))?;
+    println!("  beat 1: down the gimbal -> {out}");
+
+    // Beat two: the same instant from outside, machine drawn, so the mount
+    // under the nose is a thing you can see.
+    let mount = mining
+        .machine_position(machine)
+        .ok_or("the flier is nowhere")?;
+    let hull = glam::DVec3::new(
+        f64::from(mount.x) + 0.5,
+        f64::from(mount.y),
+        f64::from(mount.z) + 0.5,
+    );
+    camera.position = hull + glam::DVec3::new(-2.6, 1.1, 2.6);
+    look_at(camera, eye);
+    renderer.update_camera(&context.queue, camera);
+    let watched = mining.objects(|at| renderer.relative(at), None);
+    renderer.set_objects(&context.device, &context.queue, &watched);
+    let out = format!("{stem}-02-mount.ppm");
+    capture_frame(context, renderer, options.width, options.height)
+        .write_ppm(&out)
+        .map_err(|error| format!("could not write {out}: {error}"))?;
+    println!("  beat 2: where it hangs -> {out}");
+
+    println!(
+        "gimbal at {:?} in the rig's own frame; eye {eye:?}",
+        mining::Mining::gimbal(machine)
+    );
+    Ok(())
+}
+
 /// Rebuild every loaded chunk's mesh. Used after a headless excavation, where
 /// there is no streamer running to pick up the dirty chunks.
 fn remesh_all(context: &GpuContext, renderer: &mut Renderer, world: &mut World) {
@@ -4843,6 +4942,10 @@ struct Active {
     move_ticks: movement::Ticker,
     /// The last command written to the journal, so only changes are recorded.
     last_move: Option<movement::MoveCommand>,
+    /// The same, for the machine you are driving. Cleared when the wheel is
+    /// handed back, so taking it again records the first command afresh
+    /// rather than assuming the log still remembers it.
+    last_pilot: Option<vx_agent::PilotCommand>,
     mode: MovementMode,
     /// Carries block edits to any listeners. Mods hook in here in M3.
     events: EventBus,
@@ -5301,7 +5404,18 @@ impl App {
             } else {
                 vx_agent::PilotCommand::default()
             };
+            // On change only, like `Move`: it is a held input and `Advance`
+            // counts the ticks it covers. Without this the log knew how many
+            // ticks a hand-driven drone worked and nothing about what it was
+            // told to do, so replay ran them with nobody at the controls and
+            // every hand-dug block failed to appear.
+            if active.last_pilot != Some(command) {
+                active.journal.record(Command::piloting(command));
+                active.last_pilot = Some(command);
+            }
             active.mining.set_pilot_command(command);
+            // Deliberately not journalled: the look only points the drawn
+            // nose and never reaches a world edit.
             active.mining.set_pilot_look(active.camera.yaw);
             if let Some(eye) = active.mining.machine_eye(machine) {
                 active.camera.position = eye;
@@ -5756,7 +5870,7 @@ impl App {
         let placed = |built: Vec<vx_render::Object>| {
             built.into_iter().map(vx_render::Object::already_relative)
         };
-        let mut objects = active.mining.objects(relative);
+        let mut objects = active.mining.objects(relative, feed);
         objects.extend(active.villagers.objects(&active.villager_rigs, relative));
         for deputy in &active.posse.deputies {
             let rig = &active.villager_rigs[deputy.variant % active.villager_rigs.len()];
@@ -10714,6 +10828,11 @@ impl App {
         };
         if taking {
             if active.mining.take_control(machine) {
+                // Recorded only once the simulation has granted it, so the
+                // log never claims a wheel that was refused.
+                active.journal.record(Command::Wheel {
+                    machine: Some(journal::MachineTag::any(machine)),
+                });
                 active.device.feedback = Some("CONTROL TAKEN".into());
                 log::info!("took control of {machine:?}");
             } else {
@@ -10724,6 +10843,8 @@ impl App {
             }
         } else {
             active.mining.release_control();
+            active.journal.record(Command::Wheel { machine: None });
+            active.last_pilot = None;
             active.device.feedback = Some("CONTROL RELEASED".into());
             log::info!("handed {machine:?} back");
         }
@@ -10748,6 +10869,10 @@ impl App {
         }
         if active.device.hand_back().is_some() {
             active.mining.release_control();
+            // Hanging up is a release like any other, and the log has to hear
+            // about it or replay keeps driving a machine nobody is holding.
+            active.journal.record(Command::Wheel { machine: None });
+            active.last_pilot = None;
         }
         active.camera.yaw = active.body_yaw;
         active.camera.pitch = active.body_pitch;
@@ -12394,6 +12519,7 @@ impl ApplicationHandler for App {
             movement: movement::Movement::default(),
             move_ticks: movement::Ticker::default(),
             last_move: None,
+            last_pilot: None,
             window,
             context,
             surface,
