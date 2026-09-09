@@ -47,6 +47,7 @@ mod mining;
 mod people;
 mod permits;
 mod pile;
+mod whereabouts;
 mod electrolysis;
 mod fuel;
 mod movement;
@@ -4897,8 +4898,18 @@ fn haul_it_somewhere(
         f64::from(ping.position.y),
         f64::from(ping.position.z) + 0.5,
     );
-    let went = session.walk_route(&[session.doorstep(), seam], 8 * 400);
-    println!("  walked to the ping: {went:?}");
+    // Out of the door, clear of it, out of the town by its gate, and then
+    // across. The doorstep alone is not enough — see `Session::doorstep` —
+    // and the gate is not optional either: a town is walled.
+    let doorstep = session.doorstep();
+    let clear = doorstep + glam::DVec3::new(6.0, 0.0, 0.0);
+    let mut out = vec![doorstep, clear];
+    out.extend(session.cross_country(Some(&home), seam, None));
+    let went = session.walk_route(&out, 8 * 900);
+    println!("  walked out to the ping: {went:?}");
+    if !went.reached() {
+        return Err(format!("never got out to the seam: {went:?}"));
+    }
     photograph(context, renderer, camera, &mut session, "ping", seam)?;
 
     // --- Collecting ----------------------------------------------------
@@ -4935,18 +4946,48 @@ fn haul_it_somewhere(
     let ahead = session.player.position + (session.forward() * 4.0).as_dvec3();
     photograph(context, renderer, camera, &mut session, "cut", ahead)?;
 
-    // --- Save, and load it straight back -------------------------------
+    // --- Home again, laden ---------------------------------------------
+    //
+    // The half of the loop nothing had ever walked. Going out is downhill in
+    // every sense: you are empty, you know where the door was, and the gate
+    // you leave by is the one facing where you are going. Coming back is the
+    // walk that has to find a gate from *outside*, and do it carrying the
+    // weight that halves your pace.
+    let home_counter = vx_world::town::counter_position(&home);
+    let till_home = glam::DVec3::new(
+        f64::from(home_counter.x) + 0.5,
+        session.player.position.y,
+        f64::from(home_counter.z) + 0.5,
+    );
+    let mut back = session.cross_country(None, till_home, Some(&home));
+    back.extend_from_slice(&session.counter_route(&home));
+    let came_home = session.walk_route(&back, 8 * 2_000);
+    println!("  walked home with it: {came_home:?}");
+    if !came_home.reached() {
+        return Err(format!(
+            "could not get back into my own town: {came_home:?}, stopped at {:?}",
+            session.player.position.round()
+        ));
+    }
+    photograph(context, renderer, camera, &mut session, "home", till_home)?;
+
+    // --- Save it, and load it straight back ----------------------------
     session
         .save_to(&root)
         .map_err(|error| format!("could not save: {error}"))?;
     let credits_before = session.wallet.credits();
+    let stood = session.player.position;
     drop(session);
 
     let mut session = session::Session::load_from(&root)
         .map_err(|error| format!("could not load the save back: {error}"))?;
     std::fs::remove_dir_all(&root).ok();
     let after = session.pile().map_or(0, |pile| pile.total());
-    println!("  saved and reloaded: the pile holds {after} (was {before})");
+    println!(
+        "  saved at home and reloaded: the pile holds {after} (was {before}), stood at {:?} (saved at {:?})",
+        session.player.position.round(),
+        stood.round()
+    );
     if after != before {
         return Err(format!("the pile lost {} goods across a save", before - after));
     }
@@ -4966,34 +5007,19 @@ fn haul_it_somewhere(
         elsewhere.speciality, elsewhere.centre
     );
 
-    // Walk it in legs so each gets its own detour allowance.
     let counter = vx_world::town::counter_position(&elsewhere);
-    // Out of the door first, and then *clear of it*. Reloading a save stands
-    // you back in your own house — the live game does the same — so a route
-    // that sets off on the bearing of a town two hundred blocks away walks
-    // into the kitchen wall. The doorstep alone is not enough: the town the
-    // goods are going to is west of here and the door faces east, so a walker
-    // that turns the moment it is over the threshold turns straight back
-    // through it. The lane outside is the first place a bearing is safe.
-    let doorstep = session.doorstep();
-    let clear = doorstep + glam::DVec3::new(6.0, 0.0, 0.0);
     let to = glam::DVec3::new(
         f64::from(counter.x) + 0.5,
         doorstep.y,
         f64::from(counter.z) + 0.5,
     );
-    // Out of the house, out of the *town*, across, in through the far gate,
-    // and only then at the counter. Both walls are the reason for this shape:
-    // a bearing taken on the plaza points at the inside of your own rampart.
-    let home_gate = session.gateway_toward(&home, to);
-    let far_gate = session.gateway_toward(&elsewhere, clear);
-    let mut legs: Vec<glam::DVec3> = vec![doorstep, clear, home_gate];
-    let from = home_gate;
-    let steps = ((far_gate - from).length() / 90.0).ceil().max(1.0) as i32;
-    for step in 1..=steps {
-        let along = f64::from(step) / f64::from(steps);
-        legs.push(from + (far_gate - from) * along);
-    }
+    // Reloading a save now stands you back where you saved it, which this
+    // time is your own shop floor — so the walk starts by stepping out of the
+    // shop, not by trailing home to the house first. `counter_route`'s first
+    // waypoint is the pavement outside that shop's door, which is exactly the
+    // place to turn round in.
+    let mut legs: Vec<glam::DVec3> = vec![session.counter_route(&home)[0]];
+    legs.extend(session.cross_country(Some(&home), to, Some(&elsewhere)));
     legs.extend_from_slice(&session.counter_route(&elsewhere));
     let hauled = session.walk_route(&legs, 8 * 6_000);
     println!("  hauled it there: {hauled:?}");
@@ -12480,6 +12506,20 @@ impl App {
         if let Err(error) = pile::save(&active.mining.fleet, save.root()) {
             log::error!("could not save the base pile: {error}");
         }
+        // And you. The boot below used to plant the body at the spawn every
+        // time, whatever the save said, because the save had never been asked
+        // to say anything: walk to another town, sell up, quit, come back, and
+        // you were in your own kitchen with the walk to do again.
+        if let Err(error) = whereabouts::save(
+            whereabouts::Whereabouts {
+                position: active.player.position,
+                yaw: active.camera.yaw,
+                pitch: active.camera.pitch,
+            },
+            save.root(),
+        ) {
+            log::error!("could not save where you were standing: {error}");
+        }
         if let Err(error) = active.mining.wear.save(save.root()) {
             log::error!("could not save the wear ledger: {error}");
         }
@@ -12642,9 +12682,25 @@ impl ApplicationHandler for App {
         // the one place we can paint before the render loop exists.
         let home = vx_world::town::home_site();
         let spawn_block = vx_world::town::spawn_position(&home);
+        // Where you actually were, if this world has been played before. It
+        // has to be read *here*, above the pregen, and not down beside the
+        // body: the ground is prepared around wherever the first playable
+        // frame will be stood, and preparing the spawn while putting the body
+        // two hundred blocks away drops it through unloaded air.
+        let stood = save
+            .as_ref()
+            .filter(|save| save.exists())
+            .and_then(|save| whereabouts::load(save.root()));
+        let start = stood.map(|at| at.position).unwrap_or_else(|| {
+            glam::DVec3::new(
+                spawn_block.x as f64 + 0.5,
+                spawn_block.y as f64,
+                spawn_block.z as f64 + 0.5,
+            )
+        });
         let spawn_chunk = vx_core::ChunkPos::new(
-            spawn_block.x.div_euclid(vx_core::CHUNK_SIZE),
-            spawn_block.z.div_euclid(vx_core::CHUNK_SIZE),
+            (start.x.floor() as i32).div_euclid(vx_core::CHUNK_SIZE),
+            (start.z.floor() as i32).div_euclid(vx_core::CHUNK_SIZE),
         );
         let to_prepare = streaming::chunks_in_range(spawn_chunk, self.view_distance);
         let total = to_prepare.len();
@@ -12665,20 +12721,21 @@ impl ApplicationHandler for App {
             vx_core::BlockPos::new(reach, 0, reach),
         );
 
-        // You wake up in your own house, facing the door.
+        // On a new world you wake up in your own house, facing the door. On
+        // one you have played before you carry on from where you stopped —
+        // stood still and upright, whatever you were doing at the time, which
+        // is what stops a save taken mid-fall being a death at a loading
+        // screen.
         let player = PlayerBody {
-            position: glam::DVec3::new(
-                spawn_block.x as f64 + 0.5,
-                spawn_block.y as f64,
-                spawn_block.z as f64 + 0.5,
-            ),
+            position: start,
             ..PlayerBody::default()
         };
 
         let camera = Camera {
             position: player.eye_position(),
             // The door is east of the bed. +x is yaw ninety degrees.
-            yaw: std::f32::consts::FRAC_PI_2,
+            yaw: stood.map_or(std::f32::consts::FRAC_PI_2, |at| at.yaw),
+            pitch: stood.map_or(0.0, |at| at.pitch),
             aspect: size.width as f32 / size.height.max(1) as f32,
             ..Camera::default()
         };

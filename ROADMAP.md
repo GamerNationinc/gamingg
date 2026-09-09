@@ -126,7 +126,8 @@ Written down because they are easy to forget and expensive to get wrong.
 | 47 | `2e114eb` | The body does not pass through the world. Every collision test in the game is a *binary* predicate — inside a block or not — and none of them ever said how much room was left, so the millimetre skin the sweep promises was a promise nothing checked. Three places were not keeping it: a mantle walked the hull along a fixed arc with **no collision query at all** and only its destination validated, the follow camera's minimum-orbit floor overruled a wall and put the lens a quarter block inside it, and standing up under a ceiling asked only whether the taller hull collides — which, thanks to the inset in the block query, a head resting exactly on the plane does not. All three fixed, the block query made symmetric at both ends, and the margin family of tests that never existed written: the hull rests *exactly* `SKIN` off a wall and a floor, a mantle is outside the rock on every tick of the climb, and the orbit keeps its whole skin at every angle inside a three-block room |
 | 48 | `ee5249a` | The loop you can actually play. Asked to play a round — leave, collect, trade — and found that nothing could: every verb in the loop is a method on `App`, which owns a window, and `main.rs` has no tests and `vx-app` no library target, so the walk, the drill and the counter had never once been joined up. The drill's arithmetic comes out into `drill.rs` and a `Session` plays the game headlessly through the game's own functions — and the join turns out to be where the bug was: a block mined with no base container declared **evaporated in silence**, the only system in the game that produced goods and never said where they went. Played end to end on the shipped seed: out the door, 170 blocks to the copper outcrop, sixteen blocks cut at two seconds each, home slower than you left because the pile is the weight, and 224 credits over the counter — with four captures, and three walking bugs found by walking |
 | 49a | `93a4cb6` | The machine you look through. Driving a machine by hand was never written down — not the wheel, not the controls — while `Operation::pilot_tick` calls `break_block`, so a hand-dug hole replayed as untouched ground. Demonstrated at two different hashes over the same orders, then closed: `Wheel` and `Pilot` on the wire, journal VERSION 31, and `MachineTag` gaining the kestrel its own doc comment said would be "a version bump, loudly". And the camera comes off the hull it was sitting inside — a gimbal under the nose, measured off each rig's real parts, with the subject machine culled from its own feed and machine *heading* interpolated between ticks for the first time, so a nose-mounted camera glides instead of snapping |
-| 50 | _this_ | The ditch you cannot climb out of. Asked to play the loop through a save — scout, dig, save, reload, haul it to another village and sell it — and it broke twice. The fleet's **base pile was never written to disk**: `Fleet` has no `save` or `load` anywhere in `vx-agent`, so a reload came back with an empty pile *and no declared base*, which re-armed stage 48's silent ore loss on the very next block. It gets `pile.dat` (`VXBP`), beside the tank and the wear ledger. Then the haul itself could not finish, and the reason was in the world: **every town is ringed by a three-block ditch that ran straight across its own gateway**, and a body mantles 2.2 — so no player could enter any town, or re-enter the one they started in, from the day forts shipped in stage 21. The gate gets the uncut causeway a fort with no drawbridge is actually built with. And the walker learns to stop and look: `afoot.rs` sweeps the ground a *body* can cross — two blocks of headroom, a climb of two, a drop of six — where the drones' one-block field said a mountainside was unreachable. Played end to end on the shipped seed: 792 ticks of sector scan, two pings, 322 ore columns, 20 blocks cut, 25 goods on the pile **before and after the save**, 206 blocks to the next town, and 405 credits over a stranger's counter |
+| 50 | `f458008` | The ditch you cannot climb out of. Asked to play the loop through a save — scout, dig, save, reload, haul it to another village and sell it — and it broke twice. The fleet's **base pile was never written to disk**: `Fleet` has no `save` or `load` anywhere in `vx-agent`, so a reload came back with an empty pile *and no declared base*, which re-armed stage 48's silent ore loss on the very next block. It gets `pile.dat` (`VXBP`), beside the tank and the wear ledger. Then the haul itself could not finish, and the reason was in the world: **every town is ringed by a three-block ditch that ran straight across its own gateway**, and a body mantles 2.2 — so no player could enter any town, or re-enter the one they started in, from the day forts shipped in stage 21. The gate gets the uncut causeway a fort with no drawbridge is actually built with. And the walker learns to stop and look: `afoot.rs` sweeps the ground a *body* can cross — two blocks of headroom, a climb of two, a drop of six — where the drones' one-block field said a mountainside was unreachable. Played end to end on the shipped seed: 792 ticks of sector scan, two pings, 322 ore columns, 20 blocks cut, 25 goods on the pile **before and after the save**, 206 blocks to the next town, and 405 credits over a stranger's counter |
+| 51 | _this_ | Every load put you back in bed. Asked to play the whole loop — leave town, mine, **come back**, save, go to another town and trade — and the half nothing had ever walked broke it twice over. `App`'s boot builds the body at `town::spawn_position` unconditionally and nothing anywhere reads a saved position, because nothing anywhere writes one: the ground, the pile, the wallet, the skills, the books, the chest, the tank and the wear ledger all came back and **you** did not. Walk two hundred blocks, sell up, quit, come back — you are in your own kitchen with the walk to do again. It hid for the same reason the ditch did: every save/load test there had ever been ran at the spawn, where being put back at the spawn is indistinguishable from working. It gets `whereabouts.dat` (`VXYO`) — where you are and where you are looking, at `f64`, read *above* the pregen so the ground is prepared around where the body will actually be rather than dropping it through unloaded air. `Session::cross_country` names the shape every long walk has (out by your gate, over the hills in legs, in by theirs) after it had been written by hand three times, and `--haul` grows the beat it never had: the walk **home**, laden, in through your own gate |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -3198,6 +3199,77 @@ the pile. That is the same shape as the silent ore loss and it is in the
 rough-edges list rather than fixed, because it is a real cost that the game
 simply never mentions.
 
+## Shipped — Stage 51: every load put you back in bed
+
+The ask was the loop end to end: **leave town, mine, come back, save, go to
+another town and trade** — and *ensure you can save the game.* Stage 50 had
+proved five sixths of that. The sixth broke it.
+
+**Coming home had never been walked.** Going out is the easy direction: you are
+empty, you know where your own door was, and the gate you leave by is the one
+facing where you are going. Coming back has to find a gate from *outside*, and
+do it carrying the weight that halves your pace. Nothing had ever done it —
+every test until now either stayed inside the walls or left and stopped — and
+it is the leg that stage 50's causeway made possible in the first place. It
+now runs: 424 ticks from the seam to the counter, laden, in through the gate.
+
+**And then the save.** Standing at your own counter, `--haul` saved, dropped
+the session and loaded it back — and the body came back at **(-14, 73, 10)**,
+which is the bed. Not a harness artefact: `App`'s boot builds
+
+```rust
+let player = PlayerBody {
+    position: /* town::spawn_position(&home) */,
+    ..PlayerBody::default()
+};
+```
+
+unconditionally, with a camera pinned to a yaw of ninety degrees — *"you wake
+up in your own house, facing the door"* — and there is no read of a saved
+position anywhere in the crate, because there was no write of one either. The
+ground you changed came back. The pile came back, as of stage 50. The wallet,
+the skills, the town's books, the house chest, the fuel tank and the wear
+ledger all came back. You did not. Walk two hundred blocks to another town,
+sell your load, quit, come back — and you are in Stonehaven in your own
+kitchen with the walk to do again.
+
+It hid for exactly the reason the ditch hid: **every save/load test that had
+ever been written ran at the spawn**, and at the spawn "put the body back where
+it was" and "put the body at the spawn" are the same picture. The new test
+stands somewhere else on purpose before it saves, and fails against the old
+code.
+
+`whereabouts.dat` (`VXYO`, VERSION 1) holds where you are and where you are
+looking, and nothing else. Not your stance — a save taken mid-crawl should not
+reload you mid-crawl into a ceiling that has since been dug out — and not your
+velocity, because reloading into a fall you started before quitting is a way to
+die at a loading screen. The position is `f64`, because the body has been since
+stage 42 and a `f32` file would make every quit a teleport of a few
+centimetres; there is a test three thousand kilometres out that says so. A
+`NaN` is refused at the door, since a body outside every comparison the sweep
+makes is a body wedged there for good.
+
+**The read has to happen above the pregen**, which is the one subtle part. The
+boot prepares chunks around where the first playable frame will be stood, so a
+position restored *after* those chunks are chosen stands in unloaded air —
+which reads as nothing to stand on, and drops the body through the world. The
+same ordering trap exists in `Session::load_from`, and there is a test that
+stands the reloaded body still for a second and insists it is still at the
+height it arrived at.
+
+**`Session::cross_country`** names the shape every long walk in this game has,
+after the played loop had written it out by hand three times: out of one town
+by its gate, over the hills in ninety-block legs so each gets its own detour
+allowance, in through another town's gate — chosen by the bearing of the
+*approach*, not of its centre, so you come in at the gate on your side — and
+then up to the place itself. Both ends are optional, because a seam on a
+hillside is in no town at all.
+
+**`--haul` now plays the sentence that was asked for**, in five beats on the
+shipped seed: out to the ping the flier found (888 ticks), 20 blocks cut and 25
+goods on the pile, **home again laden** (424 ticks), saved and reloaded *at the
+counter where it was saved*, and 206 blocks to a Depot for **405 credits**.
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -3558,6 +3630,8 @@ and the camera has come off the hull it was sitting inside. Then 50 played the
 loop *through a save* and found the pile does not survive one — and, walking
 the two hundred blocks to the next village to sell, that no player has ever
 been able to walk into a town at all, because the ditch ran across the gate.
+And 51 walked the leg 50 had not — home again, laden, in through your own
+gate — and found the last thing in the game that did not survive a save: you.
 
 One round is named now:
 
@@ -3570,7 +3644,7 @@ the next note says.
 
 ## The feature map
 
-The whole game at a glance, as of stage 50.
+The whole game at a glance, as of stage 51.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);

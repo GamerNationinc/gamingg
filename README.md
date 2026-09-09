@@ -267,6 +267,10 @@ build in it, and it survives quitting — skills included.
   translucent block; looks wrong the moment two transparent surfaces overlap.
 - Saving happens on quit and on demand, not periodically. A crash loses the
   session.
+- A save remembers where you were standing and which way you were facing, and
+  deliberately not your stance or your speed — you always arrive upright and
+  still. So a save taken mid-slide reloads as a stop, and one taken in a place
+  you could only have reached by falling reloads with the fall already over.
 - Chunk culling uses each chunk's full 256-block height. A tighter bound around
   the blocks actually present would cull more.
 - Ore uses one tile for every block, so a large exposed body shows a visibly
@@ -1041,6 +1045,56 @@ blocks cut and 25 goods on the pile; save, drop the whole session, load it back
 — **25 goods still on it**; then 206 blocks over the hills to a depot that has
 no ore of its own and pays **405 credits** for yours. Four pictures come out of
 it, one per beat.
+
+### Every load put you back in bed
+
+Then: leave town, mine, **come back**, save, go to another town, trade. And
+make sure saving works. Two things fell out of that, and the second one is the
+worst kind, the sort that is obviously broken the moment somebody actually
+tries it.
+
+**Coming home had never been walked.** Going out is the easy direction — you
+are empty, you know where your own door is, and the gate you leave by is the
+one facing where you are going. Coming back has to find a gate from *outside*
+while carrying the load that halves your walking speed, and nothing in this
+game had ever done it: every test either stayed inside the walls or left and
+stopped. It runs now, 424 ticks from the hole in the ground to your own
+counter, in through your own gate.
+
+**And then I saved at that counter, loaded it back, and woke up in bed.**
+
+Not a quirk of the test harness — the game itself. It puts you at the spawn
+every single time you load, whatever the save says, because nothing had ever
+written down where you were. The ground you dug came back. Your pile came back.
+Your money, your skills, the town's prices, the chest in your house, the fuel
+tank and the wear on your machines all came back. *You* did not. Walk two
+hundred blocks to another town, sell your load, quit for the night, come back
+tomorrow — and you are stood in your own kitchen in Stonehaven with the whole
+walk to do again.
+
+It hid for exactly the same reason the ditch did: every save-and-load test ever
+written started at the spawn, and at the spawn "put him back where he was" and
+"put him at the spawn" look identical. The new one deliberately stands
+somewhere else first, and it fails against the old code.
+
+Where you are and where you are looking now go in their own little file. Not
+your stance — a save taken mid-crawl should not put you back mid-crawl under a
+ceiling somebody has since dug out — and not your speed, because reloading into
+a fall you started before you quit is a way to die at a loading screen. You
+arrive stood up and still, which is what every game that does this does. It is
+stored at full precision, so a save three thousand kilometres from spawn does
+not shuffle you a few centimetres every time you quit.
+
+The fiddly part was *where in the boot* to read it. The game prepares the
+ground around wherever you are going to be standing before it draws the first
+frame — so reading your position after choosing that ground puts you in
+unloaded air, which the physics reads as nothing to stand on, and you drop
+through the world. There is a test that stands a freshly loaded body still for
+a second and insists it has not moved.
+
+The run, end to end: out to the seam the flier found, 20 blocks cut, home again
+laden, saved and reloaded **at the counter, not in bed**, then 206 blocks over
+the hills to a depot for 405 credits. Five pictures, one per beat.
 
 ### The body stays out of the wall
 
@@ -2129,10 +2183,10 @@ cargo run --release -p vx-app -- --screenshot gimbal.ppm --gimbal --at 0,10
 # play-01-door.ppm, play-02-out.ppm, play-03-ore.ppm and play-04-counter.ppm
 cargo run --release -p vx-app -- --screenshot play.ppm --play --seed 2024 --at 146,30
 
-# the same loop, but through a save and out to a *different* town: scout with
-# the flier, cut what it found, save and reload, then haul it over the hills
-# and sell it at a counter that is not yours. Writes haul-01-ping.ppm,
-# haul-02-cut.ppm, haul-03-reloaded.ppm and haul-04-sold.ppm
+# the whole loop through a save and out to a *different* town: scout with the
+# flier, cut what it found, walk home laden, save and reload, then haul it over
+# the hills and sell it at a counter that is not yours. Writes haul-01-ping.ppm,
+# haul-02-cut.ppm, haul-03-home.ppm, haul-04-reloaded.ppm and haul-05-sold.ppm
 cargo run --release -p vx-app -- --screenshot haul.ppm --haul --seed 2024 --at 146,30
 
 # put a bigger crew on the next dispatch

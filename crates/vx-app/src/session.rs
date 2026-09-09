@@ -187,6 +187,14 @@ impl Session {
         self.economy.save(root)?;
         self.mining.tank.save(root)?;
         crate::pile::save(&self.mining.fleet, root)?;
+        crate::whereabouts::save(
+            crate::whereabouts::Whereabouts {
+                position: self.player.position,
+                yaw: self.yaw,
+                pitch: self.pitch,
+            },
+            root,
+        )?;
         Ok(())
     }
 
@@ -205,6 +213,15 @@ impl Session {
             .map_err(|error| std::io::Error::other(format!("{error}")))?;
 
         let mut session = Session::open(seed);
+        // Where you were standing, before anything is loaded around it: the
+        // ground is pulled in around wherever the body is going to be, and a
+        // body restored *after* the chunks are chosen stands in unloaded air
+        // and falls through the world.
+        if let Some(at) = crate::whereabouts::load(root) {
+            session.player.position = at.position;
+            session.yaw = at.yaw;
+            session.pitch = at.pitch;
+        }
         // Pull the saved ground back in place of the generated ground. The
         // same free function the live game's boot uses, so a chunk that was
         // dug in the last session comes back dug.
@@ -805,6 +822,51 @@ impl Session {
             self.player.position.y,
             f64::from(gate.1) + 0.5 + dz / length * 2.0,
         )
+    }
+
+    /// How long a leg of open country is before the route puts another
+    /// waypoint in.
+    ///
+    /// Each leg gets its own detour allowance, so short legs mean a walker
+    /// that gives up less easily — but a waypoint dropped blind onto a
+    /// hillside can also be somewhere unreachable, and then the walk stops at
+    /// it. Ninety blocks is what the two-hundred-block haul wants; thirty was
+    /// measurably worse.
+    pub const LEG: f64 = 90.0;
+
+    /// A walk across country: out of one town by its gate, over the hills in
+    /// legs, in through another town's gate, and up to the place itself.
+    ///
+    /// This is the shape every long walk in the game has, and it was written
+    /// out by hand three times in the played loop before it was worth naming.
+    /// Both gates matter and for the same reason: a bearing taken on a plaza
+    /// points at the inside of your own rampart, and a bearing taken in open
+    /// country points at the outside of theirs. `leaving` and `entering` are
+    /// each optional because a seam on a hillside is in no town at all.
+    pub fn cross_country(
+        &self,
+        leaving: Option<&vx_world::town::TownSite>,
+        to: DVec3,
+        entering: Option<&vx_world::town::TownSite>,
+    ) -> Vec<DVec3> {
+        let mut legs = Vec::new();
+        if let Some(site) = leaving {
+            legs.push(self.gateway_toward(site, to));
+        }
+        let from = *legs.last().unwrap_or(&self.player.position);
+        // The far gate is chosen by the bearing of the *approach*, not of the
+        // town's centre: you come in at whichever gate is on your side.
+        let arrive = entering.map(|site| self.gateway_toward(site, from));
+        let last = arrive.unwrap_or(to);
+        let steps = ((last - from).length() / Self::LEG).ceil().max(1.0) as i32;
+        for step in 1..=steps {
+            let along = f64::from(step) / f64::from(steps);
+            legs.push(from + (last - from) * along);
+        }
+        if arrive.is_some() {
+            legs.push(to);
+        }
+        legs
     }
 
     /// The route into the shop and up to the counter: the doorway first, then
@@ -1525,6 +1587,168 @@ mod tests {
         assert_eq!(pile.count("engine:copper_ore"), 37, "the ore did not come back");
         assert_eq!(pile.count("engine:stone"), 4);
         assert_eq!(pile.total(), 41);
+    }
+
+    /// Where you were standing survives a save.
+    ///
+    /// It did not. `App`'s boot planted the body at `spawn_position` on every
+    /// load, unconditionally, and nothing ever wrote a position for it to read
+    /// instead — so a player who walked to another town, sold their load and
+    /// quit came back in their own kitchen with the walk to do again. It
+    /// stayed hidden because every save/load test there had ever been ran at
+    /// the spawn, where being put back at the spawn is indistinguishable from
+    /// working. This one deliberately stands somewhere else first.
+    #[test]
+    fn where_you_stood_survives_a_save() {
+        let directory = scratch("whereabouts");
+        let spawn = {
+            let session = Session::open(SEED);
+            session.player.position
+        };
+        let (stood, yaw, pitch) = {
+            let mut session = ready();
+            // The customer's side of the counter, up the path from the house:
+            // somewhere a player really ends a session, and not the bed.
+            let counter = vx_world::town::counter_stand_position(&session.home());
+            session.player.position = DVec3::new(
+                f64::from(counter.x) + 0.5,
+                f64::from(counter.y),
+                f64::from(counter.z) + 0.5,
+            );
+            session.look_at(vx_world::town::counter_position(&session.home()));
+            session.save_to(&directory).unwrap();
+            (session.player.position, session.yaw, session.pitch)
+        };
+        assert_ne!(stood, spawn, "the test never left the spawn");
+
+        let reloaded = Session::load_from(&directory).unwrap();
+        std::fs::remove_dir_all(&directory).ok();
+        assert_eq!(
+            reloaded.player.position, stood,
+            "the reload put the body back at the spawn instead of where it was"
+        );
+        assert_eq!(reloaded.yaw, yaw, "it came back facing somewhere else");
+        assert_eq!(reloaded.pitch, pitch);
+    }
+
+    /// And the ground is loaded around wherever that turns out to be.
+    ///
+    /// The order matters and is easy to get wrong: the chunks are pulled in
+    /// around the body's position, so a body restored *after* the chunks are
+    /// chosen stands in unloaded air, which reads as nothing to stand on and
+    /// drops it through the world.
+    #[test]
+    fn a_reloaded_body_has_ground_under_it() {
+        let directory = scratch("footing");
+        {
+            let mut session = ready();
+            let counter = vx_world::town::counter_stand_position(&session.home());
+            session.player.position = DVec3::new(
+                f64::from(counter.x) + 0.5,
+                f64::from(counter.y),
+                f64::from(counter.z) + 0.5,
+            );
+            session.save_to(&directory).unwrap();
+        }
+        let mut session = Session::load_from(&directory).unwrap();
+        std::fs::remove_dir_all(&directory).ok();
+        let landed = session.player.position;
+        // A second of standing still. If the chunks under it were not there,
+        // this is the second it spends falling.
+        session.advance(64, session.command(0));
+        assert!(
+            (session.player.position.y - landed.y).abs() < 0.5,
+            "the reloaded body fell from {landed:?} to {:?}",
+            session.player.position
+        );
+    }
+
+    /// You can walk back into your own town.
+    ///
+    /// The other half of the loop, and the half nothing had ever walked: every
+    /// test until stage 50 either stayed inside the walls or left and stopped.
+    /// A town is ringed by a rampart with four gateways and a three-block
+    /// ditch, and until the causeway went in the gateway had the ditch across
+    /// it — so this walk was impossible for a body that mantles 2.2, at every
+    /// town, including your own.
+    #[test]
+    fn you_can_walk_home_from_outside_the_walls() {
+        let mut session = ready();
+        let home = session.home();
+        let counter = vx_world::town::counter_position(&home);
+        let till = DVec3::new(
+            f64::from(counter.x) + 0.5,
+            session.player.position.y,
+            f64::from(counter.z) + 0.5,
+        );
+
+        // Stand well outside the wall, on the far side of the ditch, and walk
+        // in. Sixty blocks out is past the trace, the ditch and the bastions.
+        let outside = DVec3::new(till.x + 60.0, till.y, till.z + 60.0);
+        let out = session.cross_country(Some(&home), outside, None);
+        let left = session.walk_route(&out, 8 * 400);
+        assert!(left.reached(), "could not get out of my own town: {left:?}");
+
+        let mut back = session.cross_country(None, till, Some(&home));
+        back.extend_from_slice(&session.counter_route(&home));
+        let home_again = session.walk_route(&back, 8 * 600);
+        assert!(
+            home_again.reached(),
+            "could not get back into my own town: {home_again:?}, stopped at {:?}",
+            session.player.position
+        );
+        assert!(
+            session.at_the_counter(&home),
+            "got into town but not to the counter"
+        );
+    }
+
+    /// A cross-country route leaves by a gate and arrives by one, and every
+    /// leg of it is a place — not a bearing taken from a plaza.
+    #[test]
+    fn a_route_between_towns_goes_gate_to_gate() {
+        let session = ready();
+        let home = session.home();
+        let elsewhere = *session
+            .world
+            .towns_near((0, 0), 4_000)
+            .iter()
+            .find(|site| !site.is_home())
+            .expect("no other town on this frontier");
+        let counter = vx_world::town::counter_position(&elsewhere);
+        let to = DVec3::new(
+            f64::from(counter.x) + 0.5,
+            session.player.position.y,
+            f64::from(counter.z) + 0.5,
+        );
+
+        let legs = session.cross_country(Some(&home), to, Some(&elsewhere));
+        assert!(legs.len() >= 3, "a two-hundred block route in {} legs", legs.len());
+        assert_eq!(legs.last().copied(), Some(to), "the route does not end at the counter");
+
+        let near = |leg: &DVec3, site: &vx_world::town::TownSite| {
+            vx_world::fort::fort_for(site)
+                .gateways()
+                .into_iter()
+                .any(|(x, z)| {
+                    let (dx, dz) = (leg.x - f64::from(x), leg.z - f64::from(z));
+                    (dx * dx + dz * dz).sqrt() < 4.0
+                })
+        };
+        assert!(near(&legs[0], &home), "the route did not leave by a gate");
+        assert!(
+            legs.iter().any(|leg| near(leg, &elsewhere)),
+            "the route did not arrive by a gate"
+        );
+        // No leg is longer than the leg length, so each gets its own detour
+        // allowance and a long walk is not one enormous bearing.
+        for pair in legs.windows(2) {
+            assert!(
+                (pair[1] - pair[0]).length() <= Session::LEG + 1.0,
+                "a leg of {:.0} blocks",
+                (pair[1] - pair[0]).length()
+            );
+        }
     }
 
     /// The second-order half of the same bug: with the base gone, the *next*
