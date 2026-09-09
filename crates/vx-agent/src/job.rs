@@ -39,6 +39,15 @@ pub enum JobKind {
     Access,
     /// The body itself.
     Extract,
+    /// A course of a spoil heap: cells to **fill**, not empty.
+    ///
+    /// The first job kind that ever meant "put something here". It carries no
+    /// material on purpose — a drone stacks whatever it happens to be holding,
+    /// so a heap is made of the actual mixed stone and dirt that came out of
+    /// the actual hole. That keeps `JobKind` `Copy` and one byte on disk, and
+    /// it is also the more honest object: a spoil heap is not built from a
+    /// recipe, it is what is left over.
+    Stack,
 }
 
 /// One piece of work.
@@ -152,6 +161,40 @@ impl JobBoard {
 
         self.entries[best].claimed_by = Some(drone);
         Some(self.entries[best].job.clone())
+    }
+
+    /// Claim the nearest unclaimed job **of one kind**, ignoring priority.
+    ///
+    /// [`JobBoard::claim_nearest`] ranks by priority first, which is right for
+    /// a drone choosing what to do next and wrong for one that has already
+    /// decided. Stacking sits at the bottom of the priority order on purpose —
+    /// the hole before the heap — so a full drone looking for somewhere to put
+    /// its load would never reach a stacking job through the ranking. It is
+    /// not choosing; it is asking where the nearest heap is.
+    pub fn claim_nearest_of(
+        &mut self,
+        drone: DroneId,
+        from: BlockPos,
+        kind: JobKind,
+    ) -> Option<&Job> {
+        let best = self
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| entry.claimed_by.is_none() && entry.job.kind == kind)
+            .min_by_key(|(_, entry)| {
+                let centre = entry.job.region.centre();
+                let dx = (centre.x - from.x) as i64;
+                let dy = (centre.y - from.y) as i64;
+                let dz = (centre.z - from.z) as i64;
+                // Priority still breaks ties within the kind, so the lowest
+                // course of a heap goes before the one above it.
+                (-entry.job.priority, dx * dx + dy * dy + dz * dz, entry.job.id)
+            })
+            .map(|(index, _)| index)?;
+
+        self.entries[best].claimed_by = Some(drone);
+        Some(&self.entries[best].job)
     }
 
     /// Give a claimed job back to the board.

@@ -12,6 +12,8 @@
 //!   breadth-first sweep serves any number of drones.
 //! - [`mine`] — adit, decline or open pit: how to open a mine on a body, which
 //!   for a ground drone is the same question as how to reach it.
+//! - [`heap`] — the same question with the sign flipped: what to stack the
+//!   spoil into, and in what order so that nothing is ever built on air.
 //! - [`job`] — the shared board. Drones take work from it rather than each
 //!   planning their own.
 //! - [`drone`] — one machine's position, cargo and reach.
@@ -28,6 +30,7 @@ mod fixture;
 pub mod fleet;
 pub mod flier;
 pub mod flow;
+pub mod heap;
 pub mod job;
 pub mod kestrel;
 pub mod mine;
@@ -41,6 +44,7 @@ pub use drone::{Drone, DroneSnapshot, DroneState, DEFAULT_CAPACITY, DEFAULT_GRAD
 pub use fleet::{Base, Fleet, FleetReport, FleetSnapshot, SurveySnapshot};
 pub use flier::{Flier, FlierState, CLEARANCE, DEFAULT_FLIER_CAPACITY};
 pub use flow::{is_standable, settle, FlowField, STEP, UNREACHABLE};
+pub use heap::{HeapPlan, HeapShape};
 pub use job::{BoardSnapshot, DroneId, Job, JobBoard, JobId, JobKind};
 pub use kestrel::{Kestrel, KestrelMode};
 pub use mine::{options, plan, propose, MineMethod, MinePlan, PIT_MAX_DEPTH};

@@ -133,8 +133,47 @@ pub fn place_block(
     block: BlockId,
     is_obstructed: impl Fn(BlockPos) -> bool,
 ) -> Result<BlockPos, EditError> {
-    let position = hit.placement();
+    place_at(
+        world,
+        events,
+        hit.placement(),
+        block,
+        hit.block,
+        hit.face,
+        is_obstructed,
+    )
+}
 
+/// Put `block` at `position`, with no ray involved.
+///
+/// # Why this exists
+///
+/// [`place_block`] takes a [`RayHit`] because for fifty-five stages the only
+/// thing in this game that ever built anything was a player pointing at a
+/// block. Stage 56 gives the drone crew a spoil heap to stack, and a drone has
+/// no ray: it stands next to a cell it has been told to fill and puts what it
+/// is carrying into it.
+///
+/// So this is the real placement rule and `place_block` is now the caller that
+/// unpacks a hit into it — done in that direction on purpose, so that every
+/// check the player's build has always gone through is exactly the one the
+/// crew goes through, rather than a second placer beside the first that drifts.
+/// In particular the crew inherits the cancellable [`BlockPlaceEvent`] and
+/// therefore the town's permit veto, which already subscribes to it.
+///
+/// `against` and `face` describe what the block is being built onto. A ray
+/// knows them for free; a caller without one passes the cell it is building
+/// from and the direction it is reaching.
+#[allow(clippy::too_many_arguments)]
+pub fn place_at(
+    world: &mut World,
+    events: &EventBus,
+    position: BlockPos,
+    block: BlockId,
+    against: BlockPos,
+    face: Face,
+    is_obstructed: impl Fn(BlockPos) -> bool,
+) -> Result<BlockPos, EditError> {
     if !position.in_vertical_bounds() {
         return Err(EditError::OutOfRange);
     }
@@ -148,7 +187,7 @@ pub fn place_block(
         return Err(EditError::Obstructed);
     }
 
-    let mut event = BlockPlaceEvent::new(position, block, hit.block, hit.face);
+    let mut event = BlockPlaceEvent::new(position, block, against, face);
     if !events.emit_cancellable(&mut event) {
         return Err(EditError::Cancelled);
     }

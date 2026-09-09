@@ -169,12 +169,23 @@ build in it, and it survives quitting — skills included.
 | `vx-render` | wgpu renderer, camera, frustum culling, instanced objects, 2D overlays, bitmap font, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
 | `vx-app` | Window, walk/fly/third-person camera, tick-based player movement, streaming, day/night clock, HUD, rigs, skills, villagers, awareness, shop, wallet, garage, handheld, beacon board, town economy, maps, command journal, `gamingg` binary | Done |
-| `vx-agent` | Job board, flow fields, mine planning, scanner, flier + fleet, manual piloting | Done |
+| `vx-agent` | Job board, flow fields, mine planning, spoil-heap shapes, scanner, flier + fleet, manual piloting | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | later |
 | `vx-steam` | Steam Workshop mod source | M4 |
 
 ### Known rough edges
 
+- A spoil heap the crew cannot stand beside does not get finished. Stacking
+  reuses the cut's neighbourhood, and `PLACE_OFFSETS` has nothing below it on
+  purpose — a drone cannot fill the cell under its own feet without lifting
+  itself — so once a shaft's walls are up, the cells inside the top course
+  have no station left to work from and the heap comes out hollow. It is
+  visible in the `--heap` capture, and it is a truthful picture of the rule
+  rather than a bug in it: what is missing is a machine that can reach *down*.
+- The crew has one spoil heap at a time, and it is part of the dig rather than
+  a standing order of its own: `Mining::operation` is a single `Option`, so
+  ordering a second heap posts more courses onto the same crew. Cancel the
+  dispatch and the heap goes with it.
 - Footings are poured flat under a town's levelled plateau; a building on a
   slope would want stepped footings, and no building stands on a slope yet.
 - A town's vault charges no fee and pays no interest, so banking is pure

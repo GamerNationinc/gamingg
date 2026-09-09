@@ -132,6 +132,7 @@ Written down because they are easy to forget and expensive to get wrong.
 | 53 | `fe739a7` | The drill mod: a cage of light, and a ping through the rock. Asked for an 80s holographic glow on the block being drilled, toggleable, plus a sonar ping reading the elements within four metres of it. Found on the way in that **this game has never had a selection box** — nothing was drawn on the aimed block, and no crosshair either; fifty-two stages of the only way to know what was under the bit being the F3 panel's text row. So the mod is not decoration on a highlight, it *is* the highlight: twelve opaque bars in a new cyan tile standing `SWELL` off the block, dim on a block you are looking at and ramping to the shader's 1.4 overbright as the bit bites, with a plane of light rising through the block as the drill's progress bar. The other half reads the 9×9×9 box round the touched block, keeps the cells inside four metres, and groups them seams-first with every tie broken — a total order, so the same ground pings the same way twice. Markers hang in the **air cell against an exposed seam** rather than inside the ore, because this renderer draws opaque geometry with a depth test and a marker in rock is one nobody sees; what is still buried is counted and reported instead. **Neither switch is on the wire.** The mod draws and reads and never writes a block, a good or a number, so it needs no order, no `VERSION` bump and no keyframe — and `the_drill_mod_is_a_lens_not_a_lever` plays the same session twice with both switches on and off and demands identical journal bytes and world hash. Free on any drill, `H` and `P`, on the pad's second layer and at the terminal, remembered in `drillmod.dat`. The aim ray is now cast **once** a frame instead of twice-and-discarded |
 | 54 | `71f8e7d` | Nothing you did is lost. Asked, as a gate on the whole arc, to make sure progress and gameplay actually save — *"because if you don't have that, the game isn't really a game."* Walking all 104 fields of `Active` and all 34 save/load pairs in the **live** game rather than the headless session the census test walks turned up six things. **There was no autosave at all**: `save_world` was reachable from `F5`, the terminal and closing the window, all three a cooperative shutdown the player chooses, so a crash, an OOM kill, a SIGTERM or a closed lid took the session — and on the Deck this build targets those are the ordinary ways a session ends, not the exotic ones. **Every one of the 34 sidecar writers used `File::create`**, which truncates first, while `vx_world::save::write_atomically` had protected the region files since they existed: an interrupted save left a short file, and every loader in this game is tolerant enough to answer one by resetting its subsystem, so a power cut could take your wallet to zero and warn nobody. Worse, the set was written sequentially with nothing comparing the pieces, so a wallet from after a sale could load beside a pile from before it. **A failed save was a `log::error!`** and the terminal printed "WORLD WRITTEN OUT" unconditionally; a boot that could not open the save directory never saved at all and never said so. And three things were being lost outright: the goods a broken container was holding were **written on every save and dropped on load** by a live boot that grafted across only `.base` — while the test proving the format works exercises the session's path, which was never the broken one; a **cleared garrison** re-mustered on reload with its downed holders alive, which is both an afternoon undone and, since the capture pay banks, a reload payday; and a **pump you switched on came back off**, filed in the census under "things mid-flight" when a running pump is a standing decision. Fixed with `keeping.rs`: one atomic writer (temp, `sync_all`, rename) behind all thirty-six files, a `manifest.dat` written **last** and stamped from what the save actually produced so a torn set is detected and rolled back to a hard-linked fallback with the wreck kept under `torn/`, an autosave on a two-minute clock *and* on the orders worth not repeating (marked in `CommandLog::record`, the one gate every order passes), `suspended`/`exiting`/`Destroyed` handlers, and failures collected into a line the player actually sees. The census stopped being a comment — it had **six wrong filenames in it** — and became a table the manifest is checked against. Measured: 6.0 ms for a save of 24 hand-cut blocks, 4.4 ms for one with nothing new in it |
 | 55 | `036e546` | The pack. Asked for the Minecraft thing — what you mine becomes a small block that pops into your inventory, with a visible count and a carrying limit you can later upgrade with an exoskeleton — and the honest starting point was that **there is no player inventory**, and never has been. Everything broken routed straight onto `Fleet::base`, a container standing somewhere else entirely, *and that pile was what the movement system weighed you down by*: the README's oldest rough edge, unchanged since stage 16. So the round mostly points a thing that already exists at the thing it was always describing. `pack.rs` is a `Stockpile` of the player's own plus the game's **third per-good table** (after `economy::BASE_PRICE` and `BlockDef::hardness`, and the first about mass): leaves 1, timber 4-7, stone 10 — the yardstick — copper 18, bars 25, uranium 30, with a drift test that fails if a block the registry knows has no weight. Capacity is `pack::UNIT` times the two curves that have existed since stage 25 and had only ever been applied to a number nobody could see, so a fresh pack is exactly sixty-four stone and nothing a player knows got smaller. Two thresholds, not one: free to three tenths, then the same `mass_from_byte` curve the game has always had, then a hard stop — and `pack::load_byte` is **one function called by both** `App::frame` and `Session`, killing the duplicated arithmetic that let the windowed game and the headless one drift. `drops.rs` is what a limit needs in order not to be a punishment: a full pack does not refuse the swing and does not eat the block, it lets what came out lie in the cell it came from — settled onto the first floor under it, so a ceiling block is not left hanging at head height — drawn in the good's own tile like `arsenal::Crash` has been drawn since stage 13, collected by walking near, and saved to `drops.dat` because a drop you deliberately left is exactly what stage 54 spent a round refusing to lose. **The oracle got stricter, and it caught two of its own.** `Command::Break`'s replay arm broke the block and banked *nothing* — from stage 6 to here, replay's pile was short every hand-cut rock, hidden because the load byte is re-installed off the wire rather than re-derived, and load-bearing because that pile is what the fleet's fuel burns out of. Teaching it `drill::deposit` needed the pack size, which replay cannot know (the counter and the fabricator are both live-only), so `Command::Carry` (tag 31) states it when it changes — a capability re-installed, the same bargain the `Move` load byte struck in stage 10b — and `Command::Stow` (tag 30) is **payload-free**, replay re-deriving the manifest from its own pack rather than trusting a number in a file. Writing that test found the second: `Command::Place` of a container never *declared the base*, so every replayed `Stow` and every replayed delivery tipped into nowhere. Journal `VERSION` 32. `wallet::EXO` is the eighth line, at the counter and appended to the fabricator's catalogue rather than filed by difficulty — `Command::Print` records a recipe by its **index**, so a row slotted into the middle silently re-points every print order in every log ever written. And the search for somewhere to put the count found a live panic: the HUD has fifteen conditional rows and room for ten, `font::draw_text` clips and `draw_bar` did **not**, so six optional rows plus the drill trigger indexed past the end of an 82,720-byte buffer. Verified red first, then guarded. The count went on a panel (`I`, slot 20) and in a line on every swing instead |
+| 56 | `_this_` | The spoil heap. Asked for the last of the three rounds the drill-mod note named: *"it makes more logical sense to move blocks with the drone e.g. a rubble pile beside the mine — let's have different variations of stacking the blocks like square base pyramid, spiral tower or straight shaft."* The board had been calling this the expensive one for three stages on the grounds that **nothing in `vx-agent` can place a block** — "not a missing function, a missing concept" — and that was exactly half right. `vx_world::place_block` already did the occupancy check, the standing-there check and the cancellable `BlockPlaceEvent` a mod can veto; it just took a `&RayHit`, because until now the only thing that ever placed a block was a player pointing at one. Splitting `place_at` out of it left all 314 world tests passing untouched, and gave the permit gate to the heap for free at the *block* rather than only at the order. `heap.rs` sits beside `mine.rs` and is the same problem with the sign flipped: three shapes, and **`cells` in strictly bottom-up order, which is the whole safety argument** — a drone placing in that order is never asked to stand on air and never has to reach above a cell that is not there yet, so "can a machine reach the top of a pile it is itself building" is a property of the plan and therefore a test rather than a hope. Each column starts from **its own** `surface_y`, not the footprint's: taking the highest ground under the whole footprint buried the high side inside the hill and left the low side hanging. `PLACE_OFFSETS` is `REACH_OFFSETS`' mirror — same seventeen cells, opposite order, because the reason cutting works top-down is the reason stacking works bottom-up — and `JobKind::Stack` carries **no material**, so a heap is made of the actual mixed stone and dirt that came out of the actual hole. **The oracle test was the round**, and it found three bugs that had nothing to do with shapes. `post_heap` priced courses `-1_000 - (courses - step)`, which *rises* with height, so the board handed out the apex first and a drone was sent seven blocks up to a cell with nothing under it, found no station, and carried its load home for ever. `Session::dispatch_using` **never wrote `Command::Dispatch` down** — `App::start_mining` has since stage 9 — so every replay of a crew was replaying a journal with no crew in it and re-derived untouched ground; and `Session::fuel_the_fleet` conjured canisters onto the pile instead of banking them through the electrolyser's existing order, so the replayed crew stood on a dry tank. Two of the three were invisible until an order asked a *crew* to change the ground and then checked the log, which is the first thing this stage did. Then the played run found a fourth: order a heap after the dig is finished and every block of spoil is already in town, so the crew has nothing to build with — the yard now hands rock back, and "not ore" turned out to be the wrong rule for a pile that also holds the fleet's **fuel**. `Command::Heap` (tag 32), journal `VERSION` 33, `dig.dat` 3, key `B`, a `HEAP` verb, and a heap that is *installed* on replay rather than searched for the way a dispatch's method is |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -3665,6 +3666,129 @@ nothing new in it — the first timings this game has ever taken of its own
 save, because there was no instrumentation on that path at all, which is a
 poor position to add an autosave from.
 
+## Shipped — Stage 56: the spoil heap
+
+The last of the three rounds the drill-mod note asked for — 53 the mod, 54 the
+gate on saving, 55 the pack, and this. The ask, in the player's words:
+*"depositing it within containers, but I think it makes more logical sense to
+move blocks with the drone e.g. a rubble pile beside the mine — let's have
+different variations of stacking the blocks like square base pyramid, spiral
+tower or straight shaft."*
+
+### The missing concept was smaller than the board thought
+
+The roadmap had been calling this the expensive one for three stages, on the
+grounds that **nothing in `vx-agent` can place a block** — "not a missing
+function, a missing concept". That is exactly half right, and the half it gets
+wrong is the half that costs money. `vx_world::place_block` already did the
+bounds check, the occupancy check, the "something is standing there" check and
+the cancellable `BlockPlaceEvent` a mod can veto or substitute into. It took a
+`&RayHit`, because until now the only thing that ever placed a block was a
+player pointing at one. Splitting `place_at` out of its body and leaving
+`place_block` as the three-line caller left all 314 world tests passing
+unchanged — which is the point of doing it that way round rather than writing a
+second placer beside the first — and handed the heap the town's permit veto for
+free, at the *block* rather than only at the order.
+
+The drone was half ready too. `Drone.cargo` is a `Stockpile` and its own doc
+comment says why: *"so waste rock and ore stay distinguishable all the way from
+the face to the pile"* — a sentence written for a round that never came.
+
+### The ordering is the safety argument
+
+`heap.rs` sits beside `mine.rs` and is the same problem with the sign flipped:
+turn a marked region into an ordered list of work. Three shapes — a square-base
+pyramid stepping in one ring per layer, a spiral tower with a helical ramp that
+never rises more than `flow::STEP` so a machine can walk up it, and a straight
+shaft — and **`HeapPlan::cells` in strictly bottom-up order**.
+
+That ordering is the whole argument. A drone placing in it is never asked to
+stand on air, never has to reach above a cell that is not there yet, and the
+heap it is building becomes the ground it climbs. "Can a drone reach the top of
+a pile it is itself building" is therefore a property of the *plan* rather than
+of the pathfinder, which is why it is a test and not a hope.
+
+Each column starts from **its own** `surface_y`. The first version took the
+highest ground under the whole footprint, which on a slope buried the high
+side's cells inside the hill and left the low side's hanging.
+
+`PLACE_OFFSETS` is `REACH_OFFSETS`' mirror image: the same seventeen cells,
+lowest-first instead of highest-first, because the reason cutting works
+top-down — take a block at your own level and whatever rests on it hangs — is
+exactly the reason stacking works bottom-up. Neither list contains the cell the
+drone occupies, and `place_at`'s obstruction predicate is the belt to that
+braces. `JobKind::Stack` carries **no material**, which keeps `JobKind: Copy`
+and its one byte on disk and is also the more honest object: a spoil heap is
+not built from a recipe, it is what is left over, so a drone stacks whatever it
+happens to be holding and the heap comes out of mixed stone and dirt.
+
+### The oracle test was the round
+
+Everything above is arithmetic and passed on the first run of its own tests.
+The played oracle — dig a real body with a real crew, order a real heap out of
+the spoil, and demand the same world hash back from the log — found three bugs
+that had nothing to do with shapes, and none of them were in this stage's new
+code alone.
+
+**The board handed out the apex first.** Courses were posted at
+`-1_000 - (courses - step)`, which *rises* with height, so the top course
+outranked the floor. A drone was sent seven blocks up to a cell with nothing
+underneath it, `travel_to_work` reported `1 workable, 0 goals`, and it took its
+load home instead — every tick, for ever. The crate's own tests missed it
+because they all built shafts, which are two courses tall on flat ground and
+reachable from the floor either way round.
+
+**`Session::dispatch_using` never wrote the order down.** `App::start_mining`
+has recorded a `Command::Dispatch` since stage 9; the headless model of a
+played session — the one every oracle test actually runs — did not. So a
+replayed crew was never dispatched, the replay dug nothing, and the only reason
+no test had ever caught it is that no test had ever asked a *crew* to change
+the ground and then checked the log.
+
+**`Session::fuel_the_fleet` conjured canisters.** It added fuel straight to the
+pile, which a fixture can afford right up until the replay burns fuel every
+tick it works: the replayed crew stood on a dry tank. It now banks its fuel
+through `Command::Electrolyse`, an order since stage 20, so both sides do the
+same arithmetic over the same pile.
+
+Then the played run found a fourth. Order a heap *after* the dig has finished
+and every block of spoil is already in town — the crew has nothing to build
+with and the order stands for ever. The yard now hands rock back when a heap
+wants it and the mine mouth is bare: `Operation::fetch_spoil`, the ferry's
+mirror image, a load at a time so the two of them cannot play catch. And "not
+ore" turned out to be the wrong rule for a pile that also holds the fleet's
+**fuel** — the first version cheerfully sent the crew off to stack the tank
+into a pyramid, and the crew went dry on the next tick. What is a good and what
+is rock is the app's question, so the app answers it.
+
+### On the wire
+
+Placed blocks are ground and ground is the hash, so a heap is an order:
+`Command::Heap { area, shape, crew }`, tag 32, journal `VERSION` 33. Its replay
+arm mirrors `Dispatch`'s with one deliberate difference — `Dispatch` spins
+`cycle_method` looking for the method it recorded and **silently falls through
+to whatever is selected** if the ground no longer offers it; a shape the player
+chose is *installed*, not searched for. The footprint rides on the order rather
+than being read off `Mining::area`, because `Mining::mark` refuses while a
+dispatch is running and a heap ordered mid-dig is the ordinary case: the first
+version read the dig's own area and built a pyramid inside the hole.
+
+`dig.dat` goes to version 3 and carries the shape, the footprint and the
+progress — the cells are re-planned on load, so a heap saved mid-build comes
+back as a plan rather than as a list that might no longer match the ground.
+
+### Played
+
+`--heap` runs three whole sessions, one per shape: buy drones, put them on a
+real body, cut until there is spoil, then find flat open ground clear of the
+town and order it heaped. Nothing in the fixture places a block on the heap's
+behalf. On the shipped seed: a pyramid **33 of 35** over three courses, a
+spiral **54 of 280** over sixteen, and a shaft **36 of 50** over two — the
+shortfalls are spoil the hole did not contain, and in the shaft's case the
+hollow middle of the top course, which is the honest picture of a rule rather
+than a bug in it. A drone cannot fill the cell under its own feet, so once the
+walls are up there is no station left to work the inside from.
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -4046,13 +4170,13 @@ that this game had never had a selection box at all, nor even a crosshair, and
 that the ray which would have drawn one was already being cast twice a frame
 and thrown away both times.
 
-Two rounds are named now. 55 shipped; 56 is the last of what 53's note asked
-for.
+Both rounds are shipped now: 55 the pack, and 56 the spoil heap — the last of
+what 53's note asked for.
 
 | Stage | What | Why here |
 |---|---|---|
 | ~~55~~ | ~~The pack~~ — **shipped** | Blocks that pop to you as drops, a real player inventory with visible counts, and a carrying weight that **slows you first and hard-stops you second**, upgradeable by an exoskeleton. It is also the fix for the oldest rough edge in the README: the movement system weighs you down by a pile sitting in a container somewhere else entirely. The `load` byte already rides the journal and replay never re-derives it, so repointing it at a real pack costs nothing on the wire |
-| 56 | The spoil heap | You mark a spot, pick a shape — square-base pyramid, spiral tower, straight shaft — and the crew hauls spoil there and stacks it, reusing the mark / choose-a-method / dispatch flow and the job board. The expensive one, and honestly so: **nothing in `vx-agent` can place a block.** Not a missing function, a missing concept — `JobKind` has two behaviourless variants, a `Job` carries only a region with nowhere to say *what to put there*, `DroneState` has no build state, and `REACH_OFFSETS` is shaped entirely by the rules of cutting. Stacked blocks are ground and ground is the hash, so it is a journal order and `VERSION` 33 — 32 went to the pack |
+| ~~56~~ | ~~The spoil heap~~ — **shipped** | You mark a spot, pick a shape — square-base pyramid, spiral tower, straight shaft — and the crew hauls spoil there and stacks it, reusing the mark / choose-a-method / dispatch flow and the job board. The expensive one, and honestly so: **nothing in `vx-agent` can place a block.** Not a missing function, a missing concept — `JobKind` has two behaviourless variants, a `Job` carries only a region with nowhere to say *what to put there*, `DroneState` has no build state, and `REACH_OFFSETS` is shaped entirely by the rules of cutting. Stacked blocks are ground and ground is the hash, so it is a journal order and `VERSION` 33 — 32 went to the pack |
 | 49b | The drone you can lose | A machine cannot collide with anything, so it cannot crash. Integrity beside `wear.rs` and on the oracle for the same reason wear is; the flier's auto-climb off under manual control so it can be flown into a cliff, while the digger keeps the standability rule that stops a hand-driven drone stranding itself; gunfire through `segment_hits_box`; a persistent, mapped wreck you walk out to and salvage or rebuild; and `garage.rs`'s first `lose` mutator, since `grant` only ever added |
 
 Beyond those the board holds the outstanding engineering below, and whatever
@@ -4060,7 +4184,7 @@ the next note says.
 
 ## The feature map
 
-The whole game at a glance, as of stage 55.
+The whole game at a glance, as of stage 56.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -4265,6 +4389,13 @@ you first and hard-stops you second, drops that lie in the cell they came out of
 and settle onto the floor under it, an exoskeleton line at both the counter and
 the fabricator, and the replay arm for `Break` that had banked nothing since
 stage 6);
+the spoil heap (a crew that can **put a block back** — `place_at` split out of
+the ray-driven placer so a machine can build without pointing at anything,
+three shapes planned bottom-up because the ordering is the reason a drone is
+never asked to stand on air, `PLACE_OFFSETS` as the mirror of the cut's reach,
+a `Stack` job with no material so the pile is made of what actually came out of
+the hole, the yard handing spoil back when the mine mouth is bare, and
+`Command::Heap` with the shape installed rather than re-ranked);
 a Steam Deck dist build every round.
 
 **Planned, in arc order:** the drone you can lose — and, first inside that

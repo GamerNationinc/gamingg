@@ -49,6 +49,12 @@ pub enum DroneState {
     Digging(JobId),
     /// Full, heading for the stockpile.
     Hauling,
+    /// At a spoil heap, stacking what it is carrying into it.
+    ///
+    /// Its own state rather than a destination bolted onto [`Hauling`],
+    /// because the state is snapshotted: where a loaded drone is headed has to
+    /// be *in* it or a save taken mid-carry cannot restore what it was doing.
+    Stacking(JobId),
     /// Cannot reach its work and has given it back to the board.
     Stuck,
     /// Under the player's direct control; the tick loop leaves it alone.
@@ -141,11 +147,17 @@ pub(crate) struct CachedRoute {
 /// drone's own level would leave whatever sits on it hanging, so the thing
 /// sitting on it goes first.
 ///
-/// This list is the single source of truth for reach. [`Drone::reach`] applies
-/// it forwards to find blocks; [`stations_for`] applies it backwards to find
-/// the cells a given block can be cut *from*. Two separate versions of the same
-/// rule would drift, and the symptom would be a drone standing next to a block
-/// it was sent to dig and refusing to.
+/// This list is the single source of truth for reach **when cutting**.
+/// [`Drone::reach`] applies it forwards to find blocks; [`stations_for`]
+/// applies it backwards to find the cells a given block can be cut *from*. Two
+/// separate versions of the same rule would drift, and the symptom would be a
+/// drone standing next to a block it was sent to dig and refusing to.
+///
+/// Building is the other half and wants the opposite order — see
+/// [`PLACE_OFFSETS`]. The *neighbourhood* is the same, which is why
+/// [`stations_for`] serves both; the *order* is not, and cannot be, because
+/// the reason cutting works top-down is exactly the reason stacking works
+/// bottom-up.
 ///
 /// A `const` rather than a builder: it was a `Vec`-returning function once,
 /// which allocated afresh for every remaining block of every travel tick —
@@ -158,6 +170,32 @@ pub const REACH_OFFSETS: [[i32; 3]; 17] = [
     [-1, 0, -1], [0, 0, -1], [1, 0, -1],
     [-1, 0, 0],              [1, 0, 0],
     [-1, 0, 1],  [0, 0, 1],  [1, 0, 1],
+];
+
+/// Offsets from a drone to the cells it can build into, **lowest first**.
+///
+/// The mirror image of [`REACH_OFFSETS`], and the mirroring is the whole
+/// point. Cutting is ordered highest-first because taking a block at your own
+/// level leaves whatever rests on it hanging; stacking is ordered lowest-first
+/// because putting a block above an empty cell leaves it hanging in the air.
+/// Same neighbourhood, opposite argument, so the two lists are two orderings
+/// of the same seventeen offsets and a test re-derives that from the rule.
+///
+/// Nothing below, for a different reason than cutting has: a drone cannot fill
+/// the cell it is standing on without lifting itself, and `flow::is_standable`
+/// wants the cell under a drone solid and the cell it occupies clear. Filling
+/// underfoot would make it both.
+///
+/// The cell the drone occupies is absent from both lists, which is what stops
+/// a drone walling itself in — `place_at`'s obstruction predicate is the
+/// belt to this braces.
+pub const PLACE_OFFSETS: [[i32; 3]; 17] = [
+    [-1, 0, -1], [0, 0, -1], [1, 0, -1],
+    [-1, 0, 0],              [1, 0, 0],
+    [-1, 0, 1],  [0, 0, 1],  [1, 0, 1],
+    [-1, 1, -1], [0, 1, -1], [1, 1, -1],
+    [-1, 1, 0],  [0, 1, 0],  [1, 1, 0],
+    [-1, 1, 1],  [0, 1, 1],  [1, 1, 1],
 ];
 
 /// Carry capacity of a starting drone. Small enough that the haul back matters,
@@ -450,6 +488,35 @@ mod tests {
             heights.windows(2).all(|pair| pair[0] >= pair[1]),
             "reach is not ordered highest first: a face would be cut from underneath"
         );
+    }
+
+    /// **The two lists are one neighbourhood read two ways.**
+    ///
+    /// Stage 56 added building, and building is not cutting run backwards —
+    /// it is cutting with one argument inverted. Cutting takes the highest
+    /// block first so nothing is left hanging; stacking fills the lowest cell
+    /// first for exactly the same reason, from the other side. If those two
+    /// lists ever stop being permutations of each other, one of them has
+    /// grown a cell the other cannot reach, and a drone will stand next to
+    /// work it refuses to do — the same failure the reach/stations pair is
+    /// tested against.
+    #[test]
+    fn placing_reaches_the_same_cells_as_cutting_in_the_opposite_order() {
+        let mut cut = REACH_OFFSETS;
+        let mut place = PLACE_OFFSETS;
+        cut.sort_unstable();
+        place.sort_unstable();
+        assert_eq!(cut, place, "reach and place are not the same neighbourhood");
+
+        let heights: Vec<i32> = PLACE_OFFSETS.iter().map(|offset| offset[1]).collect();
+        assert!(
+            heights.windows(2).all(|pair| pair[0] <= pair[1]),
+            "placing is not ordered lowest first: a block would be stacked on air"
+        );
+        // And neither list contains the drone's own cell, which is what stops
+        // a machine building itself into a box.
+        assert!(!PLACE_OFFSETS.contains(&[0, 0, 0]));
+        assert!(!REACH_OFFSETS.contains(&[0, 0, 0]));
     }
 
     #[test]

@@ -36,8 +36,8 @@ use std::io::{Read, Write};
 use std::path::Path;
 
 use vx_agent::{
-    BoardSnapshot, DroneId, DroneSnapshot, DroneState, Job, JobId, JobKind, OperationSnapshot,
-    Stockpile, VoxelAabb,
+    BoardSnapshot, DroneId, DroneSnapshot, DroneState, HeapPlan, HeapShape, Job, JobId, JobKind,
+    OperationSnapshot, Stockpile, VoxelAabb,
 };
 use vx_core::BlockPos;
 use vx_world::World;
@@ -51,8 +51,15 @@ const MAGIC: &[u8; 4] = b"VXDG";
 /// A version-1 file still loads: the reader takes the dispatch and defaults
 /// the mark. Refusing an old file would mean this stage — whose whole point is
 /// that nothing is lost — losing somebody's running crew on the way past.
-const VERSION: u32 = 2;
+/// Version 3 adds the spoil heap: the plan the crew is stacking and how far up
+/// it has got. A running heap is the same concern as a running dispatch — work
+/// you left the crew doing — so it goes in the same file rather than a new one.
+///
+/// Both older versions still load, on the same bargain: an absent heap is no
+/// heap, which is exactly true of a save written before the crew could build.
+const VERSION: u32 = 3;
 const VERSION_WITHOUT_THE_MARK: u32 = 1;
+const VERSION_WITHOUT_THE_HEAP: u32 = 2;
 
 /// Caps, so a damaged file cannot ask for an enormous allocation and cannot
 /// assert a crew or a board the game could never have produced.
@@ -108,6 +115,7 @@ fn write_dig(mining: &Mining, file: &mut impl Write) -> std::io::Result<()> {
         file.write_all(&[match job.kind {
             JobKind::Access => 0u8,
             JobKind::Extract => 1,
+            JobKind::Stack => 2,
         }])?;
         write_pos(file, job.region.min)?;
         write_pos(file, job.region.max)?;
@@ -131,7 +139,69 @@ fn write_dig(mining: &Mining, file: &mut impl Write) -> std::io::Result<()> {
         }
         write_option_u64(file, drone.denied_job.map(|job| job.0))?;
     }
+
+    // The heap, last, so a version-2 reader that stops here still gets a
+    // whole dispatch — the same tolerance `VERSION_WITHOUT_THE_MARK` bought.
+    write_heap(file, dig.heap.as_ref(), dig.stacked)?;
     Ok(())
+}
+
+/// The spoil heap the crew is stacking, and how far up it has got.
+///
+/// The cells are **not** written: they are a pure function of the footprint
+/// and the shape, so writing them would be caching what a loader can
+/// recompute — the same argument `micro`'s masks make about the journal. What
+/// has to be written is the shape and the footprint, because they are what the
+/// *player chose*, and the count, because progress is not derivable from
+/// anything else.
+fn write_heap(
+    file: &mut impl Write,
+    heap: Option<&HeapPlan>,
+    stacked: u64,
+) -> std::io::Result<()> {
+    match heap {
+        Some(plan) => {
+            file.write_all(&[1u8])?;
+            file.write_all(&[match plan.shape {
+                HeapShape::Pyramid => 0u8,
+                HeapShape::Spiral => 1,
+                HeapShape::Shaft => 2,
+            }])?;
+            write_pos(file, plan.footprint.min)?;
+            write_pos(file, plan.footprint.max)?;
+            file.write_all(&stacked.to_le_bytes())
+        }
+        None => file.write_all(&[0u8]),
+    }
+}
+
+/// Read a heap back, re-planning its cells from the footprint and shape.
+///
+/// Returns `Ok(None)` for a file written before the crew could build.
+fn read_heap(
+    file: &mut impl Read,
+    world: &World,
+) -> std::io::Result<(Option<HeapPlan>, u64)> {
+    let mut present = [0u8; 1];
+    if file.read_exact(&mut present).is_err() {
+        // A version-3 file that stops here is damaged, but a dispatch read in
+        // full is still worth keeping: no heap rather than no crew.
+        return Ok((None, 0));
+    }
+    if present[0] == 0 {
+        return Ok((None, 0));
+    }
+    let mut shape = [0u8; 1];
+    file.read_exact(&mut shape)?;
+    let shape = match shape[0] {
+        0 => HeapShape::Pyramid,
+        1 => HeapShape::Spiral,
+        2 => HeapShape::Shaft,
+        _ => return Err(std::io::Error::other("unknown heap shape")),
+    };
+    let footprint = VoxelAabb::new(read_pos(file)?, read_pos(file)?);
+    let stacked = read_u64(file)?;
+    Ok((vx_agent::heap::plan(world, footprint, shape), stacked))
 }
 
 /// Read it back and put the crew to work, tolerating absence and damage.
@@ -140,7 +210,7 @@ fn write_dig(mining: &Mining, file: &mut impl Write) -> std::io::Result<()> {
 /// [`Mining::restore_operation`], where the argument for that lives.
 pub fn load(mining: &mut Mining, world: &mut World, directory: &Path) {
     let path = directory.join("dig.dat");
-    match read(&path) {
+    match read(&path, world) {
         Ok(Some(stored)) => {
             // The mark first: `restore_operation` takes the ground, and
             // `Mining::mark` refuses to run once a dispatch exists — which is
@@ -164,7 +234,7 @@ struct StoredDig {
     dig: Option<OperationSnapshot>,
 }
 
-fn read(path: &Path) -> std::io::Result<Option<StoredDig>> {
+fn read(path: &Path, world: &World) -> std::io::Result<Option<StoredDig>> {
     let mut file = match std::fs::File::open(path) {
         Ok(file) => std::io::BufReader::new(file),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -180,7 +250,7 @@ fn read(path: &Path) -> std::io::Result<Option<StoredDig>> {
     // empty one. Refusing it would mean this round, whose whole point is that
     // nothing is lost, losing somebody's running crew on the way past.
     let (corners, chosen) = match version {
-        VERSION => read_mark(&mut file)?,
+        VERSION | VERSION_WITHOUT_THE_HEAP => read_mark(&mut file)?,
         VERSION_WITHOUT_THE_MARK => (Vec::new(), 0),
         _ => return Ok(None),
     };
@@ -212,6 +282,7 @@ fn read(path: &Path) -> std::io::Result<Option<StoredDig>> {
         let kind = match kind[0] {
             0 => JobKind::Access,
             1 => JobKind::Extract,
+            2 => JobKind::Stack,
             _ => return Err(std::io::Error::other("unknown job kind")),
         };
         let region = VoxelAabb::new(read_pos(&mut file)?, read_pos(&mut file)?);
@@ -268,6 +339,14 @@ fn read(path: &Path) -> std::io::Result<Option<StoredDig>> {
         });
     }
 
+    // The heap, if this file is new enough to have one. An older save simply
+    // has no heap, which is exactly true of the build that wrote it.
+    let (heap, stacked) = if version >= VERSION {
+        read_heap(&mut file, world)?
+    } else {
+        (None, 0)
+    };
+
     // A wheel held by a drone that is not there would panic the tick loop the
     // first time it looked. Refused rather than silently cleared, because a
     // file that disagrees with itself is a file to distrust whole.
@@ -284,6 +363,8 @@ fn read(path: &Path) -> std::io::Result<Option<StoredDig>> {
             home,
             drones,
             fields_built,
+            heap,
+            stacked,
             controlled,
         }),
     }))
@@ -346,6 +427,10 @@ fn write_state(file: &mut impl Write, state: DroneState) -> std::io::Result<()> 
         DroneState::Hauling => file.write_all(&[3u8]),
         DroneState::Stuck => file.write_all(&[4u8]),
         DroneState::Manual => file.write_all(&[5u8]),
+        DroneState::Stacking(job) => {
+            file.write_all(&[6u8])?;
+            file.write_all(&job.0.to_le_bytes())
+        }
     }
 }
 
@@ -392,6 +477,7 @@ fn read_state(file: &mut impl Read) -> std::io::Result<DroneState> {
         3 => DroneState::Hauling,
         4 => DroneState::Stuck,
         5 => DroneState::Manual,
+        6 => DroneState::Stacking(JobId(read_u64(file)?)),
         _ => return Err(std::io::Error::other("unknown drone state")),
     })
 }

@@ -269,6 +269,9 @@ pub fn worth_saving_now(command: &crate::journal::Command) -> bool {
         | Command::Stow => true,
         // A crew sent out, and the civic acts that only happen once.
         Command::Dispatch { .. }
+        // A heap is a crew sent out, same as a dispatch — and the thing you
+        // would least like to give the order for twice.
+        | Command::Heap { .. }
         | Command::Found { .. }
         | Command::Take { .. }
         | Command::Stand { .. } => true,

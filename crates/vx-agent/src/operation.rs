@@ -46,11 +46,22 @@ pub struct TickReport {
     pub completed: u32,
     /// Blocks unloaded into the stockpile.
     pub delivered: u64,
+    /// Blocks **added** to the world this tick, stacked into a spoil heap.
+    ///
+    /// New in stage 56, and it has to be here or the stall detector lies: a
+    /// crew that is doing nothing but building would report an idle tick every
+    /// tick and `run` would call a working heap `Stalled` after `PATIENCE`.
+    pub placed: u64,
 }
 
 impl TickReport {
     /// Did anything at all happen? A run of ticks where nothing does means the
     /// operation has stalled rather than finished.
+    ///
+    /// `placed` counts here for the same reason `dug` does, and it had to be
+    /// added when the crew learned to build: a derive on the struct meant a
+    /// heap being stacked one block a tick reported as idle, and `run` would
+    /// have declared a working operation `Stalled`.
     pub fn is_idle(&self) -> bool {
         *self == TickReport::default()
     }
@@ -101,6 +112,18 @@ pub struct Operation {
     /// route cache exists so a travel leg costs one build, and this is the
     /// number a test can watch to keep that true.
     pub fields_built: u64,
+    /// The spoil heap this crew is stacking, if one was ordered.
+    ///
+    /// Held on the operation rather than on the jobs because a `Job` carries a
+    /// region and a heap is a *list of cells in an order* — the ordering is
+    /// the safety property (see [`crate::heap`]), and a bounding box loses it.
+    /// The jobs say which course; the plan says which cells.
+    pub heap: Option<crate::heap::HeapPlan>,
+    /// Blocks stacked into the heap so far.
+    ///
+    /// The fourth honest place a block can be, after the mine-mouth pile and a
+    /// drone's own cargo — see [`Operation::accounted_blocks`].
+    pub stacked: u64,
     /// The drone the player is driving, if any. One machine, one pair
     /// of hands — `Option` rather than a per-drone flag makes "at most one"
     /// unrepresentable-otherwise.
@@ -115,6 +138,8 @@ pub struct OperationSnapshot {
     pub home: BlockPos,
     pub drones: Vec<crate::drone::DroneSnapshot>,
     pub fields_built: u64,
+    pub heap: Option<crate::heap::HeapPlan>,
+    pub stacked: u64,
     /// Which drone the player had the wheel of. Restored, because a session
     /// that saved mid-drive and reloaded with the machine back on autopilot
     /// would quietly countermand an order the player gave.
@@ -129,6 +154,8 @@ impl Operation {
             home,
             drones: Vec::new(),
             fields_built: 0,
+            heap: None,
+            stacked: 0,
             controlled: None,
         }
     }
@@ -145,6 +172,8 @@ impl Operation {
             home: self.home,
             drones: self.drones.iter().map(Drone::snapshot).collect(),
             fields_built: self.fields_built,
+            heap: self.heap.clone(),
+            stacked: self.stacked,
             controlled: self.controlled,
         }
     }
@@ -157,6 +186,8 @@ impl Operation {
             home: snapshot.home,
             drones: snapshot.drones.into_iter().map(Drone::restore).collect(),
             fields_built: snapshot.fields_built,
+            heap: snapshot.heap,
+            stacked: snapshot.stacked,
             controlled: snapshot.controlled,
         }
     }
@@ -188,6 +219,326 @@ impl Operation {
         for (order, region) in plan.extraction.iter().enumerate() {
             self.board.post(JobKind::Extract, *region, layers - order as i32);
         }
+    }
+
+    /// Post a spoil heap: one job per course, lowest course first.
+    ///
+    /// A course per job rather than one job for the whole heap, for the same
+    /// reason `post_plan` posts a job per bench: it is the unit a drone can
+    /// finish, and it is what lets a crew of several share the work without
+    /// treading on each other. Priorities run **below** every cut job
+    /// (`post_plan` starts at 1 and access at 1,000), because the hole comes
+    /// first and the heap is what you do with what came out of it.
+    pub fn post_heap(&mut self, plan: &crate::heap::HeapPlan) {
+        let floor = plan.cells.first().map_or(0, |cell| cell.y);
+        let courses = plan.courses();
+        for step in 0..courses {
+            let y = floor + step;
+            let cells: Vec<BlockPos> =
+                plan.cells.iter().copied().filter(|cell| cell.y == y).collect();
+            let Some(region) = VoxelAabb::containing(cells) else {
+                continue;
+            };
+            // Negative, and falling with height: below every cut job (which
+            // never goes below 1), and the lowest course of the heap before
+            // the one above it — which is the ordering the whole module note
+            // is about. The sign of `step` here is the whole safety argument
+            // on the board's side, and getting it backwards is not a subtle
+            // failure: a drone sent to the apex of a pyramid before anything
+            // is underneath it finds nowhere to stand, gives up, and carries
+            // its load home for ever.
+            self.board.post(JobKind::Stack, region, -1_000 - step);
+        }
+        self.heap = Some(plan.clone());
+    }
+
+    /// Cells of the heap inside `region` that are still air and still wanted.
+    ///
+    /// One function answers both "where is there work" and "is this job
+    /// finished", exactly as the breakable scan does for a cut. Two separate
+    /// answers to that question is how a job wedges open.
+    fn heap_work(&self, world: &World, region: &VoxelAabb) -> Vec<BlockPos> {
+        let Some(heap) = &self.heap else {
+            return Vec::new();
+        };
+        heap.cells
+            .iter()
+            .copied()
+            .filter(|cell| region.contains(*cell))
+            .filter(|cell| !world.is_solid(*cell))
+            .collect()
+    }
+
+    /// How much spoil is sitting on the mine-mouth pile, waiting to be stacked.
+    fn heap_spoil_available(&self) -> u64 {
+        self.stockpile
+            .entries()
+            .filter(|(name, _)| crate::heap::is_spoil(name))
+            .map(|(_, count)| count)
+            .fold(0u64, u64::saturating_add)
+    }
+
+    /// Fill a drone from the pile with spoil, and say how much went aboard.
+    fn load_spoil(&mut self, index: usize) -> u64 {
+        let capacity = self.drones[index].capacity;
+        let mut aboard = 0;
+        let rows: Vec<(String, u64)> = self
+            .stockpile
+            .entries()
+            .filter(|(name, _)| crate::heap::is_spoil(name))
+            .map(|(name, count)| (name.to_string(), count))
+            .collect();
+        for (name, count) in rows {
+            if aboard >= capacity {
+                break;
+            }
+            let want = count.min(capacity - aboard);
+            let took = self.stockpile.take(&name, want);
+            self.drones[index].cargo.add(name, took);
+            aboard += took;
+        }
+        aboard
+    }
+
+    /// Bring spoil back from the yard, so a heap can be built out of it.
+    ///
+    /// **The mirror of the ferry, and the reason a heap is buildable at all
+    /// once the hole is finished.** Spoil goes: face → cargo → mine-mouth pile
+    /// → (flier) → the base pile in town. Order a heap while the crew is still
+    /// cutting and there is rock at the mine mouth to stack; order one the
+    /// day after and every block of it is in town, the crew has nothing to
+    /// build with, and the order stands for ever with nothing happening. Which
+    /// is what the first played run of the `--heap` fixture did: dig long
+    /// enough for the dispatch to *finish*, and the heap came out at zero.
+    ///
+    /// So the yard hands rock back. Only spoil, only when the heap wants
+    /// blocks and the mine mouth is bare, and only a load at a time — which
+    /// bounds the churn against the ferry carrying the same rock the other
+    /// way, and keeps the two of them from playing catch.
+    ///
+    /// `is_spoil` decides what in the yard counts as rock. It is a parameter
+    /// rather than [`crate::heap::is_spoil`] alone because the yard is not the
+    /// mine mouth: the base pile is also where the fleet keeps its **fuel**,
+    /// and a canister is not ore, so the crate's own "anything that is not
+    /// ore" rule would happily send the crew off to stack the tank into a
+    /// pyramid. It did, once — the crew went dry on the next tick and the
+    /// heap came out at zero. What is a good and what is rock is the app's
+    /// question, so the app answers it.
+    ///
+    /// Returns how much came back.
+    pub fn fetch_spoil(
+        &mut self,
+        world: &World,
+        yard: &mut Stockpile,
+        want: u64,
+        is_spoil: impl Fn(&str) -> bool,
+    ) -> u64 {
+        if want == 0 || !self.heap_wants_blocks(world) || self.heap_spoil_available() > 0 {
+            return 0;
+        }
+        // The drones might already be carrying enough between them; no point
+        // dragging more out of town on top of it.
+        if self.drones.iter().map(Drone::carrying).sum::<u64>() > 0 {
+            return 0;
+        }
+        let rows: Vec<(String, u64)> = yard
+            .entries()
+            .filter(|(name, _)| crate::heap::is_spoil(name) && is_spoil(name))
+            .map(|(name, count)| (name.to_string(), count))
+            .collect();
+        let mut back = 0;
+        for (name, count) in rows {
+            if back >= want {
+                break;
+            }
+            let took = yard.take(&name, count.min(want - back));
+            self.stockpile.add(name, took);
+            back += took;
+        }
+        back
+    }
+
+    /// Whether there is a heap with room in it.
+    fn heap_wants_blocks(&self, world: &World) -> bool {
+        self.heap
+            .as_ref()
+            .is_some_and(|heap| !self.heap_work(world, &heap.span()).is_empty())
+    }
+
+    /// Claim a stacking job specifically, ignoring the board's ranking.
+    ///
+    /// `claim_nearest` ranks by priority, and stacking is deliberately the
+    /// lowest priority there is, so a drone would never reach for one while a
+    /// single block of rock remained to cut. That is the right rule for an
+    /// *empty* drone and the wrong one for a full one: a machine that cannot
+    /// carry any more has to put its load down somewhere, and the heap is
+    /// nearer than home.
+    fn claim_stack(&mut self, index: usize) -> Option<Job> {
+        let id = self.drones[index].id;
+        let from = self.drones[index].position;
+        let job = self
+            .board
+            .claim_nearest_of(id, from, JobKind::Stack)?
+            .clone();
+        self.drones[index].job = Some(job.id);
+        Some(job)
+    }
+
+    /// One tick of a drone that is stacking spoil into the heap.
+    ///
+    /// Returns `false` when the drone has nothing left to give, so the caller
+    /// can put it back to work cutting.
+    fn stack_step(
+        &mut self,
+        index: usize,
+        job: &Job,
+        world: &mut World,
+        events: &EventBus,
+        report: &mut TickReport,
+    ) -> bool {
+        // Nothing aboard to stack with. Load from the mine-mouth pile if the
+        // drone is standing at it, and otherwise hand the job back.
+        //
+        // This is the arm that makes a heap finishable. Spoil goes on your
+        // back at the face, but a drone that fills up runs it home long before
+        // a heap is ordered, so by the time the crew has a heap to build most
+        // of the rock is already on the pile. Without this the heap could only
+        // ever catch what happened to be in a cargo bed at the moment the
+        // order was given — which in a played run was nothing at all, and the
+        // crew stood idle beside an empty footprint.
+        //
+        // Only spoil is taken. The ore stays on the pile, which is the whole
+        // bargain the player agreed to: a heap costs you the stone you could
+        // have sold, not the copper.
+        if self.drones[index].carrying() == 0 {
+            let home = flow::settle(world, self.home);
+            let position = self.drones[index].position;
+            let near = (position.x - home.x).abs() <= DROP_OFF_RANGE
+                && (position.y - home.y).abs() <= DROP_OFF_RANGE
+                && (position.z - home.z).abs() <= DROP_OFF_RANGE;
+            if near && self.load_spoil(index) > 0 {
+                self.drones[index].state = DroneState::Stacking(job.id);
+                return true;
+            }
+            // Not at the pile, or the pile has no spoil left: walk home. If
+            // there is nothing to fetch either, the caller idles it.
+            if self.heap_spoil_available() > 0 {
+                self.drones[index].state = DroneState::Hauling;
+                return self.haul(index, world, report);
+            }
+            self.board.release(job.id);
+            self.drones[index].job = None;
+            self.drones[index].state = DroneState::Idle;
+            return false;
+        }
+
+        let wanted = self.heap_work(world, &job.region);
+        if wanted.is_empty() {
+            self.board.complete(job.id);
+            self.drones[index].job = None;
+            self.drones[index].state = DroneState::Idle;
+            report.completed += 1;
+            return true;
+        }
+
+        // Something in reach to fill, without moving. `PLACE_OFFSETS` is
+        // ordered lowest-first, which is the whole reason the drone never
+        // stacks a block onto air.
+        let position = self.drones[index].position;
+        let target = crate::drone::PLACE_OFFSETS
+            .iter()
+            .map(|offset| position.offset(*offset))
+            .find(|cell| {
+                wanted.contains(cell) && !self.drones[index].denied.contains(cell)
+            });
+
+        if let Some(target) = target {
+            // Whatever is aboard — a heap is made of what came out of the
+            // hole, not of a recipe. Name order, so the same cargo always
+            // stacks the same way and a replay agrees.
+            let name = self.drones[index]
+                .cargo
+                .entries()
+                .next()
+                .map(|(name, _)| name.to_string());
+            let Some(name) = name else {
+                return false;
+            };
+            let block = world.registry().id_of(&name);
+            let Some(block) = block else {
+                // A good the registry lost with a mod. Drop it rather than
+                // wedge the job: the region format's rule, applied to cargo.
+                self.drones[index].cargo.take(&name, u64::MAX);
+                return true;
+            };
+            // The drone's own cell is the obstruction: a machine must never
+            // fill the space it is standing in, which is exactly what
+            // `place_at` refuses when asked.
+            let standing = self.drones[index].position;
+            match vx_world::place_at(
+                world,
+                events,
+                target,
+                block,
+                standing,
+                vx_core::Face::PosY,
+                |cell| cell == standing,
+            ) {
+                Ok(_) => {
+                    self.drones[index].cargo.take(&name, 1);
+                    self.drones[index].state = DroneState::Stacking(job.id);
+                    self.stacked += 1;
+                    report.placed += 1;
+                }
+                Err(error) => {
+                    // A veto — the town's permit gate subscribes to the same
+                    // event a player's build goes through, so a heap that
+                    // crosses a claim is refused block by block. Remember it
+                    // and move on, exactly as a denied cut does.
+                    log::debug!("drone refused to stack at {target:?}: {error}");
+                    self.drones[index].denied.insert(target);
+                    self.drones[index].state = DroneState::Stacking(job.id);
+                }
+            }
+            return true;
+        }
+
+        // Nothing in reach: walk to somewhere that is. `travel_to_work` is
+        // already generic over "cells that want working" and routes by
+        // `stations_for`, which is the same neighbourhood whether the drone is
+        // going to take a block away or put one down.
+        let workable: Vec<BlockPos> = wanted
+            .into_iter()
+            .filter(|cell| !self.drones[index].denied.contains(cell))
+            .collect();
+        if workable.is_empty() {
+            self.board.release(job.id);
+            self.drones[index].job = None;
+            return false;
+        }
+        let region = job.region;
+        self.travel_to_work(index, world, &region, &workable, job.id, report);
+
+        // **A heap it cannot reach is not a reason to stop.**
+        //
+        // `travel_to_work` reports "no route" as `Stuck`, which is the right
+        // answer for a cut — the work genuinely cannot be done and the player
+        // should see it. It is the wrong answer here: a full drone that cannot
+        // get to the heap can still run its load home, and a crew that stood
+        // still with full beds because a spoil heap was ordered on the far
+        // side of a hill would be an order that broke the mine. Which is
+        // exactly what the first version of this did, found by the played
+        // test: one drone, `STUCK`, carrying 64, for a thousand ticks.
+        //
+        // So a heap is a *preference*. Hand the job back, say nothing, and let
+        // the caller fall through to hauling home.
+        if self.drones[index].state == DroneState::Stuck {
+            self.board.release(job.id);
+            self.drones[index].job = None;
+            self.drones[index].state = DroneState::Hauling;
+            return false;
+        }
+        true
     }
 
     /// Advance every drone by one tick.
@@ -342,8 +693,27 @@ impl Operation {
             report.moved += 1;
         }
 
-        // A full drone runs its load home — unless it cannot get out, in which
-        // case it keeps cutting.
+        // A full drone with a heap standing puts its load *there* rather than
+        // running it home. That is the whole of stage 56's routing change: the
+        // heap is nearer than the base and the spoil was never worth carrying
+        // home anyway, and it is the reason a heap costs you the stone you
+        // could have sold rather than costing you time.
+        if self.drones[index].is_full() && self.heap_wants_blocks(world) {
+            let job = self
+                .drones[index]
+                .job
+                .and_then(|id| self.board.get(id).cloned())
+                .filter(|job| job.kind == JobKind::Stack)
+                .or_else(|| self.claim_stack(index));
+            if let Some(job) = job {
+                if self.stack_step(index, &job, world, events, report) {
+                    return;
+                }
+            }
+        }
+
+        // Otherwise a full drone runs its load home — unless it cannot get
+        // out, in which case it keeps cutting.
         //
         // That fallback is what makes the whole thing live. A drone working the
         // middle of a layer can fill up before it has cut its way back to the
@@ -366,6 +736,32 @@ impl Operation {
             self.drones[index].state = DroneState::Idle;
             return;
         };
+
+        // **Which verb is this job?**
+        //
+        // Until stage 56 there was only one, so this branch did not exist and
+        // `tick_drone` was kind-blind: an `Access` job and an `Extract` job get
+        // the same treatment, namely "empty the region of breakables". The
+        // moment a job means *fill* rather than *empty*, that stops being
+        // harmless — the first version of this without the branch placed a
+        // block, dropped below full, fell through to the cut path, and dug the
+        // block it had just placed straight back out. Once a tick, for ever.
+        if job.kind == JobKind::Stack {
+            if self.stack_step(index, &job, world, events, report) {
+                return;
+            }
+            // The heap turned the drone down — nothing aboard, or no route to
+            // it. Fall through rather than return: a machine holding a load it
+            // cannot stack still has somewhere to put it, and returning here
+            // was a livelock. It claimed a stacking job, failed to route,
+            // released it, returned, and did the whole thing again next tick,
+            // for ever, carrying a part load it never took home.
+            if self.drones[index].carrying() > 0 && self.haul(index, world, report) {
+                return;
+            }
+            self.drones[index].state = DroneState::Idle;
+            return;
+        }
 
         // Cheap path: something to cut without moving.
         let region = job.region;
@@ -694,8 +1090,17 @@ impl Operation {
     ///
     /// The conservation figure: it must equal the blocks actually removed from
     /// the world, or work is being double-counted or dropped somewhere.
+    /// Every block this operation has taken out of the ground and not lost.
+    ///
+    /// Three places until stage 56 — the mine-mouth pile and the drones' own
+    /// cargo — and now a fourth: stacked into a spoil heap. A heap is not a
+    /// leak, it is somewhere the blocks went, and saying so is what keeps this
+    /// a conservation check rather than a number that quietly stops adding up
+    /// the moment a crew builds anything.
     pub fn accounted_blocks(&self) -> u64 {
-        self.stockpile.total() + self.drones.iter().map(Drone::carrying).sum::<u64>()
+        self.stockpile.total()
+            + self.drones.iter().map(Drone::carrying).sum::<u64>()
+            + self.stacked
     }
 }
 
@@ -754,6 +1159,225 @@ mod tests {
         // And the snapshot of the restored operation is the same snapshot,
         // which is what makes saving twice write the same bytes.
         assert_eq!(back.snapshot(), snapshot);
+    }
+
+    /// **A heap is claimed from the ground up.**
+    ///
+    /// The plan is bottom-up and `PLACE_OFFSETS` is bottom-up, and neither of
+    /// those matters if the *board* hands out the apex first. A heap is posted
+    /// one job per course, and the order those jobs come off the board is the
+    /// last link in the same safety argument: a drone sent seven blocks up to
+    /// a cell with nothing under it finds no station it can stand on, gives
+    /// the job back, and takes its load home — every tick, for ever.
+    ///
+    /// That is exactly what a played session did, and the trace named it:
+    /// `1 workable, 0 goals` for a single cell at the top of an unbuilt
+    /// pyramid. The crate tests did not catch it because they all built
+    /// shafts, which are two courses tall on flat ground and reachable from
+    /// the floor either way round. So: a shape with real height, and the
+    /// courses checked in the order they are actually handed out.
+    #[test]
+    fn a_heap_is_claimed_from_the_ground_up() {
+        let world = flat_world(64);
+        let footprint = VoxelAabb::new(BlockPos::new(2, 0, 2), BlockPos::new(8, 0, 8));
+        let plan = crate::heap::plan(&world, footprint, crate::heap::HeapShape::Pyramid)
+            .expect("a pyramid on flat ground");
+        assert!(
+            plan.courses() > 2,
+            "a heap this short cannot show an ordering"
+        );
+
+        let mut operation = Operation::new(BlockPos::new(0, 65, 0));
+        operation.post_heap(&plan);
+
+        let floor = plan.cells.first().expect("a planned cell").y;
+        let from = BlockPos::new(0, 65, 0);
+        let claimed: Vec<i32> = (0..plan.courses())
+            .map(|n| {
+                operation
+                    .board
+                    .claim_nearest_of(DroneId(n as u32), from, JobKind::Stack)
+                    .expect("a course to claim")
+                    .region
+                    .min
+                    .y
+            })
+            .collect();
+        let expected: Vec<i32> = (0..plan.courses()).map(|step| floor + step).collect();
+        assert_eq!(
+            claimed, expected,
+            "the courses came off the board out of order"
+        );
+    }
+
+    /// **The yard hands the rock back.**
+    ///
+    /// Order a heap the day after the hole is finished and every block of
+    /// spoil is already in town. Without this the order stands for ever with
+    /// nothing happening — which is exactly what the `--heap` fixture did the
+    /// first time it dug long enough to finish the dispatch.
+    #[test]
+    fn spoil_comes_back_out_of_the_yard_for_a_heap() {
+        let world = flat_world(64);
+        let footprint = VoxelAabb::new(BlockPos::new(2, 0, 2), BlockPos::new(6, 0, 6));
+        let plan = crate::heap::plan(&world, footprint, crate::heap::HeapShape::Shaft)
+            .expect("a shaft on flat ground");
+
+        let mut operation = Operation::new(BlockPos::new(0, 65, 0));
+        operation.add_drone(BlockPos::new(0, 65, 0));
+        operation.post_heap(&plan);
+
+        let mut yard = Stockpile::new();
+        yard.add("engine:stone", 200);
+        // The ore stays where it is: a heap costs you the stone you could
+        // have sold, not the copper.
+        yard.add("engine:copper_ore", 40);
+
+        let back = operation.fetch_spoil(&world, &mut yard, 64, |_| true);
+        assert_eq!(back, 64, "the yard kept the spoil");
+        assert_eq!(operation.stockpile.count("engine:stone"), 64);
+        assert_eq!(yard.count("engine:stone"), 136);
+        assert_eq!(yard.count("engine:copper_ore"), 40, "the ore went to the heap");
+
+        // And it does not keep dragging rock out of town on top of what the
+        // crew already has at the mine mouth.
+        assert_eq!(operation.fetch_spoil(&world, &mut yard, 64, |_| true), 0);
+    }
+
+    /// No heap, no fetch: a crew with nothing to build takes nothing back.
+    #[test]
+    fn the_yard_keeps_its_rock_when_no_heap_is_ordered() {
+        let world = flat_world(64);
+        let mut operation = Operation::new(BlockPos::new(0, 65, 0));
+        operation.add_drone(BlockPos::new(0, 65, 0));
+        let mut yard = Stockpile::new();
+        yard.add("engine:stone", 200);
+        assert_eq!(operation.fetch_spoil(&world, &mut yard, 64, |_| true), 0);
+        assert_eq!(yard.count("engine:stone"), 200);
+    }
+
+    /// **The crew can put a block back.**
+    ///
+    /// Fifty-five stages of this crate could only ever take blocks away, and
+    /// the argument that everything terminates rested on it: digging only adds
+    /// routes, so a stuck drone can always dig itself out. This is the first
+    /// test that asks a machine to make the world *bigger*, and it checks the
+    /// three things that matter — the blocks appear, they come out of the
+    /// drone rather than out of nowhere, and the drone is still standing
+    /// somewhere afterwards.
+    #[test]
+    fn a_drone_stacks_what_it_is_carrying_into_the_heap() {
+        let mut world = flat_world(64);
+        let events = EventBus::new();
+        let footprint = VoxelAabb::new(BlockPos::new(2, 0, 2), BlockPos::new(4, 0, 4));
+        let plan = crate::heap::plan(&world, footprint, crate::heap::HeapShape::Shaft)
+            .expect("a shaft on flat ground");
+
+        let mut operation = Operation::new(BlockPos::new(0, 65, 0));
+        operation.add_drone(BlockPos::new(0, 65, 0));
+        operation.post_heap(&plan);
+        // A full load of spoil, the way a drone comes off a face.
+        let capacity = operation.drones[0].capacity;
+        operation.drones[0].cargo.add("engine:stone", capacity);
+        let carried = operation.drones[0].carrying();
+
+        let before = solid_blocks(&world, plan.span());
+        let mut placed = 0;
+        for _ in 0..600 {
+            let report = operation.tick(&mut world, &events);
+            placed += report.placed;
+            if operation.drones[0].carrying() == 0 {
+                break;
+            }
+        }
+
+        assert!(placed > 0, "the crew never put a single block down");
+        let after = solid_blocks(&world, plan.span());
+        assert_eq!(
+            after - before,
+            placed,
+            "the world gained a different number of blocks than the crew placed"
+        );
+        // Cargo bed, heap, or mine-mouth pile: three honest places, and no
+        // fourth. A drone that finishes the heap with rock to spare runs the
+        // rest home rather than standing on it, so the pile is part of the
+        // identity and not an escape from it.
+        assert_eq!(
+            operation.drones[0].carrying() + placed + operation.stockpile.total(),
+            carried,
+            "blocks were conjured or lost between the cargo bed and the ground"
+        );
+        assert_eq!(operation.stacked, placed);
+        assert!(
+            plan.cells
+                .iter()
+                .filter(|cell| world.is_solid(**cell))
+                .count() as u64
+                >= placed,
+            "blocks landed somewhere the plan did not ask for"
+        );
+        // And the machine is still on solid ground rather than sealed in.
+        assert!(
+            flow::is_standable(&world, operation.drones[0].position),
+            "the drone built itself somewhere it cannot stand"
+        );
+    }
+
+    /// A drone never fills the cell it is standing in.
+    ///
+    /// `place_at`'s obstruction predicate is what guarantees it, and this is
+    /// the test that says the predicate is actually wired up — the failure it
+    /// catches is a machine that seals itself into the heap it is building.
+    #[test]
+    fn a_drone_never_stacks_a_block_into_itself() {
+        let mut world = flat_world(64);
+        let events = EventBus::new();
+        // A footprint the drone is standing right in the middle of.
+        let footprint = VoxelAabb::new(BlockPos::new(-2, 0, -2), BlockPos::new(2, 0, 2));
+        let plan = crate::heap::plan(&world, footprint, crate::heap::HeapShape::Shaft)
+            .expect("a shaft on flat ground");
+
+        let mut operation = Operation::new(BlockPos::new(0, 65, 0));
+        operation.add_drone(BlockPos::new(0, 65, 0));
+        operation.post_heap(&plan);
+        operation.drones[0].cargo.add("engine:stone", 200);
+
+        for _ in 0..400 {
+            operation.tick(&mut world, &events);
+            let standing = operation.drones[0].position;
+            assert!(
+                !world.is_solid(standing),
+                "the drone is inside a block it placed at {standing:?}"
+            );
+        }
+    }
+
+    /// Building counts as work. Without `TickReport::placed` a crew doing
+    /// nothing but stacking reports an idle tick every tick, and `run` calls a
+    /// perfectly healthy operation `Stalled`.
+    #[test]
+    fn stacking_is_not_an_idle_tick() {
+        let mut world = flat_world(64);
+        let events = EventBus::new();
+        let footprint = VoxelAabb::new(BlockPos::new(3, 0, 3), BlockPos::new(6, 0, 6));
+        let plan = crate::heap::plan(&world, footprint, crate::heap::HeapShape::Shaft)
+            .expect("a shaft on flat ground");
+
+        let mut operation = Operation::new(BlockPos::new(0, 65, 0));
+        operation.add_drone(BlockPos::new(3, 65, 3));
+        operation.post_heap(&plan);
+        operation.drones[0].cargo.add("engine:stone", 64);
+
+        let mut placing = None;
+        for _ in 0..400 {
+            let report = operation.tick(&mut world, &events);
+            if report.placed > 0 {
+                placing = Some(report);
+                break;
+            }
+        }
+        let report = placing.expect("the crew never placed anything to report on");
+        assert!(!report.is_idle(), "a tick that built something read as idle");
     }
 
     /// The cached route is *not* in it, and must not be: it holds a whole flow

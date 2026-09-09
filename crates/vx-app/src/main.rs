@@ -338,6 +338,9 @@ struct Options {
     /// and the same frame with both switches down.
     drillmod: bool,
     pack: bool,
+    /// The spoil heap: a crew stacking what came out of the hole into a
+    /// pyramid, a spiral tower and a straight shaft.
+    heap: bool,
     /// Durability: save, snapshot, tear, fall back — and the first timings
     /// this game has ever taken of its own save.
     keeping: bool,
@@ -439,6 +442,7 @@ fn parse_args() -> Result<Options, String> {
         haul: false,
         drillmod: false,
         pack: false,
+        heap: false,
         keeping: false,
         terminal: false,
         people: false,
@@ -549,6 +553,7 @@ fn parse_args() -> Result<Options, String> {
             "--haul" => options.haul = true,
             "--drillmod" => options.drillmod = true,
             "--pack" => options.pack = true,
+            "--heap" => options.heap = true,
             "--keeping" => options.keeping = true,
             "--payroll" => options.payroll = true,
             "--terminal" => options.terminal = true,
@@ -998,6 +1003,12 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     // The pack: what you cut on your back, and what would not fit on the floor.
     if options.pack {
         return photograph_the_pack(&context, &mut renderer, &mut camera, options, path);
+    }
+
+    // The spoil heap: three shapes, each stacked by a real crew out of the
+    // spoil of a real dig.
+    if options.heap {
+        return photograph_the_heap(&context, &mut renderer, &mut camera, options, path);
     }
 
     // Durability: a save torn on purpose, and the world coming back from the
@@ -5509,6 +5520,193 @@ fn play_the_loop(
     Ok(())
 }
 
+/// Somewhere flat and open near `base` to stand a heap on.
+///
+/// Walks out from the base in rings and takes the first `side`-by-`side`
+/// patch whose columns are level to within a block and have nothing standing
+/// on them for ten blocks up — no roof, no tree, no wall. Purely a framing
+/// aid for the capture: the game asks the player to mark the ground by eye,
+/// and this is the fixture doing the same by arithmetic.
+fn open_ground(
+    world: &vx_world::World,
+    base: vx_core::BlockPos,
+    side: i32,
+) -> Option<vx_agent::VoxelAabb> {
+    const DIRECTIONS: [(i32, i32); 8] = [
+        (1, 1), (1, 0), (0, 1), (1, -1),
+        (-1, 1), (-1, 0), (0, -1), (-1, -1),
+    ];
+    for radius in (8..=28).step_by(2) {
+        for (dx, dz) in DIRECTIONS {
+            let corner =
+                vx_core::BlockPos::new(base.x + dx * radius, base.y, base.z + dz * radius);
+            let mut floor: Option<i32> = None;
+            let mut fits = true;
+            'patch: for x in corner.x..corner.x + side {
+                for z in corner.z..corner.z + side {
+                    let Some(ground) = world.surface_y(x, z) else {
+                        fits = false;
+                        break 'patch;
+                    };
+                    // Level to within a block, so the heap reads as a heap
+                    // rather than as a landslide.
+                    match floor {
+                        None => floor = Some(ground),
+                        Some(first) if (ground - first).abs() <= 1 => {}
+                        Some(_) => {
+                            fits = false;
+                            break 'patch;
+                        }
+                    }
+                    // And nothing standing over it.
+                    if (1..=10)
+                        .any(|up| world.is_solid(vx_core::BlockPos::new(x, ground + up, z)))
+                    {
+                        fits = false;
+                        break 'patch;
+                    }
+                }
+            }
+            if fits {
+                let floor = floor?;
+                return Some(vx_agent::VoxelAabb::new(
+                    vx_core::BlockPos::new(corner.x, floor, corner.z),
+                    vx_core::BlockPos::new(corner.x + side - 1, floor, corner.z + side - 1),
+                ));
+            }
+        }
+    }
+    None
+}
+
+/// **The spoil heap, stacked by the crew that dug it.**
+///
+/// Three runs, one per shape, each a whole played session: buy a drone, put it
+/// on a real body, let it cut until there is spoil on the pile, then mark a
+/// footprint on open ground beside the workings and order it heaped. Nothing
+/// here places a block on the heap's behalf — every one of them comes off a
+/// drone's cargo bed through `vx_world::place_at`, which is why this fixture
+/// is worth running at all: it is the only place the whole chain is exercised
+/// end to end, from `heap::plan` through the job board to the ground.
+///
+/// Writes one image per shape beside `path`.
+fn photograph_the_heap(
+    context: &GpuContext,
+    renderer: &mut Renderer,
+    camera: &mut Camera,
+    options: &Options,
+    path: &str,
+) -> Result<(), String> {
+    let stem = path.strip_suffix(".ppm").unwrap_or(path);
+    let mut shot = 0;
+
+    for shape in vx_agent::HeapShape::ALL {
+        shot += 1;
+        let mut session = session::Session::open(options.seed);
+        let home = session.home();
+        let chest = vx_world::town::chest_position(&home);
+        let base = vx_core::BlockPos::new(chest.x, chest.y, chest.z);
+        session.place_base(base);
+        // Fuel before anything else: declaring a base is the moment the fleet
+        // starts burning, and a crew on a dry pile never turns a wheel.
+        session.fuel_the_fleet(96);
+        session.wallet.earn(5_000);
+        if !session.buy(garage::DRONE) {
+            return Err("could not afford a drone".to_string());
+        }
+        if !session.buy(garage::DRONE) {
+            return Err("could not afford a second drone".to_string());
+        }
+
+        // A body under the ground beside the house — the spoil this heap is
+        // going to be made of.
+        let face = vx_agent::VoxelAabb::new(
+            vx_core::BlockPos::new(base.x + 4, base.y - 10, base.z + 4),
+            vx_core::BlockPos::new(base.x + 12, base.y - 2, base.z + 12),
+        );
+        session
+            .dispatch_using(face, vx_agent::MineMethod::Decline)
+            .ok_or("the crew never took the plan")?;
+        session.work(8 * 140);
+
+        // Open ground near the workings, found rather than guessed. The first
+        // framing of this fixture put the footprint four blocks off the chest
+        // and photographed a pyramid the size of a doorstep wedged between two
+        // rooftops — a heap wants somewhere flat, clear of the town, and near
+        // enough that the crew will actually walk to it.
+        let footprint = open_ground(&session.world, base, 5)
+            .ok_or("no flat open ground near the workings to heap on")?;
+        let Some(plan) = session.heap_using(footprint, shape) else {
+            println!(
+                "  {}: the ground beside the workings will not carry that shape",
+                shape.name()
+            );
+            continue;
+        };
+        session.work(8 * 1_200);
+        let (stacked, wanted) = session.heap_progress().unwrap_or((0, plan.volume));
+        println!(
+            "  {}: {stacked} of {wanted} stacked over {} courses at {:?}",
+            shape.name(),
+            plan.courses(),
+            footprint.min,
+        );
+
+        // Frame the heap itself: stand off to the south-west and a little
+        // above the top course, aimed at the middle of the pile.
+        let span = plan.span();
+        let middle = glam::DVec3::new(
+            (f64::from(span.min.x) + f64::from(span.max.x) + 1.0) * 0.5,
+            (f64::from(span.min.y) + f64::from(span.max.y) + 1.0) * 0.5,
+            (f64::from(span.min.z) + f64::from(span.max.z) + 1.0) * 0.5,
+        );
+        let reach = f64::from(span.max.x - span.min.x + span.max.z - span.min.z).max(6.0);
+        let back = reach * 0.7 + 5.0;
+        let stand = middle + glam::DVec3::new(-back, reach * 0.5 + 4.0, -back);
+
+        let here = vx_core::BlockPos::new(
+            middle.x.floor() as i32,
+            middle.y.floor() as i32,
+            middle.z.floor() as i32,
+        )
+        .chunk();
+        session.world.load_around(here, 4);
+        let dropped: Vec<vx_core::ChunkPos> = session
+            .world
+            .loaded_chunks()
+            .filter(|pos| (pos.x - here.x).abs() > 5 || (pos.z - here.z).abs() > 5)
+            .collect();
+        for pos in dropped {
+            renderer.remove_chunk(pos);
+        }
+        session.world.unload_beyond(here, 5);
+        remesh_all(context, renderer, &mut session.world);
+
+        camera.position = stand;
+        look_at(camera, middle);
+        renderer.update_camera(&context.queue, camera);
+
+        // The crew, so the picture is of machines at work rather than of a
+        // pile somebody left.
+        let origin = renderer.render_origin().as_dvec3();
+        let objects: Vec<vx_render::Object> = session
+            .mining
+            .objects(|at: glam::DVec3| (at - origin).as_vec3(), None);
+        renderer.set_objects(&context.device, &context.queue, &objects);
+
+        let out = format!(
+            "{stem}-{shot:02}-{}.ppm",
+            shape.name().to_lowercase().replace(' ', "-")
+        );
+        capture_frame(context, renderer, options.width, options.height)
+            .write_ppm(&out)
+            .map_err(|error| format!("could not write {out}: {error}"))?;
+        println!("  shot {shot}: {} -> {out}", shape.name());
+    }
+
+    Ok(())
+}
+
 /// Scout, collect, save, load, haul, sell — the long loop, photographed.
 ///
 /// The round's reason for existing is the save in the middle: the fleet's base
@@ -6420,6 +6618,10 @@ struct Active {
     /// Whether the pack panel is up. Live-only: which panel you had open is
     /// not a fact about the world.
     pack_open: bool,
+    /// Which heap shape the next `B` will order, as an index into whatever the
+    /// marked ground will carry. Live-only: the *order* is journalled, the
+    /// cursor that produced it is not.
+    heap_shape: usize,
     /// Which save this world is on. Read off the manifest at boot and
     /// stepped by every save, so a torn generation can be named.
     generation: u64,
@@ -8573,6 +8775,41 @@ impl App {
             // where you are stood, and which counter within reach would pay
             // more — ranked on what it can actually *pay*, not on the sticker
             // price, since stage 52 gave every town a till that runs dry.
+            // The spoil heap: what the crew is stacking, or what the marked
+            // ground would take if you ordered one.
+            "heap" => {
+                let mut lines = Vec::new();
+                match active.mining.heap_progress() {
+                    Some((stacked, wanted)) => {
+                        let shape = active
+                            .mining
+                            .heap()
+                            .map(|plan| plan.shape.name().to_uppercase())
+                            .unwrap_or_default();
+                        lines.push(format!("STACKING A {shape}: {stacked} OF {wanted}"));
+                    }
+                    None => match active.mining.area() {
+                        Some(area) => {
+                            lines.push("NOTHING BEING STACKED. THIS GROUND WILL TAKE:".into());
+                            let offered = vx_agent::heap::options(&active.world, area);
+                            if offered.is_empty() {
+                                lines.push("NOTHING. THE FOOTPRINT IS TOO SMALL.".into());
+                            }
+                            for plan in offered {
+                                lines.push(format!(
+                                    "{} - {} BLOCKS, {} COURSES",
+                                    plan.shape.name().to_uppercase(),
+                                    plan.volume,
+                                    plan.courses()
+                                ));
+                            }
+                            lines.push("PRESS B TO ORDER ONE.".into());
+                        }
+                        None => lines.push("MARK TWO CORNERS FIRST. M PICKS ONE.".into()),
+                    },
+                }
+                lines
+            }
             // What you are carrying. A readout, not an order: the tipping is
             // done at a container, where the goods actually go.
             "pack" => {
@@ -12003,6 +12240,9 @@ impl App {
                     active.greeting = Some((line.to_string(), Instant::now()));
                 }
             }
+            // Stack the marked footprint into a spoil heap. Repeated presses
+            // cycle the shape, so one key is both "which" and "go".
+            KeyCode::KeyB => self.start_heaping(),
             // What you are carrying. `I` for inventory, which is what every
             // player who has ever held a pack will reach for first.
             KeyCode::KeyI => {
@@ -12193,6 +12433,78 @@ impl App {
                 log::info!("digging: {} with a crew of {crew}", method.name());
             }
             None => log::info!("nothing marked to dig"),
+        }
+    }
+
+    /// Put the crew on a spoil heap over the marked footprint.
+    ///
+    /// `App::start_mining`'s twin, gesture for gesture: the same marked area,
+    /// the same crew from the shed, the same permit refusal — you should no
+    /// more be able to pile rubble through somebody's kitchen than to dig
+    /// through it. The shape cycles on repeated presses over the same mark, so
+    /// `B` is both "which shape" and "go".
+    fn start_heaping(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        if active.mining.is_running() {
+            active.greeting = Some((
+                "THE CREW IS ALREADY OUT".into(),
+                Instant::now(),
+            ));
+            return;
+        }
+        let Some(area) = active.mining.area() else {
+            active.greeting = Some((
+                "MARK TWO CORNERS FIRST. M PICKS ONE.".into(),
+                Instant::now(),
+            ));
+            return;
+        };
+        let crew = active.garage.owned(garage::DRONE);
+        if crew == 0 {
+            active.greeting = Some((
+                "NO DRONES. BUY ONE AT THE SHOP COUNTER".into(),
+                Instant::now(),
+            ));
+            return;
+        }
+        if let Some(claim) = active.permits.borrow().blocked_span(area.min, area.max) {
+            active.greeting = Some((format!("THAT HEAP CROSSES {}", claim.label), Instant::now()));
+            return;
+        }
+
+        // Which shape: the next one this ground will carry, cycling on repeat
+        // presses. A footprint too narrow for a spiral simply is not offered
+        // one — see `heap::plan`, which refuses rather than substituting.
+        let offered = vx_agent::heap::options(&active.world, area);
+        if offered.is_empty() {
+            active.greeting = Some((
+                "NOTHING WILL STAND ON THAT FOOTPRINT".into(),
+                Instant::now(),
+            ));
+            return;
+        }
+        let shape = offered[active.heap_shape % offered.len()].shape;
+        active.heap_shape = active.heap_shape.wrapping_add(1);
+
+        match active.mining.start_heap(&mut active.world, area, shape, crew) {
+            Some(plan) => {
+                record_order(active, Command::Heap { area, shape, crew });
+                active.greeting = Some((
+                    format!(
+                        "STACKING A {} - {} BLOCKS OF SPOIL",
+                        shape.name().to_uppercase(),
+                        plan.volume
+                    ),
+                    Instant::now(),
+                ));
+                log::info!("heaping: {} with a crew of {crew}", shape.name());
+            }
+            None => {
+                active.greeting = Some((
+                    format!("A {} WILL NOT STAND THERE", shape.name().to_uppercase()),
+                    Instant::now(),
+                ));
+            }
         }
     }
 
@@ -14795,6 +15107,7 @@ impl ApplicationHandler for App {
             pack,
             drops,
             pack_open: false,
+            heap_shape: 0,
             generation: opening_generation,
             snapshotted: Instant::now(),
             saved_at: Instant::now(),

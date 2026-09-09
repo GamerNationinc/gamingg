@@ -39,7 +39,7 @@
 use std::io::{Read, Write};
 use std::path::Path;
 
-use vx_agent::{MineMethod, VoxelAabb};
+use vx_agent::{HeapShape, MineMethod, VoxelAabb};
 use vx_core::{BlockPos, EventBus};
 use vx_world::{PlayerBody, World};
 
@@ -197,7 +197,7 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // demonstrated at two different hashes over the same orders before it was
 // fixed. `Wheel` and `Pilot` close it, and a log recorded under 30 replays a
 // session in which nobody ever took the controls.
-const VERSION: u32 = 32;
+const VERSION: u32 = 33;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -431,6 +431,25 @@ pub enum Command {
     /// *replay* concludes and grants the live game nothing — nothing ever
     /// reads `Rebuilt` back into a session.
     Carry { capacity: u32 },
+    /// A spoil heap ordered: the marked footprint, the shape, and the crew.
+    ///
+    /// The first order in this game that makes the world **bigger**. Every
+    /// command before it either removed ground or moved goods about; a heap
+    /// puts blocks back, which is why it needs to be on the wire at all —
+    /// stacked blocks are ground, and ground is the hash.
+    ///
+    /// The crew rides along for exactly the reason [`Command::Dispatch`]'s
+    /// does: how many machines you own varies over a session, and a replay
+    /// that guessed would build a different heap from the one that happened.
+    ///
+    /// Nothing else is recorded. Which cell each drone fills, in what order,
+    /// is a pure function of the plan and the ticks that `Advance` already
+    /// carries — the same bargain every dispatch has made since stage 9.
+    Heap {
+        area: VoxelAabb,
+        shape: HeapShape,
+        crew: u32,
+    },
 }
 
 /// A machine tag on the wire: a kind byte and an index, fixed width so every
@@ -974,6 +993,20 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                 // whatever now occupies its number — the same rule the region
                 // format follows.
                 log::warn!("replay skipped an unknown block {block} at {at:?}");
+            }
+        }
+        // A heap is the mirror of a dispatch, and its replay arm is nearly the
+        // mirror too — with one deliberate difference. `Dispatch` below spins
+        // `cycle_method` looking for the method it recorded and **falls
+        // through to whatever happens to be selected** if the ground no longer
+        // offers it; a shape the player chose is *installed*, not searched
+        // for, so a tweak to what ground will carry what cannot silently build
+        // somebody a different tower.
+        Command::Heap { area, shape, crew } => {
+            // The footprint goes straight in: `mark` refuses while a dispatch
+            // is running, and a heap ordered mid-dig is the ordinary case.
+            if mining.start_heap(world, *area, *shape, *crew).is_none() {
+                log::warn!("replay could not raise a {} at {area:?}", shape.name());
             }
         }
         Command::Dispatch { area, method, crew } => {
@@ -1566,6 +1599,17 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
             file.write_all(&[31u8])?;
             file.write_all(&capacity.to_le_bytes())?;
         }
+        Command::Heap { area, shape, crew } => {
+            file.write_all(&[32u8])?;
+            write_pos(file, area.min)?;
+            write_pos(file, area.max)?;
+            file.write_all(&[match shape {
+                HeapShape::Pyramid => 0u8,
+                HeapShape::Spiral => 1,
+                HeapShape::Shaft => 2,
+            }])?;
+            file.write_all(&crew.to_le_bytes())?;
+        }
         Command::Gift { town, person, good } => {
             file.write_all(&[20u8])?;
             file.write_all(&town.0.to_le_bytes())?;
@@ -1886,6 +1930,24 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
         31 => Command::Carry {
             capacity: read_u32(file)?,
         },
+        32 => {
+            let area = VoxelAabb::new(read_pos(file)?, read_pos(file)?);
+            let mut shape = [0u8; 1];
+            file.read_exact(&mut shape)?;
+            let shape = match shape[0] {
+                0 => HeapShape::Pyramid,
+                1 => HeapShape::Spiral,
+                2 => HeapShape::Shaft,
+                other => {
+                    return Err(std::io::Error::other(format!("unknown heap shape {other}")))
+                }
+            };
+            Command::Heap {
+                area,
+                shape,
+                crew: read_u32(file)?,
+            }
+        }
         21 => {
             let mut kind = [0u8; 1];
             file.read_exact(&mut kind)?;

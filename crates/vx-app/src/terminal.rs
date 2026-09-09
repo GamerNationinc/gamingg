@@ -113,6 +113,7 @@ const VERBS: &[Verb] = &[
     Verb { name: "gift", help: "GIFT GOOD, HAND THE NEAREST PERSON ONE" },
     Verb { name: "scout", help: "ORBIT, DOCK, PERCH, VANGUARD, SORTIE X Z" },
     Verb { name: "dig", help: "SEND THE CREW AT THE MARKED PLAN" },
+    Verb { name: "heap", help: "STACK THE SPOIL: PYRAMID, SPIRAL OR SHAFT" },
     Verb { name: "cancel", help: "DROP THE MARKED PLAN" },
     Verb { name: "survey", help: "SWEEP THE SECTOR YOU STAND IN" },
     Verb { name: "lights", help: "TURN THE OPTICS DIAL" },
@@ -175,6 +176,7 @@ pub fn parse(line: &str) -> Parsed {
         // click should not be locked out of a feature that is free.
         "drill" | "holo" | "sonar" | "ping" => Parsed::Ask("drill".into(), rest),
         "pack" | "carrying" | "inventory" => Parsed::Ask("pack".into(), rest),
+        "heap" | "spoil" | "stack" => Parsed::Ask("heap".into(), rest),
         "weather" | "sky" | "forecast" => Parsed::Ask("weather".into(), rest),
         "town" | "hall" | "council" => Parsed::Ask("town".into(), rest),
         "found" | "charter" => Parsed::Ask("found".into(), rest),

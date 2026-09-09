@@ -113,6 +113,10 @@ pub struct Mining {
     /// Nose directions, remembered so parked machines do not twitch.
     /// Chunks held resident for the running operation, released when it ends.
     pinned: Vec<vx_core::ChunkPos>,
+    /// The span those chunks cover, so a second thing needing resident ground
+    /// — a heap beside the dig it feeds off — can widen it rather than swap
+    /// it and quietly unpin the dispatch's own workings.
+    pinned_span: Option<vx_agent::VoxelAabb>,
     /// Ticks the last `update` turned its elapsed time into. What the command
     /// journal records, because wall time is not reproducible and this is.
     last_ticks: u32,
@@ -190,6 +194,7 @@ impl Default for Mining {
             wells: crate::well::Wells::default(),
             well_report: crate::well::WellReport::default(),
             pinned: Vec::new(),
+            pinned_span: None,
             last_ticks: 0,
             pending: 0.0,
             fleet: Fleet::default(),
@@ -332,6 +337,93 @@ impl Mining {
         operation.post_plan(&plan);
         self.operation = Some(operation);
         Some(plan.method)
+    }
+
+    /// Put the crew on a spoil heap over the marked footprint.
+    ///
+    /// [`Mining::start`]'s twin, and deliberately the same shape: the same
+    /// marked area, the same crew count, the same ground-pinning, the same
+    /// "nothing marked" refusal. The player learns one gesture and it does two
+    /// things — mark, choose, send — which is the whole reason the heap reuses
+    /// the dispatch's flow rather than inventing a second one.
+    /// The footprint is passed in rather than read off `self.area`, and that
+    /// is not a style choice: [`Mining::mark`] **refuses while a dispatch is
+    /// running**, so a heap ordered mid-dig — which is the whole point of a
+    /// spoil heap — would silently plan itself over the dig's own area. The
+    /// first version did exactly that and built a pyramid inside the hole.
+    pub fn start_heap(
+        &mut self,
+        world: &mut World,
+        area: vx_agent::VoxelAabb,
+        shape: vx_agent::HeapShape,
+        crew: u32,
+    ) -> Option<vx_agent::HeapPlan> {
+        if crew == 0 {
+            return None;
+        }
+        let plan = vx_agent::heap::plan(world, area, shape)?;
+
+        // **Posted onto the running dispatch, not instead of it.**
+        //
+        // The first version of this built a fresh `Operation` the way `start`
+        // does, and it quietly cancelled the dig: `Mining::operation` is one
+        // `Option`, so a heap ordered mid-dig replaced the crew's work with an
+        // empty board and they stood in a hole they were no longer cutting
+        // with nothing to stack. Which is the tell that these are not two
+        // operations at all — a spoil heap *is* part of the dig. The crew cut
+        // the rock, and this says where to put it.
+        //
+        // With no dig running the heap still stands as an order, and the crew
+        // will build it the moment they have something to build with. That is
+        // honest rather than useful, and the status line says so.
+        let start = match &self.operation {
+            Some(operation) => operation.home,
+            None => vx_agent::settle(world, plan.footprint.min),
+        };
+        let span = vx_agent::working_span(plan.span(), start);
+
+        match &mut self.operation {
+            Some(operation) => operation.post_heap(&plan),
+            None => {
+                let mut operation = Operation::new(start);
+                for _ in 0..crew {
+                    operation.add_drone(start);
+                }
+                operation.post_heap(&plan);
+                self.operation = Some(operation);
+            }
+        }
+        // The heap's own ground has to be resident too, or a drone stacking
+        // near the edge of the loaded set reads air where its own courses are.
+        self.also_pin(world, span);
+        Some(plan)
+    }
+
+    /// Widen the pinned span to cover `extra` as well as whatever is held.
+    ///
+    /// A dispatch pins the ground it digs; a heap adds the ground it stands
+    /// on, which may be well outside it. Re-pinning the union rather than
+    /// swapping keeps the dig's own ground held.
+    fn also_pin(&mut self, world: &mut World, extra: vx_agent::VoxelAabb) {
+        let span = match self.pinned_span {
+            Some(held) => held.union(extra),
+            None => extra,
+        };
+        self.release_ground(world);
+        self.pinned = world.pin_span(span.min, span.max);
+        self.pinned_span = Some(span);
+    }
+
+    /// The heap the crew is stacking, if one was ordered.
+    pub fn heap(&self) -> Option<&vx_agent::HeapPlan> {
+        self.operation.as_ref().and_then(|op| op.heap.as_ref())
+    }
+
+    /// How far up the heap has got, as blocks stacked against blocks wanted.
+    pub fn heap_progress(&self) -> Option<(u64, u64)> {
+        let operation = self.operation.as_ref()?;
+        let heap = operation.heap.as_ref()?;
+        Some((operation.stacked, heap.volume))
     }
 
     /// The running dispatch, as plain data a save file can hold. `None` when
@@ -541,6 +633,24 @@ impl Mining {
             }
             worked += 1;
             self.pilot_sub_tick(world, events);
+            // The yard hands spoil back when a heap wants it and the mine
+            // mouth is bare — the ferry's mirror image, and the only reason a
+            // heap ordered after the hole is finished ever gets built. Both
+            // stores are the crew's own, so this moves nothing into or out of
+            // the world; see `Operation::fetch_spoil`.
+            if let (Some(operation), Some(base)) =
+                (self.operation.as_mut(), self.fleet.base.as_mut())
+            {
+                operation.fetch_spoil(
+                    world,
+                    &mut base.stockpile,
+                    vx_agent::DEFAULT_CAPACITY,
+                    // The tank is not spoil. `heap::is_spoil` means "not ore",
+                    // which is the right rule at the mine mouth and the wrong
+                    // one in the yard, where the fleet's own fuel is stored.
+                    |name| name != crate::fuel::CELL && name != crate::fuel::GAS,
+                );
+            }
             let operation = self.operation.as_mut().expect("checked above");
             operation.tick(world, events);
         }
@@ -816,6 +926,7 @@ impl Mining {
                         DroneState::Hauling => "HAULING".into(),
                         DroneState::Stuck => "STUCK".into(),
                         DroneState::Manual => "PILOTED".into(),
+                        DroneState::Stacking(_) => "STACKING".into(),
                     },
                     distance: self
                         .machine_eye(machine)

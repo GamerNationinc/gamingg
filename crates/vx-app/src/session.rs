@@ -1069,9 +1069,40 @@ impl Session {
     /// container — the thing the game now tells you to do before mining — is
     /// also the thing that grounds your flier, unless there is fuel on the
     /// pile for it.
+    /// Put at least `cells` canisters of fuel on the fleet's pile.
+    ///
+    /// **Through the bath, not around it.** This used to add canisters to the
+    /// pile directly, which is a cheat a fixture can afford right up until the
+    /// moment somebody asks the journal to reproduce the session: the crew
+    /// burns fuel every tick it works, a replay with a dry tank runs no crew
+    /// at all, and the ground comes back untouched. Stage 56's oracle asked
+    /// that question for the first time and got a hole-free hill back.
+    ///
+    /// So the fixture banks its fuel the way the game does — a run of the
+    /// electrolyser, which has been an order since stage 20 — and both sides
+    /// do the same arithmetic over the same pile.
     pub fn fuel_the_fleet(&mut self, cells: u64) {
-        if let Some(base) = self.mining.fleet.base.as_mut() {
-            base.stockpile.add(crate::fuel::CELL.to_string(), cells);
+        let mut banked = 0;
+        while banked < cells {
+            let remaining = cells - banked;
+            // The largest run that fits, and the smallest there is when none
+            // does: a fixture would rather overshoot than run the crew dry.
+            let index = crate::electrolysis::RUNS
+                .iter()
+                .enumerate()
+                .filter(|(_, run)| u64::from(run.cells) <= remaining)
+                .max_by_key(|(_, run)| run.cells)
+                .map_or(0, |(index, _)| index);
+            let Some(run) = crate::electrolysis::run(index) else {
+                return;
+            };
+            if let Some(base) = self.mining.fleet.base.as_mut() {
+                base.stockpile.take("engine:copper_bar", run.bars);
+                base.stockpile
+                    .add(crate::fuel::CELL.to_string(), u64::from(run.cells));
+            }
+            self.journal.record(Command::Electrolyse { run: index as u32 });
+            banked += u64::from(run.cells);
         }
     }
 
@@ -1116,6 +1147,27 @@ impl Session {
     /// decline move different amounts of rock, so comparing one crew on a
     /// decline with two on an adit says nothing about the crew. Cycling to a
     /// chosen method is exactly what the player's own key does.
+    /// Put the crew on a spoil heap over `area`, and journal the order.
+    ///
+    /// `dispatch_using`'s twin. The shape is *installed* rather than searched
+    /// for — see the note on `Command::Heap`'s replay arm — so a session and
+    /// its replay build the same tower even if the ground's offer list moves.
+    pub fn heap_using(
+        &mut self,
+        area: vx_agent::VoxelAabb,
+        shape: vx_agent::HeapShape,
+    ) -> Option<vx_agent::HeapPlan> {
+        let crew = self.crew();
+        let plan = self.mining.start_heap(&mut self.world, area, shape, crew)?;
+        self.journal.record(Command::Heap { area, shape, crew });
+        Some(plan)
+    }
+
+    /// How far up the heap has got, if the crew is stacking one.
+    pub fn heap_progress(&self) -> Option<(u64, u64)> {
+        self.mining.heap_progress()
+    }
+
     pub fn dispatch_using(
         &mut self,
         area: vx_agent::VoxelAabb,
@@ -1132,7 +1184,18 @@ impl Session {
             }
             self.mining.cycle_method();
         }
-        self.mining.start(&mut self.world, crew)
+        // **And write it down.** `App::start_mining` has recorded a
+        // `Command::Dispatch` since stage 9; this model of a played session
+        // never did, so every oracle test that ran a crew was replaying a
+        // journal with no crew in it — the replay dug nothing, and the only
+        // reason no test caught that is that no test had ever asked a *crew*
+        // to change the ground and then checked the log. Stage 56's heap is
+        // the first order that does, and this is what it found.
+        let method = self.mining.start(&mut self.world, crew)?;
+        if let Some(area) = self.mining.area() {
+            self.journal.record(Command::Dispatch { area, method, crew });
+        }
+        Some(method)
     }
 
     /// Let the crew work for a while, and say how much landed on the pile.
@@ -1563,6 +1626,148 @@ mod tests {
             replayed, pile,
             "the replay tipped a different pile ({tipped} moved live)"
         );
+    }
+
+    /// **The oracle, for a crew that makes the world bigger.**
+    ///
+    /// Every replay test before this one had an easier job than it looked:
+    /// the crew could only ever *remove* blocks, so "the same ground" meant
+    /// "the same holes". Stage 56 is the first time an order puts blocks back,
+    /// and a heap is far less forgiving than a hole — a hole that is dug in a
+    /// different order is the same hole, while a tower stacked in a different
+    /// order can be a different tower, or can strand the machine building it.
+    ///
+    /// So: dig a real body with a real crew, order a real heap out of the
+    /// spoil, run it, and demand the same world hash from the log.
+    ///
+    /// **Three separate bugs stood between this test and green**, and none of
+    /// them were in the shapes:
+    ///
+    /// 1. The board handed out the *apex* first. Courses were posted at
+    ///    `-1_000 - (courses - step)`, which rises with height, so the highest
+    ///    course outranked the floor and a drone was sent seven blocks up to a
+    ///    cell with nothing under it. See
+    ///    `vx_agent::operation::tests::a_heap_is_claimed_from_the_ground_up`.
+    /// 2. [`Session::dispatch_using`] never wrote `Command::Dispatch` down.
+    ///    `App::start_mining` has recorded it since stage 9; this model of a
+    ///    played session did not, so a replayed crew was never dispatched.
+    /// 3. [`Session::fuel_the_fleet`] conjured canisters straight onto the
+    ///    pile. The crew burns fuel every tick it works, so the replay's crew
+    ///    stood on a dry tank and cut nothing.
+    ///
+    /// Two of those three were invisible until an order asked a *crew* to
+    /// change the ground and then checked the log — which is the first time
+    /// this stage did it.
+    #[test]
+    fn a_crew_that_stacks_a_heap_replays_to_the_same_ground() {
+        let mut session = dug_in();
+        // Somewhere clear beside the workings, on ground the crew can reach.
+        let base = session
+            .mining
+            .fleet
+            .base
+            .as_ref()
+            .map(|base| base.position)
+            .expect("no base");
+        // Right beside the workings, which is what a spoil heap is and where
+        // the player asked for one. Sited across the town from the dig it
+        // feeds, the crew would have to cross the town's own ditch to reach
+        // it — a real interaction, and not the one under test here.
+        let footprint = vx_agent::VoxelAabb::new(
+            BlockPos::new(base.x + 4, base.y, base.z + 4),
+            BlockPos::new(base.x + 8, base.y, base.z + 8),
+        );
+
+        // Cut first, so the drones are carrying spoil worth stacking.
+        session.work(8 * 30);
+        let plan = session
+            .heap_using(footprint, vx_agent::HeapShape::Pyramid)
+            .expect("a pyramid beside the base");
+        session.work(8 * 120);
+
+        let stacked = session.heap_progress().map_or(0, |(done, _)| done);
+        eprintln!(
+            "ordered a {} of {} blocks; the crew stacked {stacked}",
+            plan.shape.name(),
+            plan.volume
+        );
+        assert!(stacked > 0, "the crew never stacked a single block");
+
+        let ground = vx_world::world_hash(&session.world);
+        let start = session.player.position;
+
+        let mut fresh = vx_world::World::new(session.world.seed());
+        fresh.load_around(
+            BlockPos::new(
+                start.x.floor() as i32,
+                start.y.floor() as i32,
+                start.z.floor() as i32,
+            )
+            .chunk(),
+            KEEP_LOADED,
+        );
+        let events = vx_core::EventBus::new();
+        let rebuilt = crate::journal::replay_from(&session.journal, &mut fresh, &events, start);
+
+        assert_eq!(
+            vx_world::world_hash(&fresh),
+            ground,
+            "the replay built a different heap"
+        );
+        assert_eq!(
+            rebuilt.mining.heap_progress().map(|(done, _)| done),
+            Some(stacked),
+            "the replay stacked a different number of blocks"
+        );
+    }
+
+    /// Nothing is conjured: what the crew stacked came out of the ground it
+    /// dug, not out of nowhere. The fourth term in the conservation identity
+    /// this game has kept since stage 52.
+    #[test]
+    fn a_heap_is_built_out_of_what_was_dug() {
+        let mut session = dug_in();
+        let base = session
+            .mining
+            .fleet
+            .base
+            .as_ref()
+            .map(|base| base.position)
+            .expect("no base");
+        let footprint = vx_agent::VoxelAabb::new(
+            BlockPos::new(base.x + 4, base.y, base.z + 4),
+            BlockPos::new(base.x + 8, base.y, base.z + 8),
+        );
+        session.work(8 * 30);
+        session
+            .heap_using(footprint, vx_agent::HeapShape::Pyramid)
+            .expect("a pyramid beside the base");
+        session.work(8 * 120);
+
+        let (stacked, _) = session.heap_progress().expect("no heap running");
+        // Vacuous while `stacked` is zero, and that is the point of saying so:
+        // this asserts the *conservation*, which holds whether or not the
+        // crew managed to reach the footprint. The building itself is proved
+        // in `operation::tests`, and the played route is the ignored test
+        // above.
+        let plan = session.mining.heap().expect("no plan").clone();
+        let standing = plan
+            .cells
+            .iter()
+            .filter(|cell| session.world.is_solid(**cell))
+            .count() as u64;
+        assert!(
+            standing >= stacked,
+            "the crew claims {stacked} stacked but only {standing} cells are solid"
+        );
+        // And every drone is still somewhere it can stand — nobody built
+        // themselves into their own tower.
+        for drone in session.mining.drone_positions() {
+            assert!(
+                !session.world.is_solid(drone),
+                "a drone is inside a block at {drone:?}"
+            );
+        }
     }
 
     /// The other half: with the ping on, a played session really does come

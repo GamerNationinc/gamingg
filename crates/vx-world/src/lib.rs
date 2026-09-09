@@ -31,7 +31,7 @@ pub mod world;
 
 pub use chunk::{BlockView, Chunk, SoloChunkView};
 pub use world::Carved;
-pub use edit::{break_block, place_block, BlockBreakEvent, BlockPlaceEvent, EditError};
+pub use edit::{break_block, place_at, place_block, BlockBreakEvent, BlockPlaceEvent, EditError};
 pub use gen::{TerrainBlocks, TerrainGenerator, SEA_LEVEL};
 pub use hash::{chunk_hash, region_hash, world_hash};
 pub use noise::Fbm;
