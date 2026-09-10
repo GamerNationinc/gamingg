@@ -36,6 +36,8 @@
 //! | Fliers, scanner reach, and every sector surveyed | `fleet.dat` |
 //! | The fleet's fuel | `fuel.dat` |
 //! | Machine wear | `wear.dat` |
+//! | What accidents have cost the machines | `integrity.dat` |
+//! | The machines you lost, and where they lie | `wrecks.dat` |
 //! | Wells sunk | `wells.dat` |
 //! | The house chest and mailbox | `homestead.dat` |
 //! | Claims and what the town caught you at | `permits.dat` |
@@ -123,6 +125,7 @@ mod hologram;
 mod homestead;
 mod hostile;
 mod hud;
+mod integrity;
 mod intro;
 mod intrusion;
 mod journal;
@@ -166,6 +169,7 @@ mod wear;
 mod well;
 mod wallet;
 mod warrant;
+mod wrecks;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -341,6 +345,9 @@ struct Options {
     /// The spoil heap: a crew stacking what came out of the hole into a
     /// pyramid, a spiral tower and a straight shaft.
     heap: bool,
+    /// The drone you can lose: a machine flown into a hillside, the hulk it
+    /// leaves, and the walk out to strip it.
+    wreck: bool,
     /// Durability: save, snapshot, tear, fall back — and the first timings
     /// this game has ever taken of its own save.
     keeping: bool,
@@ -443,6 +450,7 @@ fn parse_args() -> Result<Options, String> {
         drillmod: false,
         pack: false,
         heap: false,
+        wreck: false,
         keeping: false,
         terminal: false,
         people: false,
@@ -554,6 +562,7 @@ fn parse_args() -> Result<Options, String> {
             "--drillmod" => options.drillmod = true,
             "--pack" => options.pack = true,
             "--heap" => options.heap = true,
+            "--wreck" => options.wreck = true,
             "--keeping" => options.keeping = true,
             "--payroll" => options.payroll = true,
             "--terminal" => options.terminal = true,
@@ -1009,6 +1018,12 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     // spoil of a real dig.
     if options.heap {
         return photograph_the_heap(&context, &mut renderer, &mut camera, options, path);
+    }
+
+    // The drone you can lose: a machine flown into a hillside, the hulk it
+    // leaves behind, and the walk out to strip it.
+    if options.wreck {
+        return photograph_the_wreck(&context, &mut renderer, &mut camera, options, path);
     }
 
     // Durability: a save torn on purpose, and the world coming back from the
@@ -5520,6 +5535,258 @@ fn play_the_loop(
     Ok(())
 }
 
+/// **The drone you can lose.**
+///
+/// One played session in three beats: a machine at cruise with the wheel in
+/// the player's hands, the hillside it goes into, and the hulk lying in the
+/// grass afterwards with the player stood over it. Nothing here breaks a
+/// machine on the fixture's behalf — the flier is *flown* into the ground
+/// through `Command::Pilot`, and what is left is whatever
+/// `integrity::impact` charged for the dive.
+fn photograph_the_wreck(
+    context: &GpuContext,
+    renderer: &mut Renderer,
+    camera: &mut Camera,
+    options: &Options,
+    path: &str,
+) -> Result<(), String> {
+    let stem = path.strip_suffix(".ppm").unwrap_or(path);
+    let mut shot = 0;
+
+    let mut photograph = |context: &GpuContext,
+                          renderer: &mut Renderer,
+                          camera: &mut Camera,
+                          session: &mut session::Session,
+                          beat: &str,
+                          subject: glam::DVec3,
+                          stand: glam::DVec3|
+     -> Result<(), String> {
+        shot += 1;
+        let here = vx_core::BlockPos::new(
+            subject.x.floor() as i32,
+            subject.y.floor() as i32,
+            subject.z.floor() as i32,
+        )
+        .chunk();
+        session.world.load_around(here, 4);
+        let dropped: Vec<vx_core::ChunkPos> = session
+            .world
+            .loaded_chunks()
+            .filter(|pos| (pos.x - here.x).abs() > 5 || (pos.z - here.z).abs() > 5)
+            .collect();
+        for pos in dropped {
+            renderer.remove_chunk(pos);
+        }
+        session.world.unload_beyond(here, 5);
+        remesh_all(context, renderer, &mut session.world);
+
+        camera.position = stand;
+        look_at(camera, subject);
+        renderer.update_camera(&context.queue, camera);
+
+        // The crew and the hulks, and the player if they are on their feet
+        // near enough to matter.
+        let origin = renderer.render_origin().as_dvec3();
+        let mut objects: Vec<vx_render::Object> = session
+            .mining
+            .objects(|at: glam::DVec3| (at - origin).as_vec3(), None);
+        let feet = (session.player.position - origin).as_vec3();
+        objects.extend(
+            rig::Rig::player()
+                .objects(feet, session.yaw, 0.0)
+                .into_iter()
+                .map(vx_render::Object::already_relative),
+        );
+        renderer.set_objects(&context.device, &context.queue, &objects);
+
+        let out = format!("{stem}-{shot:02}-{beat}.ppm");
+        capture_frame(context, renderer, options.width, options.height)
+            .write_ppm(&out)
+            .map_err(|error| format!("could not write {out}: {error}"))?;
+        println!("  beat {shot}: {beat} -> {out}");
+        Ok(())
+    };
+
+    let mut session = session::Session::open(options.seed);
+    let home = session.home();
+    let chest = vx_world::town::chest_position(&home);
+    session.place_base(vx_core::BlockPos::new(chest.x, chest.y, chest.z));
+    session.fuel_the_fleet(48);
+    session.wallet.earn(5_000);
+    if !session.buy(garage::FLIER) {
+        return Err("could not afford a flier".to_string());
+    }
+    session.ensure_flier();
+
+    let machine = mining::MachineRef::Flier(0);
+    // Up to a clear cruise first, so the dive that follows is a dive rather
+    // than a machine that was already in the dirt.
+    assert_flying(&mut session, machine)?;
+    let aloft = session
+        .mining
+        .machine_position(machine)
+        .ok_or("the flier never turned up")?;
+    let cruise = glam::DVec3::new(
+        f64::from(aloft.x) + 0.5,
+        f64::from(aloft.y) + 0.5,
+        f64::from(aloft.z) + 0.5,
+    );
+    println!(
+        "flying at {aloft:?} with {} hull",
+        session.mining.integrity.left(machine)
+    );
+    photograph(
+        context,
+        renderer,
+        camera,
+        &mut session,
+        "cruise",
+        cruise,
+        cruise + glam::DVec3::new(-9.0, 5.0, -9.0),
+    )?;
+
+    // --- The hillside ---------------------------------------------------
+    if !session.take_wheel(machine) {
+        return Err("the wheel was refused".to_string());
+    }
+    for _ in 0..60 {
+        session.fly(
+            vx_agent::PilotCommand {
+                heading: Some(vx_agent::Heading::PosX),
+                climb: -1,
+                ..Default::default()
+            },
+            8,
+        );
+        if !session.wrecks().is_empty() {
+            break;
+        }
+    }
+    let hulk = session
+        .wrecks()
+        .iter()
+        .next()
+        .ok_or("the machine never hit anything hard enough")?
+        .clone();
+    println!(
+        "{} came down at {:?} with {} aboard",
+        hulk.name(),
+        hulk.at,
+        hulk.haul().iter().map(|(_, n)| n).sum::<u64>()
+    );
+    let where_it_fell = hulk.centre();
+    photograph(
+        context,
+        renderer,
+        camera,
+        &mut session,
+        "down",
+        where_it_fell,
+        where_it_fell + glam::DVec3::new(-7.0, 4.0, -7.0),
+    )?;
+
+    // --- The walk out, and the strip ------------------------------------
+    session.player.position = glam::DVec3::new(
+        f64::from(hulk.at.x) + 1.6,
+        f64::from(hulk.at.y),
+        f64::from(hulk.at.z) + 1.6,
+    );
+    photograph(
+        context,
+        renderer,
+        camera,
+        &mut session,
+        "salvage",
+        where_it_fell,
+        where_it_fell + glam::DVec3::new(-5.0, 2.6, -5.0),
+    )?;
+    match session.strip_a_wreck() {
+        Some(wreck) => println!(
+            "  stripped {}: {} in the pack, {} left in the roster",
+            wreck.name(),
+            session.pack.total(),
+            session.garage.owned(garage::FLIER),
+        ),
+        None => println!("  nothing within reach to strip"),
+    }
+
+    // --- And the other way: a round through one of your own -------------
+    //
+    // Two of the four ways to lose a machine in one run. A slug is settled
+    // by the same hull test a falling trunk is, so this beat photographs
+    // both — the fixture simply cannot fell a tree on cue.
+    if !session.buy(garage::DRONE) {
+        return Err("could not afford a drone".to_string());
+    }
+    let base = vx_core::BlockPos::new(chest.x, chest.y, chest.z);
+    let face = vx_agent::VoxelAabb::new(
+        vx_core::BlockPos::new(base.x + 4, base.y - 6, base.z + 4),
+        vx_core::BlockPos::new(base.x + 9, base.y - 2, base.z + 9),
+    );
+    if session
+        .dispatch_using(face, vx_agent::MineMethod::Decline)
+        .is_none()
+    {
+        return Err("the crew never took the plan".to_string());
+    }
+    let drone = mining::MachineRef::Digger(0);
+    for _ in 0..24 {
+        let Some(at) = session.mining.machine_position(drone) else {
+            break;
+        };
+        let centre = glam::DVec3::new(
+            f64::from(at.x) + 0.5,
+            f64::from(at.y) + 0.5,
+            f64::from(at.z) + 0.5,
+        );
+        // Straight down from clear air, and from a *stated* muzzle: the
+        // muzzle rides the `Fire` order, so a shot from a named place is as
+        // reproducible as one from the eye.
+        session.fire_from(centre + glam::DVec3::new(0.0, 8.0, 0.0), centre);
+        session.work(1);
+        if !session.wrecks().is_empty() {
+            break;
+        }
+    }
+    let shot_down = session.wrecks().iter().next().cloned();
+    match shot_down {
+        Some(hulk) => {
+            let where_it_fell = hulk.centre();
+            println!("  {} took a round at {:?}", hulk.name(), hulk.at);
+            photograph(
+                context,
+                renderer,
+                camera,
+                &mut session,
+                "shot",
+                where_it_fell,
+                where_it_fell + glam::DVec3::new(-6.0, 3.5, -6.0),
+            )?;
+        }
+        None => println!("  the drone shrugged off every round"),
+    }
+
+    Ok(())
+}
+
+/// Get a flier off the deck and into clear air, and say so if it will not go.
+fn assert_flying(
+    session: &mut session::Session,
+    machine: mining::MachineRef,
+) -> Result<(), String> {
+    for _ in 0..40 {
+        let Some(at) = session.mining.machine_position(machine) else {
+            return Err("no such machine".to_string());
+        };
+        let floor = vx_agent::Flier::safe_altitude(&session.world, at.x, at.z, at.y);
+        if at.y >= floor + 8 {
+            return Ok(());
+        }
+        session.mining.lift_flier(0);
+    }
+    Err("the flier would not climb".to_string())
+}
+
 /// Somewhere flat and open near `base` to stand a heap on.
 ///
 /// Walks out from the base in rings and takes the first `side`-by-`side`
@@ -7303,6 +7570,11 @@ impl App {
             &active.events,
             std::time::Duration::from_secs_f32(dt),
         );
+        // Anything the tick itself killed — a machine flown into a hillside,
+        // or a seized one ground down. Collected before the orders are
+        // written so the roster the next order sees is the one the crash
+        // left behind.
+        Self::bury_the_downed(active);
         // Ticks, not seconds. How many ticks a frame is worth depends on frame
         // rate and stalls; how the world evolves across them does not.
         active
@@ -7989,6 +8261,53 @@ impl App {
         }
     }
 
+    /// Put a sweep through the crew, and say goodbye to whatever it killed.
+    ///
+    /// **The one place a lost machine is announced and taken off the books.**
+    /// `Mining::hurt` is where a machine dies — jobs released, cargo into the
+    /// hulk, tombstone left so no index moves — but `Mining` has never heard
+    /// of the garage or the terminal, and it is not going to. So the app
+    /// collects the dead here: the roster shrinks, the player is told, and
+    /// the hulk is already lying wherever it fell with a map pin on it.
+    fn mourn_the_machines(
+        active: &mut Active,
+        from: glam::DVec3,
+        to: glam::DVec3,
+        damage: u32,
+    ) {
+        if active.mining.under_fire(from, to, damage).is_empty() {
+            return;
+        }
+        Self::bury_the_downed(active);
+    }
+
+    /// Announce every machine lost since this was last called, and take each
+    /// one off the garage's books.
+    ///
+    /// Split from [`App::mourn_the_machines`] because a machine can also die
+    /// inside `Mining::advance` — flown into a hillside, or a seized one
+    /// ground down — where there is no sweep to speak of. Both paths end
+    /// here, so a loss is announced once and costs the roster once.
+    fn bury_the_downed(active: &mut Active) {
+        for wreck in active.mining.take_downed() {
+            let kind = match wreck.machine {
+                mining::MachineRef::Digger(_) => garage::DRONE,
+                mining::MachineRef::Flier(_) => garage::FLIER,
+                mining::MachineRef::Kestrel => garage::KESTREL,
+            };
+            active.garage.lose(kind, 1);
+            let line = format!(
+                "{} IS DOWN AT {} {}",
+                wreck.name(),
+                wreck.at.x,
+                wreck.at.z
+            );
+            active.terminal.say(terminal::Kind::Warn, line.clone());
+            active.greeting = Some((line, Instant::now()));
+            active.audio.play(audio::Cue::DistantBoom, 1.0);
+        }
+    }
+
     /// Holders put down or shelters broken: what everybody thinks of that.
     fn note_the_deeds(active: &mut Active, downed: u8, cleared: u8) {
         for _ in 0..downed {
@@ -8264,6 +8583,16 @@ impl App {
                 let _ = active.posse.under_fire(sweep.from, sweep.to);
                 let _ = active.garrisons.under_fire(sweep.from, sweep.to);
                 let _ = active.dark.under_fire(sweep.from, sweep.to);
+                // And your crew, which is the cheapest of stage 57's four
+                // ways to lose a machine: the sweep a falling trunk draws
+                // already existed, and a drone parked under a tree you are
+                // felling is now a drone you are about to be short of.
+                Self::mourn_the_machines(
+                    active,
+                    sweep.from,
+                    sweep.to,
+                    integrity::SLUG_HIT,
+                );
 
                 // And you — tested as the box you are, with the same
                 // segment-against-box the arsenal already uses for rounds
@@ -8495,6 +8824,17 @@ impl App {
                     active.terminal.say(terminal::Kind::Warn, line.clone());
                     active.greeting = Some((line, Instant::now()));
                 }
+                // And the machines. Stage 57: a drone is a box a segment can
+                // pass through, exactly as a body and a caravan are, so the
+                // same `segment_hits_box` that has settled every other hit
+                // since stage 13 settles this one. Yours or a stranger's —
+                // the arsenal has never cared whose finger was on it.
+                Self::mourn_the_machines(
+                    active,
+                    sweep.from,
+                    sweep.to,
+                    integrity::SLUG_HIT,
+                );
                 let held = active.garrisons.under_fire(sweep.from, sweep.to);
                 Self::note_the_deeds(active, held.downed, held.cleared);
                 for line in held.barks {
@@ -8724,11 +9064,12 @@ impl App {
                 rows.into_iter()
                     .map(|row| {
                         format!(
-                            "{:<12} {:>5}M  {:<9} {}",
+                            "{:<12} {:>4}M {:<9} {} {}",
                             row.name,
                             row.distance as i32,
                             row.state,
-                            row.condition.name()
+                            row.condition.name(),
+                            row.damage.name()
                         )
                     })
                     .collect()
@@ -8775,6 +9116,28 @@ impl App {
             // where you are stood, and which counter within reach would pay
             // more — ranked on what it can actually *pay*, not on the sticker
             // price, since stage 52 gave every town a till that runs dry.
+            // What you lost, where it is lying, and what is still on it.
+            "wreck" => {
+                let mut lines = Vec::new();
+                if active.mining.wrecks.is_empty() {
+                    lines.push("NOTHING LOST. EVERY MACHINE IS WHERE IT SHOULD BE.".into());
+                } else {
+                    lines.push(format!("{} DOWN:", active.mining.wrecks.len()));
+                    let standing = active.player.position;
+                    for hulk in active.mining.wrecks.iter() {
+                        let away = (hulk.centre() - standing).length().round() as i64;
+                        let aboard: u64 = hulk.haul().iter().map(|(_, count)| count).sum();
+                        lines.push(format!(
+                            "{} AT {} {} - {aboard} ABOARD, {away} BLOCKS OFF",
+                            hulk.name(),
+                            hulk.at.x,
+                            hulk.at.z,
+                        ));
+                    }
+                    lines.push("WALK UP TO ONE AND PRESS K TO STRIP IT.".into());
+                }
+                lines
+            }
             // The spoil heap: what the crew is stacking, or what the marked
             // ground would take if you ordered one.
             "heap" => {
@@ -9375,11 +9738,18 @@ impl App {
                 wear::PARTS_PER_REPAIR
             )];
         }
-        if !active.mining.wear.repair(machine, &mut base.stockpile) {
-            return vec![format!("{name} IS FRESH ALREADY")];
+        // Wear first, then the dents. One bench, two ledgers, and **both are
+        // tried** — a machine that is bent but not worn was previously told it
+        // was "fresh already" and sent away with a hole in it.
+        let mended = active.mining.wear.repair(machine, &mut base.stockpile);
+        let patched = active.mining.integrity.patch(machine, &mut base.stockpile);
+        if !mended && !patched {
+            return vec![format!("{name} IS SOUND ALREADY")];
         }
         record_order(active, Command::Repair { machine: tag });
-        vec![format!("{name} MENDED - {} PARTS SPENT", wear::PARTS_PER_REPAIR)]
+        let spent = u64::from(mended) * wear::PARTS_PER_REPAIR
+            + u64::from(patched) * integrity::PARTS_PER_PATCH;
+        vec![format!("{name} MENDED - {spent} PARTS SPENT")]
     }
 
     /// Metres within which a townsperson can hear you.
@@ -12243,6 +12613,10 @@ impl App {
             // Stack the marked footprint into a spoil heap. Repeated presses
             // cycle the shape, so one key is both "which" and "go".
             KeyCode::KeyB => self.start_heaping(),
+            // Strip the hulk you are standing next to. `K` because every
+            // other letter within reach of the movement keys is spoken for,
+            // and because you are taking a machine apart.
+            KeyCode::KeyK => self.strip_a_wreck(),
             // What you are carrying. `I` for inventory, which is what every
             // player who has ever held a pack will reach for first.
             KeyCode::KeyI => {
@@ -12442,7 +12816,53 @@ impl App {
     /// the same crew from the shed, the same permit refusal — you should no
     /// more be able to pile rubble through somebody's kitchen than to dig
     /// through it. The shape cycles on repeated presses over the same mark, so
-    /// `B` is both "which shape" and "go".
+    /// `B` is both "which shape" and "go".    /// Take apart the wreck you are standing beside.
+    ///
+    /// Goes on the journal as [`Command::Salvage`] — the order that has meant
+    /// "strip the thing at this position" since stage 19 — so what came off a
+    /// hulk is re-derived by replay rather than trusted from a file, and the
+    /// pack ends the replay holding exactly what it held live.
+    fn strip_a_wreck(&mut self) {
+        let Some(active) = &mut self.active else { return };
+        let standing = active.player.position;
+        let Some(index) = active.mining.wrecks.near(standing) else {
+            active.greeting = Some((
+                "NOTHING WRECKED WITHIN REACH".to_string(),
+                Instant::now(),
+            ));
+            return;
+        };
+        let Some(at) = active.mining.wrecks.iter().nth(index).map(|hulk| hulk.at) else {
+            return;
+        };
+        // Recorded, then run — through the very arm the replay runs, so the
+        // live game and the log cannot hold different goods.
+        record_order(active, Command::Salvage { at });
+        let Some(wreck) = active.mining.wrecks.strip(index) else {
+            return;
+        };
+        active.mining.integrity.forget(wreck.machine);
+        let capacity = Self::pack_capacity(active);
+        let (packed, spilled) = wrecks::recover(
+            &wreck,
+            &mut active.pack,
+            &mut active.drops,
+            capacity,
+            &active.world,
+        );
+        let line = if spilled > 0 {
+            format!(
+                "STRIPPED {} - {packed} ABOARD, {spilled} LEFT ON THE GROUND",
+                wreck.name()
+            )
+        } else {
+            format!("STRIPPED {} - {packed} ABOARD", wreck.name())
+        };
+        active.terminal.say(terminal::Kind::Note, line.clone());
+        active.greeting = Some((line, Instant::now()));
+    }
+
+
     fn start_heaping(&mut self) {
         let Some(active) = &mut self.active else { return };
         if active.mining.is_running() {
@@ -14579,6 +14999,16 @@ impl App {
             failed.push("where you were standing");
         }
         note(&mut failed, "the wear ledger", active.mining.wear.save(save.root()));
+        note(
+            &mut failed,
+            "the integrity ledger",
+            active.mining.integrity.save(save.root()),
+        );
+        note(
+            &mut failed,
+            "the wreck list",
+            active.mining.wrecks.save(save.root()),
+        );
         note(&mut failed, "the wells", active.mining.wells.save(save.root()));
         note(&mut failed, "the arcade", active.arcade.save(save.root()));
         note(&mut failed, "the player's condition", active.health.save(save.root()));
@@ -14928,6 +15358,8 @@ impl ApplicationHandler for App {
         let mut bath = electrolysis::Electrolyser::default();
         let mut tank = fuel::Tank::default();
         let mut crew_wear = wear::Wear::default();
+        let mut crew_integrity = integrity::Integrity::default();
+        let mut hulks = wrecks::Wrecks::default();
         let mut holes = well::Wells::default();
         let mut cabinet = arcade::Arcade::default();
         let mut stands = succession::Ledger::default();
@@ -14966,6 +15398,11 @@ impl ApplicationHandler for App {
             // journal says it did.
             tank.load(save.root());
             crew_wear.load(save.root());
+            // The dents and the hulks, for the wear ledger's reason and one
+            // more: a reload that forgot a wreck would put a machine you
+            // watched go into a hillside back in the crew.
+            crew_integrity.load(save.root());
+            hulks.load(save.root());
             // And the pile the tank burns out of, for the tank's own reason:
             // no pile is no fuel, no fuel is a fleet that does not turn, and
             // a fleet that does not turn cuts different ground.
@@ -15036,6 +15473,8 @@ impl ApplicationHandler for App {
         // Like the tank: replay re-derives it from tick zero, and a reload
         // that started fresh would hand back a worn-out fleet's youth.
         mining.wear = crew_wear;
+        mining.integrity = crew_integrity;
+        mining.wrecks = hulks;
         mining.wells = holes;
         // A world with no save directory at all — taken before `save` moves
         // into the struct below.

@@ -90,6 +90,15 @@ pub struct PilotReport {
     /// The machine refused something the pilot asked for — rock in the way, or
     /// a full cargo bed. The UI turns this into feedback rather than silence.
     pub blocked: bool,
+    /// Blocks below the safe altitude a hand-flown machine ended this tick.
+    ///
+    /// Zero for a ground drone, which keeps its standability rule and cannot
+    /// be driven off a cliff — see [`Drone::pilot_step`]. Non-zero only for a
+    /// flier the player put into rock, and the app turns it into hull damage
+    /// through `integrity::impact`. Reported rather than acted on here
+    /// because this crate has never heard of hull points and is not going to
+    /// start.
+    pub dive: i32,
 }
 
 impl Drone {
@@ -153,45 +162,79 @@ impl Drone {
     }
 }
 
+/// What one tick of piloted flight did.
+///
+/// `dive` is the round's whole point: how far *below* the column's safe
+/// altitude the machine ended up. Zero is a clean pass; anything else is the
+/// pilot putting metal into rock, and [`crate::flier::Flier`] has no opinion
+/// about what that costs — the app charges it, because hull points are the
+/// app's vocabulary and this crate has never heard of them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PilotStep {
+    /// Did the machine move at all this tick?
+    pub moved: bool,
+    /// Blocks below the safe altitude it came to rest, or 0.
+    pub dive: i32,
+}
+
 impl Flier {
-    /// One tick of piloted flight.
+    /// One tick of piloted flight, **with the guard rail off**.
     ///
-    /// Same rule as [`Flier::fly_towards`]: never enter a column while below
-    /// its safe altitude — climb instead — and never change height by more
-    /// than [`CLIMB_RATE`] in a tick. A pilot can fly a bird anywhere it could
-    /// have flown itself, and nowhere it could not.
-    pub fn pilot_step(&mut self, world: &World, heading: Option<Heading>, climb: i32) -> bool {
+    /// # Why this is not [`Flier::fly_towards`]'s rule any more
+    ///
+    /// Until stage 57 this method enforced exactly what the autonomous path
+    /// enforces: never enter a column while below its safe altitude — climb
+    /// instead. That is correct for a machine flying itself, and it is the
+    /// single reason the roadmap could say *"a machine cannot collide with
+    /// anything, so it cannot crash"*. A player at the controls who aims at a
+    /// hillside and holds the stick was quietly floated over it.
+    ///
+    /// So a **hand-flown** machine goes where it is pointed, and reports how
+    /// far into the rock it got. The autonomous [`Flier::fly_towards`] is
+    /// untouched and still climbs first — an unattended machine must never
+    /// clip through a ridge, and `flier.rs`'s own test says so. That
+    /// asymmetry is the design, not an oversight: the guarantee was always
+    /// about machines nobody is watching.
+    ///
+    /// The climb rate still binds, in both directions. A pilot can fly into a
+    /// mountain; they cannot teleport into one.
+    pub fn pilot_step(&mut self, world: &World, heading: Option<Heading>, climb: i32) -> PilotStep {
         let here = self.position;
 
-        // Deliberate climbing first: it is also how a pilot clears a ridge.
+        // Deliberate climbing or descending, with no column change. The floor
+        // is *not* applied: descending into the ground is how a pilot lands
+        // badly, and refusing it was the guard rail.
         if climb != 0 && heading.is_none() {
             let step = climb.clamp(-CLIMB_RATE, CLIMB_RATE);
-            let floor = Flier::safe_altitude(world, here.x, here.z, here.y);
-            let wanted = (here.y + step).max(floor);
-            if wanted != here.y {
-                self.move_to(BlockPos::new(here.x, wanted, here.z));
-                return true;
+            let wanted = here.y + step;
+            if wanted == here.y {
+                return PilotStep::default();
             }
-            return false;
+            self.move_to(BlockPos::new(here.x, wanted, here.z));
+            return PilotStep {
+                moved: true,
+                // Clamped at nought: a machine *above* the safe altitude is
+                // not diving by a negative amount, it is simply flying, and
+                // a signed answer here would have every caller clamping it
+                // again. The field's own doc says "or 0"; this is that.
+                dive: (Flier::safe_altitude(world, here.x, here.z, wanted) - wanted).max(0),
+            };
         }
 
-        let Some(heading) = heading else { return false };
+        let Some(heading) = heading else {
+            return PilotStep::default();
+        };
         let offset = heading.offset();
         let next = (here.x + offset[0], here.z + offset[2]);
 
-        let needed = Flier::safe_altitude(world, next.0, next.1, here.y);
-        if here.y < needed {
-            // Climb before entering, never after.
-            let step = (needed - here.y).min(CLIMB_RATE);
-            self.move_to(here.offset([0, step, 0]));
-            return true;
-        }
-
-        // Advance, honouring a descent the pilot asked for but never dropping
-        // below the new column's floor.
-        let wanted = (here.y + climb.clamp(-CLIMB_RATE, CLIMB_RATE)).max(needed);
+        // Where the pilot asked to be, clamped only by how fast the machine
+        // can change height.
+        let wanted = here.y + climb.clamp(-CLIMB_RATE, CLIMB_RATE);
         self.move_to(BlockPos::new(next.0, wanted, next.1));
-        true
+        PilotStep {
+            moved: true,
+            dive: (Flier::safe_altitude(world, next.0, next.1, wanted) - wanted).max(0),
+        }
     }
 }
 
@@ -307,20 +350,47 @@ mod tests {
         assert_ne!(target, Some(BlockPos::new(8, 60, 8)), "undermined unsafely");
     }
 
+    /// **A hand-flown machine goes where it is pointed, and says how deep it
+    /// got.**
+    ///
+    /// The inversion of the test that stood here until stage 57, which
+    /// asserted that a piloted flier climbs rather than advancing when it is
+    /// below a column's safe altitude. That guard rail is exactly what made a
+    /// machine unloseable, so it is gone from the piloted path — and its
+    /// absence is now the thing under test.
     #[test]
-    fn a_piloted_flier_never_enters_a_column_below_its_safe_altitude() {
+    fn a_piloted_flier_flies_where_it_is_pointed_and_reports_the_dive() {
         let world = fixture::flat(3, 60);
         let mut flier = Flier::new(BlockPos::new(8, 62, 8));
-        // Well below cruise: the first tick must climb, not advance.
+        // Well below cruise, and it advances anyway.
         let before = flier.position;
-        assert!(flier.pilot_step(&world, Some(Heading::PosX), 0));
+        let step = flier.pilot_step(&world, Some(Heading::PosX), 0);
+        assert!(step.moved);
+        assert_ne!(flier.position.x, before.x, "the guard rail is still on");
+        assert!(step.dive > 0, "flew into the ground and reported a clean pass");
+
+        // Up in clear air there is no dive to report.
+        let mut high = Flier::new(BlockPos::new(8, 120, 8));
+        let clear = high.pilot_step(&world, Some(Heading::PosX), 0);
+        assert!(clear.moved);
+        assert_eq!(clear.dive, 0, "clear air read as a collision");
+    }
+
+    /// The autonomous path keeps the rule the piloted one lost. A machine
+    /// flying itself must never clip through a ridge — the asymmetry *is* the
+    /// design, so it gets a test of its own rather than a comment.
+    #[test]
+    fn flying_itself_a_machine_still_climbs_first() {
+        let world = fixture::flat(3, 60);
+        let mut flier = Flier::new(BlockPos::new(8, 62, 8));
+        let before = flier.position;
+        flier.fly_towards(&world, (20, 8));
         assert_eq!(flier.position.x, before.x, "advanced while too low");
         assert!(flier.position.y > before.y, "did not climb");
-
-        // Once at altitude it advances and stays clear of the ground.
         for _ in 0..12 {
-            flier.pilot_step(&world, Some(Heading::PosX), 0);
-            let floor = Flier::safe_altitude(&world, flier.position.x, flier.position.z, flier.position.y);
+            flier.fly_towards(&world, (20, 8));
+            let floor =
+                Flier::safe_altitude(&world, flier.position.x, flier.position.z, flier.position.y);
             assert!(
                 flier.position.y >= floor,
                 "flew below the safe altitude at {:?}",

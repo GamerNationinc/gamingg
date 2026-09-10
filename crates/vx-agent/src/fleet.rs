@@ -358,6 +358,40 @@ impl Fleet {
         self.controlled
     }
 
+    /// Machines still flying: the fleet minus its tombstones. The fuel burn
+    /// and the wear ledger count these; anything that *indexes* still counts
+    /// `fliers.len()`. See [`crate::drone::DroneState::Lost`].
+    pub fn live_fliers(&self) -> usize {
+        self.fliers
+            .iter()
+            .filter(|flier| flier.state != FlierState::Lost)
+            .count()
+    }
+
+    /// Is this machine still with us?
+    pub fn is_lost(&self, index: usize) -> bool {
+        self.fliers
+            .get(index)
+            .is_some_and(|flier| flier.state == FlierState::Lost)
+    }
+
+    /// Write a flier off: where it fell and what it was carrying.
+    ///
+    /// Idempotent, for the same reason [`Operation::lose_drone`] is.
+    pub fn lose_flier(&mut self, index: usize) -> Option<(BlockPos, Stockpile)> {
+        let flier = self.fliers.get_mut(index)?;
+        if flier.state == FlierState::Lost {
+            return None;
+        }
+        let at = flier.position;
+        let cargo = std::mem::take(&mut flier.cargo);
+        flier.state = FlierState::Lost;
+        if self.controlled == Some(index) {
+            self.controlled = None;
+        }
+        Some((at, cargo))
+    }
+
     /// Advance the piloted flier by one tick of the player's input.
     pub fn pilot_tick(
         &mut self,
@@ -368,7 +402,9 @@ impl Fleet {
         let Some(index) = self.controlled else {
             return report;
         };
-        report.moved = self.fliers[index].pilot_step(world, command.heading, command.climb);
+        let step = self.fliers[index].pilot_step(world, command.heading, command.climb);
+        report.moved = step.moved;
+        report.dive = step.dive;
         report
     }
 
@@ -382,6 +418,10 @@ impl Fleet {
         match self.fliers[index].state {
             // A piloted flier is the player's business, not the fleet's.
             FlierState::Manual => {}
+            // A hulk is nobody's business. The tombstone stays in the vector
+            // so every index above it keeps meaning what it meant; the fleet
+            // simply steps over it. See `DroneState::Lost`.
+            FlierState::Lost => {}
             FlierState::Idle => self.consider_ferrying(index, mines),
             FlierState::Scanning { sector, waypoint } => {
                 self.advance_scan(index, world, sector, waypoint, report)

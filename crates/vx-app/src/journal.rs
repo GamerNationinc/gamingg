@@ -1096,9 +1096,16 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
         }
         Command::Repair { machine } => {
             // One function, both sides: the parts come off the pile and the
-            // ledger resets, or neither happens.
+            // ledger resets, or neither happens. **Both ledgers**, since
+            // stage 57 — the bench beats the dents out as well as changing
+            // the oil, and a replay that only did the oil would end the
+            // session holding parts the live game had spent.
             if let Some(base) = state.mining.fleet.base.as_mut() {
                 state.mining.wear.repair(machine.machine(), &mut base.stockpile);
+                state
+                    .mining
+                    .integrity
+                    .patch(machine.machine(), &mut base.stockpile);
             }
         }
         Command::Pump { at, on } => {
@@ -1198,6 +1205,30 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
             }
         }
         Command::Salvage { at } => {
+            // **Two things answer to this order now.** A supply cache is a
+            // block in the ground; a wreck is a hulk lying on it. Both are
+            // "the thing at this position that can be stripped", which is
+            // exactly what the order has said since stage 19 — its own doc
+            // comment calls it a haul *derived from a position* — so stage 57
+            // added the second kind rather than a second tag.
+            //
+            // The wreck goes first. A hulk sits in an air cell, so the cache
+            // arm's `set_block(AIR)` would be a silent no-op that then paid
+            // out a cache's contents for a machine, and the two sides of a
+            // replay would hold different goods.
+            if let Some(index) = state.mining.wrecks.at(*at) {
+                if let Some(wreck) = state.mining.wrecks.strip(index) {
+                    state.mining.integrity.forget(wreck.machine);
+                    let _ = crate::wrecks::recover(
+                        &wreck,
+                        &mut state.pack,
+                        &mut state.drops,
+                        state.capacity,
+                        world,
+                    );
+                }
+                return;
+            }
             // The crate goes, and its haul lands on the pile. The contents
             // are a pure function of the position, so the two sides cannot
             // drift: there is nothing rolled here to disagree about.
@@ -1254,19 +1285,30 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                     world,
                     state.held,
                 );
-                // Shots step on the same clock. The sweeps are dropped: the
-                // craters are the part the hash checks, the bills were the
-                // live game's business.
-                let _ = crate::arsenal::advance_shots(
+                // Shots step on the same clock, and **their sweeps are no
+                // longer dropped**. They used to be, with a fair argument:
+                // the craters are the part the hash checks and the bills were
+                // the live game's business. Stage 57 made a machine a thing a
+                // sweep can destroy, and a destroyed machine stops cutting —
+                // so who got hit is now part of how much ground gets moved,
+                // and dropping it here would replay a crew the live game had
+                // already lost.
+                let sweeps = crate::arsenal::advance_shots(
                     &mut state.shots,
                     world,
                     &state.movement.tuning,
                 );
-                // And the trees. The sweeps are dropped for the same reason
-                // the slugs' are: the blocks are the part the hash checks,
-                // and who got flattened was the live game's business.
+                for sweep in &sweeps {
+                    mining.under_fire(sweep.from, sweep.to, crate::integrity::SLUG_HIT);
+                }
+                // And the trees, for the same reason. A trunk coming down on
+                // a drone is the cheapest of the four ways to lose a machine,
+                // because the sweep it needs already existed.
                 if !state.falls.is_empty() {
-                    let _ = crate::felling::advance_falls(&mut state.falls, world);
+                    let falling = crate::felling::advance_falls(&mut state.falls, world);
+                    for sweep in &falling {
+                        mining.under_fire(sweep.from, sweep.to, crate::integrity::SLUG_HIT);
+                    }
                 }
                 // And the water, which settles on the same clock and edits
                 // the same ground. Its reports are dropped like the rest:

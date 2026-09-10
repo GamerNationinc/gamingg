@@ -199,6 +199,55 @@ impl Operation {
         id
     }
 
+    /// Machines still flying: the crew minus its tombstones.
+    ///
+    /// What the fuel burn and the wear ledger count, because a hulk lying in
+    /// a field burns nothing and wears no further. `drones.len()` is still the
+    /// right number for anything that *indexes* — a roster row, a
+    /// `MachineRef` — and the two are deliberately different questions.
+    pub fn live_drones(&self) -> usize {
+        self.drones
+            .iter()
+            .filter(|drone| drone.state != DroneState::Lost)
+            .count()
+    }
+
+    /// Is this machine still with us?
+    pub fn is_lost(&self, index: usize) -> bool {
+        self.drones
+            .get(index)
+            .is_some_and(|drone| drone.state == DroneState::Lost)
+    }
+
+    /// Write a machine off.
+    ///
+    /// Hands its job back to the board, empties its cargo into the caller's
+    /// hands — a dead drone's rock is still rock, and the caller is the only
+    /// thing that knows where a hulk goes — and leaves the tombstone.
+    ///
+    /// Idempotent: losing a machine twice is not two losses, which is what
+    /// stops a hulk being filed once per tick something touches it.
+    pub fn lose_drone(&mut self, index: usize) -> Option<(BlockPos, Stockpile)> {
+        let drone = self.drones.get_mut(index)?;
+        if drone.state == DroneState::Lost {
+            return None;
+        }
+        let at = drone.position;
+        let cargo = std::mem::take(&mut drone.cargo);
+        let job = drone.job.take();
+        drone.state = DroneState::Lost;
+        drone.route = None;
+        drone.denied.clear();
+        drone.denied_job = None;
+        if let Some(job) = job {
+            self.board.release(job);
+        }
+        if self.controlled == Some(index) {
+            self.controlled = None;
+        }
+        Some((at, cargo))
+    }
+
     /// Turn a mine plan into jobs.
     ///
     /// Access first and in order — the outermost cut carries the highest
@@ -548,6 +597,12 @@ impl Operation {
             // A drone under manual control answers to the player, not to the
             // board. Gravity still applies to it, from `pilot_tick`.
             if self.controlled == Some(index) {
+                continue;
+            }
+            // And a hulk answers to nobody. The tombstone stays in the vector
+            // — see [`DroneState::Lost`] for why a loss must not renumber the
+            // machines above it — so the tick steps over it instead.
+            if self.drones[index].state == DroneState::Lost {
                 continue;
             }
             self.tick_drone(index, world, events, &mut report);
@@ -1159,6 +1214,86 @@ mod tests {
         // And the snapshot of the restored operation is the same snapshot,
         // which is what makes saving twice write the same bytes.
         assert_eq!(back.snapshot(), snapshot);
+    }
+
+    /// **Losing a machine must not renumber the others.**
+    ///
+    /// The test the whole tombstone design exists for. `MachineRef::Digger(i)`
+    /// is a *vector position*, and the wear ledger, the integrity ledger, the
+    /// roster rows and the route caches are all keyed on it — so
+    /// `drones.remove(index)` would silently hand machine three's history to
+    /// machine two. A loss leaves a tombstone instead, and everything above it
+    /// keeps its own name.
+    #[test]
+    fn losing_the_middle_machine_leaves_every_index_alone() {
+        let mut operation = Operation::new(BlockPos::new(0, 65, 0));
+        for _ in 0..3 {
+            operation.add_drone(BlockPos::new(0, 65, 0));
+        }
+        let names: Vec<DroneId> = operation.drones.iter().map(|drone| drone.id).collect();
+
+        operation.lose_drone(1);
+
+        assert_eq!(operation.drones.len(), 3, "the crew got shorter");
+        assert_eq!(
+            operation.drones.iter().map(|drone| drone.id).collect::<Vec<_>>(),
+            names,
+            "a machine was renamed by somebody else dying"
+        );
+        assert_eq!(operation.live_drones(), 2);
+        assert!(operation.is_lost(1));
+        assert!(!operation.is_lost(0) && !operation.is_lost(2));
+    }
+
+    /// A dead machine hands its work back and its rock out.
+    #[test]
+    fn a_lost_machine_releases_its_job_and_gives_up_its_cargo() {
+        let mut world = flat_world(64);
+        let events = EventBus::new();
+        let region = VoxelAabb::new(BlockPos::new(2, 62, 2), BlockPos::new(4, 63, 4));
+        let mut operation = Operation::new(BlockPos::new(0, 65, 0));
+        operation.add_drone(BlockPos::new(0, 65, 0));
+        let job = operation.board.post(JobKind::Extract, region, 0);
+
+        // Give it the job and a load, the way a tick would.
+        operation.tick(&mut world, &events);
+        operation.drones[0].cargo.add("engine:stone", 11);
+
+        let (at, cargo) = operation.lose_drone(0).expect("nothing was lost");
+        assert_eq!(at, operation.drones[0].position);
+        assert_eq!(cargo.total(), 11, "the rock went down with the ship");
+        assert_eq!(operation.drones[0].cargo.total(), 0);
+        assert_eq!(
+            operation.board.claimant(job),
+            None,
+            "a dead machine is still holding the job"
+        );
+
+        // And it is not lost twice. A second loss would file a second wreck.
+        assert_eq!(operation.lose_drone(0), None);
+    }
+
+    /// A hulk does not work, and a tick that only has hulks in it does
+    /// nothing at all rather than panicking on an index.
+    #[test]
+    fn a_tick_steps_over_the_dead() {
+        let mut world = flat_world(64);
+        let events = EventBus::new();
+        let region = VoxelAabb::new(BlockPos::new(2, 62, 2), BlockPos::new(4, 63, 4));
+        let mut operation = Operation::new(BlockPos::new(0, 65, 0));
+        operation.add_drone(BlockPos::new(0, 65, 0));
+        operation.board.post(JobKind::Extract, region, 0);
+        operation.lose_drone(0);
+
+        let before = solid_blocks(&world, region);
+        for _ in 0..200 {
+            operation.tick(&mut world, &events);
+        }
+        assert_eq!(
+            solid_blocks(&world, region),
+            before,
+            "a wreck cut a hole in the ground"
+        );
     }
 
     /// **A heap is claimed from the ground up.**

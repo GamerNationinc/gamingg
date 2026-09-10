@@ -133,6 +133,7 @@ Written down because they are easy to forget and expensive to get wrong.
 | 54 | `71f8e7d` | Nothing you did is lost. Asked, as a gate on the whole arc, to make sure progress and gameplay actually save — *"because if you don't have that, the game isn't really a game."* Walking all 104 fields of `Active` and all 34 save/load pairs in the **live** game rather than the headless session the census test walks turned up six things. **There was no autosave at all**: `save_world` was reachable from `F5`, the terminal and closing the window, all three a cooperative shutdown the player chooses, so a crash, an OOM kill, a SIGTERM or a closed lid took the session — and on the Deck this build targets those are the ordinary ways a session ends, not the exotic ones. **Every one of the 34 sidecar writers used `File::create`**, which truncates first, while `vx_world::save::write_atomically` had protected the region files since they existed: an interrupted save left a short file, and every loader in this game is tolerant enough to answer one by resetting its subsystem, so a power cut could take your wallet to zero and warn nobody. Worse, the set was written sequentially with nothing comparing the pieces, so a wallet from after a sale could load beside a pile from before it. **A failed save was a `log::error!`** and the terminal printed "WORLD WRITTEN OUT" unconditionally; a boot that could not open the save directory never saved at all and never said so. And three things were being lost outright: the goods a broken container was holding were **written on every save and dropped on load** by a live boot that grafted across only `.base` — while the test proving the format works exercises the session's path, which was never the broken one; a **cleared garrison** re-mustered on reload with its downed holders alive, which is both an afternoon undone and, since the capture pay banks, a reload payday; and a **pump you switched on came back off**, filed in the census under "things mid-flight" when a running pump is a standing decision. Fixed with `keeping.rs`: one atomic writer (temp, `sync_all`, rename) behind all thirty-six files, a `manifest.dat` written **last** and stamped from what the save actually produced so a torn set is detected and rolled back to a hard-linked fallback with the wreck kept under `torn/`, an autosave on a two-minute clock *and* on the orders worth not repeating (marked in `CommandLog::record`, the one gate every order passes), `suspended`/`exiting`/`Destroyed` handlers, and failures collected into a line the player actually sees. The census stopped being a comment — it had **six wrong filenames in it** — and became a table the manifest is checked against. Measured: 6.0 ms for a save of 24 hand-cut blocks, 4.4 ms for one with nothing new in it |
 | 55 | `036e546` | The pack. Asked for the Minecraft thing — what you mine becomes a small block that pops into your inventory, with a visible count and a carrying limit you can later upgrade with an exoskeleton — and the honest starting point was that **there is no player inventory**, and never has been. Everything broken routed straight onto `Fleet::base`, a container standing somewhere else entirely, *and that pile was what the movement system weighed you down by*: the README's oldest rough edge, unchanged since stage 16. So the round mostly points a thing that already exists at the thing it was always describing. `pack.rs` is a `Stockpile` of the player's own plus the game's **third per-good table** (after `economy::BASE_PRICE` and `BlockDef::hardness`, and the first about mass): leaves 1, timber 4-7, stone 10 — the yardstick — copper 18, bars 25, uranium 30, with a drift test that fails if a block the registry knows has no weight. Capacity is `pack::UNIT` times the two curves that have existed since stage 25 and had only ever been applied to a number nobody could see, so a fresh pack is exactly sixty-four stone and nothing a player knows got smaller. Two thresholds, not one: free to three tenths, then the same `mass_from_byte` curve the game has always had, then a hard stop — and `pack::load_byte` is **one function called by both** `App::frame` and `Session`, killing the duplicated arithmetic that let the windowed game and the headless one drift. `drops.rs` is what a limit needs in order not to be a punishment: a full pack does not refuse the swing and does not eat the block, it lets what came out lie in the cell it came from — settled onto the first floor under it, so a ceiling block is not left hanging at head height — drawn in the good's own tile like `arsenal::Crash` has been drawn since stage 13, collected by walking near, and saved to `drops.dat` because a drop you deliberately left is exactly what stage 54 spent a round refusing to lose. **The oracle got stricter, and it caught two of its own.** `Command::Break`'s replay arm broke the block and banked *nothing* — from stage 6 to here, replay's pile was short every hand-cut rock, hidden because the load byte is re-installed off the wire rather than re-derived, and load-bearing because that pile is what the fleet's fuel burns out of. Teaching it `drill::deposit` needed the pack size, which replay cannot know (the counter and the fabricator are both live-only), so `Command::Carry` (tag 31) states it when it changes — a capability re-installed, the same bargain the `Move` load byte struck in stage 10b — and `Command::Stow` (tag 30) is **payload-free**, replay re-deriving the manifest from its own pack rather than trusting a number in a file. Writing that test found the second: `Command::Place` of a container never *declared the base*, so every replayed `Stow` and every replayed delivery tipped into nowhere. Journal `VERSION` 32. `wallet::EXO` is the eighth line, at the counter and appended to the fabricator's catalogue rather than filed by difficulty — `Command::Print` records a recipe by its **index**, so a row slotted into the middle silently re-points every print order in every log ever written. And the search for somewhere to put the count found a live panic: the HUD has fifteen conditional rows and room for ten, `font::draw_text` clips and `draw_bar` did **not**, so six optional rows plus the drill trigger indexed past the end of an 82,720-byte buffer. Verified red first, then guarded. The count went on a panel (`I`, slot 20) and in a line on every swing instead |
 | 56 | `451f53f` | The spoil heap. Asked for the last of the three rounds the drill-mod note named: *"it makes more logical sense to move blocks with the drone e.g. a rubble pile beside the mine — let's have different variations of stacking the blocks like square base pyramid, spiral tower or straight shaft."* The board had been calling this the expensive one for three stages on the grounds that **nothing in `vx-agent` can place a block** — "not a missing function, a missing concept" — and that was exactly half right. `vx_world::place_block` already did the occupancy check, the standing-there check and the cancellable `BlockPlaceEvent` a mod can veto; it just took a `&RayHit`, because until now the only thing that ever placed a block was a player pointing at one. Splitting `place_at` out of it left all 314 world tests passing untouched, and gave the permit gate to the heap for free at the *block* rather than only at the order. `heap.rs` sits beside `mine.rs` and is the same problem with the sign flipped: three shapes, and **`cells` in strictly bottom-up order, which is the whole safety argument** — a drone placing in that order is never asked to stand on air and never has to reach above a cell that is not there yet, so "can a machine reach the top of a pile it is itself building" is a property of the plan and therefore a test rather than a hope. Each column starts from **its own** `surface_y`, not the footprint's: taking the highest ground under the whole footprint buried the high side inside the hill and left the low side hanging. `PLACE_OFFSETS` is `REACH_OFFSETS`' mirror — same seventeen cells, opposite order, because the reason cutting works top-down is the reason stacking works bottom-up — and `JobKind::Stack` carries **no material**, so a heap is made of the actual mixed stone and dirt that came out of the actual hole. **The oracle test was the round**, and it found three bugs that had nothing to do with shapes. `post_heap` priced courses `-1_000 - (courses - step)`, which *rises* with height, so the board handed out the apex first and a drone was sent seven blocks up to a cell with nothing under it, found no station, and carried its load home for ever. `Session::dispatch_using` **never wrote `Command::Dispatch` down** — `App::start_mining` has since stage 9 — so every replay of a crew was replaying a journal with no crew in it and re-derived untouched ground; and `Session::fuel_the_fleet` conjured canisters onto the pile instead of banking them through the electrolyser's existing order, so the replayed crew stood on a dry tank. Two of the three were invisible until an order asked a *crew* to change the ground and then checked the log, which is the first thing this stage did. Then the played run found a fourth: order a heap after the dig is finished and every block of spoil is already in town, so the crew has nothing to build with — the yard now hands rock back, and "not ore" turned out to be the wrong rule for a pile that also holds the fleet's **fuel**. `Command::Heap` (tag 32), journal `VERSION` 33, `dig.dat` 3, key `B`, a `HEAP` verb, and a heap that is *installed* on replay rather than searched for the way a dispatch's method is |
+| 57 | `_this_` | The drone you can lose. Task #221, on the board since stage 49 split in two, and the roadmap stated the gap in one line: **a machine cannot collide with anything, so it cannot crash.** From stage 10a to here `garage.rs` had `grant` and no opposite, and `wear.rs` modelled a machine grinding down to `Seized` and then stopping it for ever, recoverably, for two spare parts — so every machine a player ever bought was permanent. A fleet you cannot lose is not capital. `integrity.rs` sits beside `wear.rs` and is deliberately its shape: the same `wear::key` so a machine cannot be one thing to one ledger and another to the other, four graded states, a bench repair, and a tolerant `integrity.dat`. Four ways to die, and **three of them were nearly free** because the vocabulary already existed: a falling trunk has drawn a `Sweep` since stage 36 and `main.rs` already ran it against the posse, the garrisons, the stalker and the player's own box, so gunfire and getting flattened are the same three lines and one shared hull test; and a shot-down caravan has left an `arsenal::Crash` on the ground since stage 13, which is what a wreck is with a longer life and a verb on it. The fourth is the crash proper: `Flier::pilot_step` enforced the *autonomous* rule — never enter a column below its safe altitude, climb instead — under manual control as well, and that single line is why a machine could not be flown into a hillside. It is off for a hand-flown machine and untouched for one flying itself, with a test on each half, and the dive it reports is charged quadratically so a scrape is a scratch and a four-block dive is most of a hull. **The expensive part was indices.** `MachineRef::Digger(i)` is a vector position and 127 sites index those vectors; the wear ledger, the roster, the route caches and `Operation::controlled` are all keyed on it, so `drones.remove(index)` would hand machine three's history to machine two. A lost machine leaves a **tombstone** — `DroneState::Lost` (byte 7, `Stacking` took 6) and `FlierState::Lost` — and the tick steps over it exactly as it already stepped over a piloted one. **No new journal tag and no `VERSION` bump**: every way a machine dies is a consequence of `Pilot`, `Fire` or `Advance`, all already recorded, and salvage reuses `Command::Salvage`, whose own doc has said "a haul derived from a position" since stage 19. Two real bugs on the way: the hit test reached for `machine_eye`, which interpolates by the frame accumulator and adds a *drawn* gimbal — presentation used as a lever, exactly what stage 53's own test was written against — so the replay killed the machine a cell from where the session did and the salvage order then carved air out of the wrong place; and replay's `Advance` arm **dropped shot and fall sweeps** on the honest argument that craters are the part the hash checks, which stopped being true the moment a sweep could destroy a machine that would otherwise keep cutting. `wrecks.dat` (`VXWK`), `integrity.dat` (`VXIT`), `keeping::FILES` 38 → 40, tile 68 for the scorched skin, key `K`, a `WRECK` verb, and `garage::lose` — the first mutator this game has ever had that subtracts |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -3789,6 +3790,111 @@ hollow middle of the top course, which is the honest picture of a rule rather
 than a bug in it. A drone cannot fill the cell under its own feet, so once the
 walls are up there is no station left to work the inside from.
 
+## Shipped — Stage 57: the drone you can lose
+
+Task #221, on the board since stage 49 split in two. The roadmap stated the
+gap in one line: **a machine cannot collide with anything, so it cannot
+crash.**
+
+From stage 10a to stage 56 a garage could only grow. `garage.rs` had `grant`
+and `buy` and nothing that subtracted; `wear.rs` modelled a machine grinding
+down to `Seized` and then simply stopped it — terminal, safe, and recoverable
+for ever for two spare parts. Every machine a player had ever bought was
+permanent. That matters more now than it did at 49: stage 52 made a crew the
+way you earn money, 55 gave you a pack of your own, and 56 gave the crew a
+second verb. The fleet is the player's capital, and capital you cannot lose is
+a number that only goes up.
+
+### Three of the four ways to die were nearly free
+
+The vocabulary was already there, twice over.
+
+A felled trunk has drawn an `arsenal::Sweep` since stage 36, and `main.rs`
+already ran it against `posse.under_fire`, `garrisons.under_fire`,
+`dark.under_fire` and the player's own box through `segment_hits_box`. So
+**gunfire and being flattened by a tree are the same three lines** — machines
+join a list that already existed, and one shared hull test settles both,
+because to a drone there is no difference between being shot and being landed
+on.
+
+A caravan shot out of the sky has left an `arsenal::Crash` on the ground since
+stage 13: a thing removed, and its load spilled where it fell. **A wreck is
+that idea with a longer life and a verb attached.**
+
+And `wear.rs`'s `Condition::Seized` stops being terminal-but-safe: a seized
+machine that is still being asked to work now takes damage every tick it
+refuses to turn, which turns the repair bench from a chore you can postpone
+for ever into a decision.
+
+### The fourth is the crash proper
+
+`Flier::pilot_step` enforced the autonomous rule — never enter a column while
+below its safe altitude, climb instead — **under manual control as well**.
+That one line is the entire reason a machine could not be flown into a
+hillside: a player who aimed at a cliff and held the stick was quietly floated
+over it.
+
+It is off for a hand-flown machine and untouched for one flying itself, and
+both halves get a test, because the asymmetry is the design rather than an
+oversight: the guarantee was always about machines nobody is watching. The
+dive the step reports is charged quadratically, so a scrape is a scratch, a
+four-block dive is most of a hull, and six blocks is scrap.
+
+### The expensive part was indices
+
+`MachineRef::Digger(i)` is a **vector position**. There are 127 sites indexing
+those vectors, the wear ledger keys itself `(kind, index)`, the roster rows and
+route caches count on position, and `Operation::controlled` is an
+`Option<usize>`. `drones.remove(index)` would silently hand machine three's
+history to machine two.
+
+So a lost machine is never removed. It leaves a **tombstone in place** —
+`DroneState::Lost` (byte 7; `Stacking` took 6 in stage 56) and
+`FlierState::Lost` — and the tick steps over it exactly as it already stepped
+over a machine under manual control. Every index stays valid for the life of
+the save, and the crew is one machine short rather than one machine different.
+It is the argument `JobId` has always made: *"never reused, so a stale
+reference resolves to nothing instead of to whatever took its slot."*
+
+### Nothing new on the wire
+
+No journal tag, no `VERSION` bump. Every way a machine can die is a
+consequence of orders already recorded — a `Pilot` that flew it into a hill, a
+`Fire` that put a slug through it, an `Advance` during which a tree came down
+or a seized machine was asked once too often — so integrity is *re-derived*
+the way wear is rather than trusted from a file. And salvage reuses
+`Command::Salvage`, whose own doc comment has said "a haul derived from a
+position" since stage 19: a supply cache is a block in the ground, a wreck is a
+hulk lying on one, and both are the thing at that position that can be
+stripped.
+
+### Two real bugs, both found by the oracle
+
+**The hit test reached for `machine_eye`.** It looks like the right function
+and is a trap: it interpolates between tick positions by the frame accumulator
+and adds a gimbal turned by the *drawn* heading. Both are presentation. Using
+it to decide whether a slug connected made the answer depend on how far
+through a frame the live game happened to be — so the replay killed the
+machine a cell away from where the session did, the hulk landed somewhere
+else, and the salvage order then carved a block of air out of the wrong place.
+The same "lens, not a lever" line stage 53 drew round the drill mod.
+
+**Replay's `Advance` arm dropped the sweeps.** It had an honest argument for
+it — "the craters are the part the hash checks, the bills were the live game's
+business" — and that argument stopped being true the moment a sweep could
+destroy a machine that would otherwise have kept cutting. Both slug and fall
+sweeps now go through the crew on the replay side too.
+
+### Played
+
+`--wreck` runs one session in three beats: a flier at cruise with the wheel in
+the player's hands, the hillside it goes into, and the hulk in the grass with
+the player stood over it. Nothing in the fixture breaks a machine on its own
+behalf — it is *flown* in through `Command::Pilot`, and what is left is
+whatever `integrity::impact` charged for the dive. On the shipped seed: cruise
+at 90, down at y 78 with six spare parts aboard, stripped into the pack, and
+the roster down to nothing.
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -4177,14 +4283,14 @@ what 53's note asked for.
 |---|---|---|
 | ~~55~~ | ~~The pack~~ — **shipped** | Blocks that pop to you as drops, a real player inventory with visible counts, and a carrying weight that **slows you first and hard-stops you second**, upgradeable by an exoskeleton. It is also the fix for the oldest rough edge in the README: the movement system weighs you down by a pile sitting in a container somewhere else entirely. The `load` byte already rides the journal and replay never re-derives it, so repointing it at a real pack costs nothing on the wire |
 | ~~56~~ | ~~The spoil heap~~ — **shipped** | You mark a spot, pick a shape — square-base pyramid, spiral tower, straight shaft — and the crew hauls spoil there and stacks it, reusing the mark / choose-a-method / dispatch flow and the job board. The expensive one, and honestly so: **nothing in `vx-agent` can place a block.** Not a missing function, a missing concept — `JobKind` has two behaviourless variants, a `Job` carries only a region with nowhere to say *what to put there*, `DroneState` has no build state, and `REACH_OFFSETS` is shaped entirely by the rules of cutting. Stacked blocks are ground and ground is the hash, so it is a journal order and `VERSION` 33 — 32 went to the pack |
-| 49b | The drone you can lose | A machine cannot collide with anything, so it cannot crash. Integrity beside `wear.rs` and on the oracle for the same reason wear is; the flier's auto-climb off under manual control so it can be flown into a cliff, while the digger keeps the standability rule that stops a hand-driven drone stranding itself; gunfire through `segment_hits_box`; a persistent, mapped wreck you walk out to and salvage or rebuild; and `garage.rs`'s first `lose` mutator, since `grant` only ever added |
+| ~~49b~~ | ~~The drone you can lose~~ — **shipped as 57** | A machine cannot collide with anything, so it cannot crash. Integrity beside `wear.rs` and on the oracle for the same reason wear is; the flier's auto-climb off under manual control so it can be flown into a cliff, while the digger keeps the standability rule that stops a hand-driven drone stranding itself; gunfire through `segment_hits_box`; a persistent, mapped wreck you walk out to and salvage or rebuild; and `garage.rs`'s first `lose` mutator, since `grant` only ever added |
 
 Beyond those the board holds the outstanding engineering below, and whatever
 the next note says.
 
 ## The feature map
 
-The whole game at a glance, as of stage 56.
+The whole game at a glance, as of stage 57.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -4396,10 +4502,18 @@ never asked to stand on air, `PLACE_OFFSETS` as the mirror of the cut's reach,
 a `Stack` job with no material so the pile is made of what actually came out of
 the hole, the yard handing spoil back when the mine mouth is bare, and
 `Command::Heap` with the shape installed rather than re-ranked);
+a machine you can lose (a hand-flown flier that goes where it is pointed
+instead of being floated over the hill, hull points beside the wear ledger and
+on the oracle for the same reason, gunfire and falling trunks settled by the
+one hull test, a seized machine that eventually grinds itself to scrap, a
+tombstone instead of a removal so no index ever moves, and a scorched hulk you
+walk out to, strip and lose the roster row for);
 a Steam Deck dist build every round.
 
-**Planned, in arc order:** the drone you can lose — and, first inside that
-round, the replay hole where a hand-dug hole is not written down.
+**Planned, in arc order:** nothing is named. Every design note this project
+has been given, and every round the board set itself, is shipped. What comes
+next is whatever the next note says — with the outstanding engineering below
+as the standing fallback.
 
 **Outstanding engineering:** journal-shrunk saves;
 real min-cost flow for freight; ammunition as a trade good; the rest of the

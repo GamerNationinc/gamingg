@@ -142,7 +142,7 @@ pub fn begin(directory: &Path, name: &str) -> std::io::Result<Writing> {
 /// the loads bind to locals named `rads`, `sightings`, `bath`, `eyes`, `press`,
 /// `rack`, `cabinet`, `holes` and `vaults`, and matching those to their files
 /// was, until now, a job for whoever was reading.
-pub const FILES: [(&str, &str); 38] = [
+pub const FILES: [(&str, &str); 40] = [
     ("log.dat", "journal"),
     ("explored.dat", "map"),
     ("player.dat", "skills"),
@@ -159,6 +159,8 @@ pub const FILES: [(&str, &str); 38] = [
     ("dig.dat", "dig"),
     ("fuel.dat", "fuel"),
     ("wear.dat", "wear"),
+    ("integrity.dat", "integrity"),
+    ("wrecks.dat", "wrecks"),
     ("wells.dat", "well"),
     ("marks.dat", "scout"),
     ("dose.dat", "dose"),

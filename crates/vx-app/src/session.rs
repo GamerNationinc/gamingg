@@ -97,6 +97,14 @@ impl Arrival {
 /// window and everything that only exists to draw.
 pub struct Session {
     pub world: World,
+    /// Slugs in the air, stepped on the crew's own clock — the same list
+    /// `Rebuilt` carries, so a shot the log records is a shot the replay
+    /// flies.
+    pub shots: Vec<crate::arsenal::Shot>,
+    /// The pilot input last written down, so `Pilot` is recorded on change
+    /// only — it is a held input and `Advance` counts the ticks it covers.
+    /// `App` keeps the same field for the same reason.
+    last_pilot: Option<vx_agent::PilotCommand>,
     pub events: EventBus,
     pub player: PlayerBody,
     pub movement: Movement,
@@ -169,6 +177,8 @@ impl Session {
         };
 
         Session {
+            last_pilot: None,
+            shots: Vec::new(),
             world,
             events: EventBus::new(),
             player,
@@ -216,6 +226,9 @@ impl Session {
         self.skills.save(root)?;
         self.economy.save(root)?;
         self.mining.tank.save(root)?;
+        self.mining.wear.save(root)?;
+        self.mining.integrity.save(root)?;
+        self.mining.wrecks.save(root)?;
         crate::pile::save(&self.mining.fleet, root)?;
         crate::fleet::save(&self.mining.fleet, root)?;
         crate::dig::save(&self.mining, root)?;
@@ -308,6 +321,9 @@ impl Session {
         session.skills.load(root);
         session.economy.load(root);
         session.mining.tank.load(root);
+        session.mining.wear.load(root);
+        session.mining.integrity.load(root);
+        session.mining.wrecks.load(root);
         session.garage.load(root);
         // The pile, the air side and the crew, in the one order that works —
         // and through the same function the live game boots with, because
@@ -410,6 +426,10 @@ impl Session {
             self.last_move = Some(held);
         }
         self.mining.advance(&mut self.world, &self.events, ticks);
+        // Anything the tick killed comes off the roster before the orders are
+        // written, the way `App::frame` does it — a crash is a consequence of
+        // orders already recorded, so nothing new goes on the wire here.
+        self.bury_the_downed();
         self.journal.record(Command::Advance { ticks });
         for _ in 0..ticks {
             self.tick += 1;
@@ -419,6 +439,21 @@ impl Session {
                 &self.world,
                 held,
             );
+            // Slugs step on the same clock as everything else, through the
+            // same function the live game and the replay both call, and **in
+            // the same place in the tick** — after the body, before the next
+            // one. Their sweeps go through the crew, because since stage 57 a
+            // machine is a thing a round can destroy.
+            let sweeps = crate::arsenal::advance_shots(
+                &mut self.shots,
+                &mut self.world,
+                &self.movement.tuning,
+            );
+            for sweep in &sweeps {
+                self.mining
+                    .under_fire(sweep.from, sweep.to, crate::integrity::SLUG_HIT);
+            }
+            self.bury_the_downed();
         }
         self.keep_chunks_loaded();
     }
@@ -1163,6 +1198,115 @@ impl Session {
         Some(plan)
     }
 
+    /// Take the wheel of a machine, writing the order down.
+    ///
+    /// The headless twin of `App::toggle_control`, and the same order in the
+    /// same place: recorded only once the simulation has *granted* control, so
+    /// the log never claims a wheel that was refused.
+    pub fn take_wheel(&mut self, machine: crate::mining::MachineRef) -> bool {
+        if !self.mining.take_control(machine) {
+            return false;
+        }
+        self.journal.record(Command::Wheel {
+            machine: Some(crate::journal::MachineTag::any(machine)),
+        });
+        true
+    }
+
+    /// Hold a pilot input for `ticks`, then let go.
+    ///
+    /// Records on change only, exactly as `App::frame` does — `Pilot` is a
+    /// held input and `Advance` counts the ticks it covers. Getting that
+    /// wrong is what stage 49a's whole round was about.
+    pub fn fly(&mut self, command: vx_agent::PilotCommand, ticks: u32) {
+        if self.last_pilot != Some(command) {
+            self.journal.record(Command::piloting(command));
+            self.last_pilot = Some(command);
+        }
+        self.mining.set_pilot_command(command);
+        self.advance(ticks, self.command(0));
+    }
+
+    /// Put a slug down a bearing from a stated muzzle, writing the order down.
+    ///
+    /// The headless twin of `App::fire`, through the same
+    /// [`crate::arsenal::launch`] and the same order — `Fire` carries the
+    /// muzzle and the two quantised angles, and everything the slug then does
+    /// is re-derived on both sides from those.
+    ///
+    /// The muzzle is stated rather than taken from the body because the
+    /// muzzle is *on the wire* either way, so a shot from a named place is
+    /// exactly as reproducible as one from the eye — and a test that wants a
+    /// round in the air does not have to walk a body across a valley to get
+    /// one, which would load chunks the log never mentions.
+    pub fn fire_from(&mut self, muzzle: DVec3, target: DVec3) {
+        let along = (target - muzzle).normalize();
+        // Quantised through the very function the live game quantises a look
+        // with, so live fire and replay dequantise to the same line.
+        let quantised = MoveCommand::looking(
+            0,
+            f32::atan2(along.x as f32, -(along.z as f32)),
+            (along.y as f32).asin(),
+        );
+        self.journal.record(Command::Fire {
+            muzzle: muzzle.to_array(),
+            yaw_q: quantised.yaw_q,
+            pitch_q: quantised.pitch_q,
+        });
+        crate::arsenal::launch(
+            &mut self.shots,
+            &mut self.movement,
+            muzzle,
+            quantised.yaw_q,
+            quantised.pitch_q,
+        );
+    }
+
+    /// Every machine lost so far, with what is still on it.
+    pub fn wrecks(&self) -> &crate::wrecks::Wrecks {
+        &self.mining.wrecks
+    }
+
+    /// Strip the hulk within reach, writing the order down.
+    ///
+    /// The headless twin of `App::strip_a_wreck`, through the same
+    /// [`Command::Salvage`] and the same [`crate::wrecks::recover`].
+    pub fn strip_a_wreck(&mut self) -> Option<crate::wrecks::Wreck> {
+        let index = self.mining.wrecks.near(self.player.position)?;
+        let at = self.mining.wrecks.iter().nth(index).map(|hulk| hulk.at)?;
+        self.journal.record(Command::Salvage { at });
+        let wreck = self.mining.wrecks.strip(index)?;
+        self.mining.integrity.forget(wreck.machine);
+        let capacity = self.capacity();
+        crate::wrecks::recover(
+            &wreck,
+            &mut self.pack,
+            &mut self.drops,
+            capacity,
+            &self.world,
+        );
+        // The garage shrinks here, as it does in the live game: `Mining` has
+        // never heard of the roster and is not going to.
+        Some(wreck)
+    }
+
+    /// Take every machine lost since this was last called off the books.
+    ///
+    /// `App::bury_the_downed`'s twin. Called from [`Session::advance`] so a
+    /// played session's roster shrinks by itself, the way the live game's
+    /// does inside `App::frame`.
+    fn bury_the_downed(&mut self) {
+        for wreck in self.mining.take_downed() {
+            let kind = match wreck.machine {
+                crate::mining::MachineRef::Digger(_) => crate::garage::DRONE,
+                crate::mining::MachineRef::Flier(_) => crate::garage::FLIER,
+                crate::mining::MachineRef::Kestrel => crate::garage::KESTREL,
+            };
+            self.garage.lose(kind, 1);
+            self.left += 1;
+        }
+    }
+
     /// How far up the heap has got, if the crew is stacking one.
     pub fn heap_progress(&self) -> Option<(u64, u64)> {
         self.mining.heap_progress()
@@ -1719,6 +1863,151 @@ mod tests {
             Some(stacked),
             "the replay stacked a different number of blocks"
         );
+    }
+
+    /// **The oracle, for a machine you lost.**
+    ///
+    /// Put a slug through one of your own drones, walk out to what is left of
+    /// it, strip it, and demand that the log reproduces all three: the same
+    /// ground, the same pack, and the same hole in the roster.
+    ///
+    /// **Nothing new went on the wire for this.** A machine dying is a
+    /// consequence of `Fire` and `Advance`, both recorded since stage 13; the
+    /// salvage is `Command::Salvage`, which has meant "strip the thing at this
+    /// position" since stage 19. If this passes, damage really is being
+    /// re-derived rather than remembered, which is the claim `integrity.rs`
+    /// makes in its own module note.
+    ///
+    /// It also checks the change this stage made to replay's `Advance` arm.
+    /// Shot sweeps used to be dropped there — "the craters are the part the
+    /// hash checks" — and that stopped being true the moment a sweep could
+    /// destroy a machine, because a destroyed machine stops cutting.
+    #[test]
+    fn a_machine_you_lose_replays_to_the_same_wreck() {
+        let mut session = dug_in();
+        // Shot before the crew goes underground: a slug stops at the first
+        // rock it meets, so a drone down a decline is behind cover. This is a
+        // test about the log, not about ballistics through a hillside.
+        let drone = crate::mining::MachineRef::Digger(0);
+        let centre = session
+            .mining
+            .machine_eye(drone)
+            .expect("the crew never turned up");
+        let owned_before = session.garage.owned(crate::garage::DRONE);
+
+        // Straight down from above, where the air is certainly clear — and
+        // **without moving the body**. A teleport is not an order, so a test
+        // that walks the player about by assignment loads chunks the log
+        // never mentions, and the replay then holds a different set of ground
+        // to hash. `fire_from` states the muzzle instead, which *is* on the
+        // wire.
+        let _ = centre;
+        for _ in 0..24 {
+            let centre = match session.mining.machine_position(drone) {
+                Some(at) => glam::DVec3::new(
+                    f64::from(at.x) + 0.5,
+                    f64::from(at.y) + 0.5,
+                    f64::from(at.z) + 0.5,
+                ),
+                None => break,
+            };
+            session.fire_from(centre + glam::DVec3::new(0.0, 8.0, 0.0), centre);
+            // One tick: a slug crosses eight blocks in far less, and the
+            // drone is walking, so a longer wait is a longer lead to miss by.
+            session.work(1);
+            if !session.wrecks().is_empty() {
+                break;
+            }
+        }
+        assert_eq!(session.wrecks().len(), 1, "the drone shrugged off two dozen rounds");
+        assert_eq!(
+            session.garage.owned(crate::garage::DRONE),
+            owned_before - 1,
+            "the roster did not shrink"
+        );
+
+        // Walk out to it and strip it. The body is put beside the hulk rather
+        // than pathed to it — this test is about the log, not about walking —
+        // and then **put back**, because where the body has been is what
+        // decided which chunks this world is holding, and the replay's world
+        // loads around the position it is handed. Leave the body somewhere it
+        // never walked and the two sides hash different sets of ground for a
+        // reason that has nothing to do with the feature.
+        let at = session.wrecks().iter().next().expect("no hulk").at;
+        let stood = session.player.position;
+        session.player.position = glam::DVec3::new(
+            f64::from(at.x) + 0.5,
+            f64::from(at.y),
+            f64::from(at.z) + 0.5,
+        );
+        session.strip_a_wreck().expect("nothing within reach");
+        session.player.position = stood;
+        assert!(session.wrecks().is_empty(), "the hulk stayed");
+        let carried = session.pack.total();
+        assert!(carried > 0, "stripping a hulk yielded nothing");
+
+        let ground = vx_world::world_hash(&session.world);
+        let start = session.player.position;
+        let mut fresh = vx_world::World::new(session.world.seed());
+        fresh.load_around(
+            BlockPos::new(
+                start.x.floor() as i32,
+                start.y.floor() as i32,
+                start.z.floor() as i32,
+            )
+            .chunk(),
+            KEEP_LOADED,
+        );
+        let events = vx_core::EventBus::new();
+        let rebuilt = crate::journal::replay_from(&session.journal, &mut fresh, &events, start);
+
+        assert_eq!(
+            vx_world::world_hash(&fresh),
+            ground,
+            "the replay left different ground"
+        );
+        assert!(
+            rebuilt.mining.wrecks.is_empty(),
+            "the replay is still holding a hulk the session stripped"
+        );
+        assert_eq!(
+            rebuilt.pack.total(),
+            carried,
+            "the replay carried a different haul off the wreck"
+        );
+    }
+
+    /// A hulk, and what is on it, survives a save.
+    #[test]
+    fn a_wreck_is_still_lying_there_after_a_reload() {
+        let directory = scratch("wrecks");
+        let (at, aboard) = {
+            let mut session = ready();
+            session.wallet.earn(5_000);
+            session.fuel_the_fleet(24);
+            assert!(session.buy(crate::garage::FLIER));
+            session.ensure_flier();
+            let flier = crate::mining::MachineRef::Flier(0);
+            assert!(session.take_wheel(flier));
+            session.fly(
+                vx_agent::PilotCommand {
+                    climb: -1,
+                    ..Default::default()
+                },
+                8 * 40,
+            );
+            let hulk = session.wrecks().iter().next().expect("no hulk").clone();
+            session.save_to(&directory).expect("could not save");
+            (hulk.at, hulk.haul().iter().map(|(_, n)| n).sum::<u64>())
+        };
+
+        let back = Session::load_from(&directory).expect("could not load");
+        assert_eq!(back.wrecks().len(), 1, "the hulk evaporated over a save");
+        let hulk = back.wrecks().iter().next().expect("no hulk");
+        assert_eq!(hulk.at, at);
+        assert_eq!(hulk.haul().iter().map(|(_, n)| n).sum::<u64>(), aboard);
+
+        std::fs::remove_dir_all(&directory).ok();
     }
 
     /// Nothing is conjured: what the crew stacked came out of the ground it
@@ -2653,12 +2942,15 @@ mod tests {
     /// module docs is the human-readable half of the same promise.
     #[test]
     fn the_census_covers_every_saved_subsystem() {
-        const EXPECTED: [&str; 15] = [
+        const EXPECTED: [&str; 18] = [
             "log.dat",
             "wallet.dat",
             "player.dat",
             "economy.dat",
             "fuel.dat",
+            "wear.dat",
+            "integrity.dat",
+            "wrecks.dat",
             "pile.dat",
             "fleet.dat",
             "dig.dat",

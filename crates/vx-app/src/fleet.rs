@@ -242,6 +242,9 @@ fn write_state(file: &mut impl Write, state: FlierState) -> std::io::Result<()> 
         }
         FlierState::ToBase => file.write_all(&[3u8]),
         FlierState::Manual => file.write_all(&[4u8]),
+        // Stage 57. A tombstone has to survive a save or a reload would
+        // resurrect a machine you watched go into a hillside.
+        FlierState::Lost => file.write_all(&[5u8]),
     }
 }
 
@@ -262,6 +265,7 @@ fn read_state(file: &mut impl Read) -> std::io::Result<FlierState> {
         },
         3 => FlierState::ToBase,
         4 => FlierState::Manual,
+        5 => FlierState::Lost,
         _ => return Err(std::io::Error::other("unknown flier state")),
     })
 }

@@ -169,12 +169,30 @@ build in it, and it survives quitting — skills included.
 | `vx-render` | wgpu renderer, camera, frustum culling, instanced objects, 2D overlays, bitmap font, offscreen capture | Done |
 | `vx-platform` | Input state, XDG paths | Done |
 | `vx-app` | Window, walk/fly/third-person camera, tick-based player movement, streaming, day/night clock, HUD, rigs, skills, villagers, awareness, shop, wallet, garage, handheld, beacon board, town economy, maps, command journal, `gamingg` binary | Done |
-| `vx-agent` | Job board, flow fields, mine planning, spoil-heap shapes, scanner, flier + fleet, manual piloting | Done |
+| `vx-agent` | Job board, flow fields, mine planning, spoil-heap shapes, scanner, flier + fleet, manual piloting you can crash | Done |
 | `vx-mod-api` / `vx-mod` | Mod ABI, manifests, WASM host | later |
 | `vx-steam` | Steam Workshop mod source | M4 |
 
 ### Known rough edges
 
+- A **flier crash is not on the oracle**, because a flier is not on the wire.
+  Machines are bought live and `Command::SpawnMachine` is an admin cheat whose
+  replay arm is a no-op, so a replayed session has diggers (the dispatch order
+  carries the crew count) and no fliers at all. Everything else about losing a
+  machine re-derives correctly — a drone shot, flattened or ground down by
+  neglect replays exactly, and there is a test that says so — but a machine
+  you fly into a hillside is a live-only loss. Putting the fleet on the wire
+  is a journal bump and its own round.
+- Only the flier can be crashed. A ground drone keeps the standability rule
+  that stops a hand-driven machine stranding itself, which also means it
+  cannot be driven off a cliff, and the kestrel is absent from both the wear
+  and the integrity ledgers by the same argument that has kept it out of the
+  fuel loop since stage 14.
+- A wreck is stripped, never rebuilt. Walking out to a hulk gets you its cargo
+  and six spare parts; there is no way to pay to put the machine back
+  together where it lies.
+- Machines do not collide with each other, only with the ground. Two fliers
+  can occupy the same cell all day.
 - A spoil heap the crew cannot stand beside does not get finished. Stacking
   reuses the cut's neighbourhood, and `PLACE_OFFSETS` has nothing below it on
   purpose — a drone cannot fill the cell under its own feet without lifting

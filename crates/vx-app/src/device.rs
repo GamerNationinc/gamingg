@@ -620,6 +620,7 @@ mod tests {
     fn roster() -> Vec<MachineListing> {
         vec![
             MachineListing {
+                damage: crate::integrity::Damage::Sound,
                 condition: crate::wear::Condition::Fresh,
                 machine: MachineRef::Digger(0),
                 name: "DIGGER 1".into(),
@@ -629,6 +630,7 @@ mod tests {
                 capacity: 64,
             },
             MachineListing {
+                damage: crate::integrity::Damage::Sound,
                 condition: crate::wear::Condition::Fresh,
                 machine: MachineRef::Flier(0),
                 name: "FLIER 1".into(),

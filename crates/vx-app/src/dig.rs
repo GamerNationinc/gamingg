@@ -431,6 +431,8 @@ fn write_state(file: &mut impl Write, state: DroneState) -> std::io::Result<()> 
             file.write_all(&[6u8])?;
             file.write_all(&job.0.to_le_bytes())
         }
+        // Stage 57. Seven, because `Stacking` took six in stage 56.
+        DroneState::Lost => file.write_all(&[7u8]),
     }
 }
 
@@ -478,6 +480,7 @@ fn read_state(file: &mut impl Read) -> std::io::Result<DroneState> {
         4 => DroneState::Stuck,
         5 => DroneState::Manual,
         6 => DroneState::Stacking(JobId(read_u64(file)?)),
+        7 => DroneState::Lost,
         _ => return Err(std::io::Error::other("unknown drone state")),
     })
 }

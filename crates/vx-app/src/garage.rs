@@ -110,6 +110,22 @@ impl Garage {
         *entry = entry.saturating_add(count);
     }
 
+    /// Take one off the books. **The first mutator this struct has ever had
+    /// that subtracts.**
+    ///
+    /// From stage 10a to stage 56 a garage could only grow: [`Garage::grant`]
+    /// and [`Garage::buy`] add, and nothing anywhere removed. That was not an
+    /// oversight so much as a missing concept — nothing in the game could
+    /// destroy a machine — and it is what stage 57 is about.
+    ///
+    /// Saturating, so losing more than you own is nothing rather than a wrap
+    /// to four billion drones. No refund: the credits are gone, which is the
+    /// whole point of a loss.
+    pub fn lose(&mut self, kind: &str, count: u32) {
+        let entry = self.owned.entry(kind.to_string()).or_insert(0);
+        *entry = entry.saturating_sub(count);
+    }
+
     /// Buy one, spending from `wallet`.
     ///
     /// Atomic in the way that matters: a refused purchase changes neither the

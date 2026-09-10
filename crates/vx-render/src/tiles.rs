@@ -138,7 +138,14 @@ pub mod slot {
     /// dark, so an echo is never mistaken for the cage that fired it.
     pub const SONAR: u32 = 67;
 
-    pub const COUNT: u32 = 68;
+    /// What is left of a machine: scorched, buckled plate with the rust
+    /// showing through where the paint has gone. Deliberately a *different*
+    /// tile from [`HULL`] rather than a darker shade of it — a wreck has to
+    /// read as a wreck at fifty blocks, across a hillside, with no label.
+    pub const WRECK: u32 = 68;
+
+    /// Total generated tiles.
+    pub const COUNT: u32 = 69;
 }
 
 /// Deterministic per-pixel jitter, so tiles look grainy rather than flat.
@@ -604,6 +611,22 @@ pub fn generate_tile(tile: u32, turn: f32) -> Vec<u8> {
                         shade([lit[0] * 0.45, lit[1] * 0.45, lit[2] * 0.45], noise * 0.04)
                     } else {
                         shade([lit[0] * 0.12, lit[1] * 0.12, lit[2] * 0.12], noise * 0.02)
+                    }
+                }
+                slot::WRECK => {
+                    // Scorched plate. The machine's own rust-orange, burnt
+                    // most of the way to charcoal, with the odd texel of
+                    // unburnt paint left where a panel folded and sheltered
+                    // it — so the eye reads "this used to be a digger"
+                    // rather than "this is a dark rock".
+                    let scorch = jitter(tile ^ 0x5a, x / 2, y / 2);
+                    if y == TILE_SIZE / 2 || x % 7 == 3 {
+                        // The buckled seams, blackest of all.
+                        shade([0.09, 0.07, 0.06], noise * 0.03)
+                    } else if scorch > 0.36 {
+                        shade([0.42, 0.19, 0.08], noise * 0.06)
+                    } else {
+                        shade([0.19, 0.14, 0.12], noise * 0.05)
                     }
                 }
                 slot::ICE => {

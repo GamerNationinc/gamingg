@@ -26,6 +26,7 @@ use vx_render::tiles::slot;
 use vx_render::Object;
 use vx_world::World;
 
+use crate::integrity;
 use crate::rig::{self, Rig};
 
 /// Drone ticks per second — the journal's clock.
@@ -91,6 +92,22 @@ pub struct Mining {
     /// hole ends up — so replay carries this struct, and replay carries the
     /// wear.
     pub wear: crate::wear::Wear,
+    /// What *accidents* have cost the machines. Beside the wear ledger, for
+    /// the third time the same argument: a destroyed drone stops cutting, and
+    /// how much a crew cut is what the world hash covers. Replay carries this
+    /// struct, so replay re-derives every dent.
+    pub integrity: crate::integrity::Integrity,
+    /// The machines that did not make it, and where they are lying. Held here
+    /// rather than in `main` because a wreck is *created by the tick* — a
+    /// hillside, a slug, a trunk, a seized machine asked once too often — and
+    /// the tick is [`Mining::advance`], which replay re-runs.
+    pub wrecks: crate::wrecks::Wrecks,
+    /// Machines destroyed since the last `advance`, for the app to announce.
+    ///
+    /// Kept beside the wrecks rather than returned in `FleetReport`, for the
+    /// well report's reason: `FleetReport` belongs to `vx-agent`, and
+    /// `vx-agent` has never heard of a hull point.
+    pub downed: Vec<crate::wrecks::Wreck>,
     /// The holes this player has sunk. Here rather than in `main` for the
     /// tank's reason and the wear's: a well puts goods on the pile, the pile
     /// decides how long the fleet turns, and how long the fleet turns is
@@ -175,6 +192,10 @@ pub struct MachineListing {
     /// How it is holding up. The roster is where a player learns which
     /// machine is the one dragging the crew.
     pub condition: crate::wear::Condition,
+    /// How knocked about it is, which is a different question from how worn.
+    /// Wear is what work costs; this is what accidents cost — and unlike
+    /// wear, the far end of it is a machine that is not coming back.
+    pub damage: crate::integrity::Damage,
     /// How far the player is from it, in blocks.
     pub distance: f32,
     pub cargo: u64,
@@ -191,6 +212,9 @@ impl Default for Mining {
             operation: None,
             tank: crate::fuel::Tank::default(),
             wear: crate::wear::Wear::default(),
+            integrity: crate::integrity::Integrity::default(),
+            wrecks: crate::wrecks::Wrecks::default(),
+            downed: Vec::new(),
             wells: crate::well::Wells::default(),
             well_report: crate::well::WellReport::default(),
             pinned: Vec::new(),
@@ -629,6 +653,13 @@ impl Mining {
             // fuel is still spent — a machine that will not turn has still
             // been asked to.
             if !self.turning() {
+                // **And asking a seized machine to work breaks it.** Until
+                // stage 57 `Condition::Seized` was terminal but perfectly
+                // safe: the crew stopped and waited, for ever, for two spare
+                // parts. A repair bench you can always postpone is not a
+                // decision. Now neglect eventually costs the machine — and
+                // only the seized ones, so a merely worn crew is unharmed.
+                self.grind_the_seized();
                 continue;
             }
             worked += 1;
@@ -673,11 +704,160 @@ impl Mining {
     /// cooldown, which is its own budget and was the whole point of that
     /// design. Counting it twice would be charging for the same wing twice.
     pub fn burners(&self) -> u32 {
+        // Live machines, not roster rows. A hulk lying in a field burns
+        // nothing — see `vx_agent::DroneState::Lost` for why the tombstone
+        // stays in the vector anyway.
         let diggers = self
             .operation
             .as_ref()
-            .map_or(0, |operation| operation.drones.len() as u32);
-        diggers + self.fleet.fliers.len() as u32
+            .map_or(0, |operation| operation.live_drones() as u32);
+        diggers + self.fleet.live_fliers() as u32
+    }
+
+    /// Hurt a machine, and file the wreck if that finished it.
+    ///
+    /// **The one door.** A hillside, a slug, a falling trunk and a seized
+    /// machine asked to work once too often all arrive here, so a machine dies
+    /// in exactly one place and everything that has to happen when one does —
+    /// the job goes back on the board, the cargo goes into the hulk, the hulk
+    /// goes on the map, the crew gets smaller — happens once and cannot be
+    /// half-done by a caller that forgot a step.
+    ///
+    /// Returns whether this blow was the one that did it.
+    pub fn hurt(&mut self, machine: MachineRef, amount: u32) -> bool {
+        if amount == 0 || !self.integrity.hurt(machine, amount) {
+            return false;
+        }
+        // From here on, this machine has *just* died — `Integrity::hurt`
+        // answers on the edge, not the level, so this arm cannot run twice.
+        let fallen = match machine {
+            MachineRef::Digger(index) => self
+                .operation
+                .as_mut()
+                .and_then(|operation| operation.lose_drone(index)),
+            MachineRef::Flier(index) => self.fleet.lose_flier(index),
+            // The kestrel is absent from the integrity ledger, so this is
+            // unreachable in practice; answering it with "nothing fell" is
+            // cheaper than an assertion nobody can trip.
+            MachineRef::Kestrel => None,
+        };
+        let Some((at, cargo)) = fallen else {
+            return false;
+        };
+        if self.piloted == Some(machine) {
+            self.piloted = None;
+        }
+        let wreck = crate::wrecks::Wreck {
+            at,
+            machine,
+            cargo,
+            parts: crate::wrecks::PARTS_PER_WRECK,
+        };
+        self.wrecks.add(wreck.clone());
+        self.downed.push(wreck);
+        true
+    }
+
+    /// Put a sweep — a slug going past, or a tree coming down — through every
+    /// machine in the crew.
+    ///
+    /// The three `under_fire` calls the posse, the garrisons and the stalker
+    /// already answer, with machines added to the list. One function for both
+    /// kinds of sweep, because to a drone there is no difference between being
+    /// shot and being landed on, and two code paths would be two chances to
+    /// get the hull box wrong.
+    ///
+    /// Returns every machine this sweep destroyed.
+    pub fn under_fire(&mut self, from: DVec3, to: DVec3, damage: u32) -> Vec<MachineRef> {
+        // The box a machine is, near enough. Wider than a body and shorter:
+        // a drone is a squat thing on treads.
+        const HULL: DVec3 = DVec3::new(0.6, 0.5, 0.6);
+        let mut hit = Vec::new();
+        let diggers = self
+            .operation
+            .as_ref()
+            .map_or(0, |operation| operation.drones.len());
+        for index in 0..diggers {
+            let machine = MachineRef::Digger(index);
+            if self.is_lost(machine) {
+                continue;
+            }
+            let Some(centre) = self.hull_centre(machine) else {
+                continue;
+            };
+            if crate::arsenal::segment_hits_box(from, to, centre, HULL) {
+                hit.push(machine);
+            }
+        }
+        for index in 0..self.fleet.fliers.len() {
+            let machine = MachineRef::Flier(index);
+            if self.is_lost(machine) {
+                continue;
+            }
+            let Some(centre) = self.hull_centre(machine) else {
+                continue;
+            };
+            if crate::arsenal::segment_hits_box(from, to, centre, HULL) {
+                hit.push(machine);
+            }
+        }
+        hit.into_iter()
+            .filter(|machine| self.hurt(*machine, damage))
+            .collect()
+    }
+
+    /// Where a machine's body is **for the simulation to aim at**.
+    ///
+    /// Deliberately not [`Mining::machine_eye`], which is what it looked like
+    /// it should be and is a trap: that one interpolates between tick
+    /// positions by the frame accumulator and adds a gimbal turned by the
+    /// drawn heading. Both are presentation. Using it to decide whether a
+    /// slug connected made the answer depend on how far through a frame the
+    /// live game happened to be, and the oracle caught it at once — the
+    /// replay killed the machine a cell away from where the session did, the
+    /// hulk landed somewhere else, and the salvage order then carved a block
+    /// of air out of the wrong place. The same "lens, not a lever" line
+    /// stage 53 drew round the drill mod.
+    ///
+    /// So: the tick position, in whole blocks, lifted half a body.
+    fn hull_centre(&self, machine: MachineRef) -> Option<DVec3> {
+        let at = self.machine_position(machine)?;
+        Some(DVec3::new(
+            f64::from(at.x) + 0.5,
+            f64::from(at.y) + 0.5,
+            f64::from(at.z) + 0.5,
+        ))
+    }
+
+    /// Lift a parked flier one block, for a fixture that needs one at cruise.
+    ///
+    /// Not a gameplay verb: the autonomous flier climbs by itself and a
+    /// piloted one is the player's business. This exists so `--wreck` can get
+    /// a machine into clear air before flying it into a hill, which is the
+    /// only honest way to photograph a dive.
+    pub fn lift_flier(&mut self, index: usize) {
+        if let Some(flier) = self.fleet.fliers.get_mut(index) {
+            let up = flier.position.offset([0, 1, 0]);
+            flier.move_to(up);
+        }
+    }
+
+    /// Is this machine a hulk?
+    pub fn is_lost(&self, machine: MachineRef) -> bool {
+        match machine {
+            MachineRef::Digger(index) => self
+                .operation
+                .as_ref()
+                .is_some_and(|operation| operation.is_lost(index)),
+            MachineRef::Flier(index) => self.fleet.is_lost(index),
+            MachineRef::Kestrel => false,
+        }
+    }
+
+    /// Every machine destroyed since this was last called, and it empties the
+    /// list — the app announces each loss once.
+    pub fn take_downed(&mut self) -> Vec<crate::wrecks::Wreck> {
+        std::mem::take(&mut self.downed)
     }
 
     /// Charge one tick's wear to the crew and answer whether it turns.
@@ -687,12 +867,36 @@ impl Mining {
     /// call `Command::Advance` replays, so both sides reach the same answer
     /// without either re-deciding anything.
     fn turning(&mut self) -> bool {
+        // The same live count the fuel burn uses, and for the same reason: a
+        // wreck does not wear out any further.
+        let diggers = self
+            .operation
+            .as_ref()
+            .map_or(0, |operation| operation.live_drones());
+        let fliers = self.fleet.live_fliers();
+        self.wear.tick(diggers, fliers)
+    }
+
+    /// Charge a tick of abuse to every machine that has seized.
+    ///
+    /// Runs only on a tick the crew refused to turn, so a healthy fleet never
+    /// meets it. Reads the wear ledger rather than taking a parameter, which
+    /// keeps "what counts as seized" in exactly one place.
+    fn grind_the_seized(&mut self) {
         let diggers = self
             .operation
             .as_ref()
             .map_or(0, |operation| operation.drones.len());
         let fliers = self.fleet.fliers.len();
-        self.wear.tick(diggers, fliers)
+        let seized: Vec<MachineRef> = (0..diggers)
+            .map(MachineRef::Digger)
+            .chain((0..fliers).map(MachineRef::Flier))
+            .filter(|machine| self.wear.condition(*machine) == crate::wear::Condition::Seized)
+            .filter(|machine| !self.is_lost(*machine))
+            .collect();
+        for machine in seized {
+            self.hurt(machine, integrity::SEIZED_TICK);
+        }
     }
 
     /// Spend one tick's fuel, drawing on the base pile. False when dry.
@@ -718,8 +922,15 @@ impl Mining {
                     operation.pilot_tick(world, events, self.pilot_command);
                 }
             }
-            Some(MachineRef::Flier(_)) => {
-                self.fleet.pilot_tick(world, self.pilot_command);
+            Some(MachineRef::Flier(index)) => {
+                let report = self.fleet.pilot_tick(world, self.pilot_command);
+                // **The crash.** `Flier::pilot_step` no longer floors a
+                // hand-flown machine at the column's safe altitude, so a pilot
+                // who aims at a hillside and holds the stick puts metal into
+                // rock — and the depth it got to is what that costs. Charged
+                // here rather than in `vx-agent` because hull points are this
+                // crate's vocabulary; see `integrity::impact`.
+                self.hurt(MachineRef::Flier(index), integrity::impact(report.dive));
             }
             Some(MachineRef::Kestrel) => {
                 if let Some(kestrel) = &mut self.kestrel {
@@ -918,6 +1129,7 @@ impl Mining {
                 rows.push(MachineListing {
                     machine,
                     condition: self.wear.condition(machine),
+                    damage: self.integrity.damage(machine),
                     name: format!("DIGGER {}", index + 1),
                     state: match drone.state {
                         DroneState::Idle => "IDLE".into(),
@@ -927,6 +1139,7 @@ impl Mining {
                         DroneState::Stuck => "STUCK".into(),
                         DroneState::Manual => "PILOTED".into(),
                         DroneState::Stacking(_) => "STACKING".into(),
+                        DroneState::Lost => "WRECKED".into(),
                     },
                     distance: self
                         .machine_eye(machine)
@@ -941,6 +1154,7 @@ impl Mining {
             rows.push(MachineListing {
                 machine,
                 condition: self.wear.condition(machine),
+                damage: self.integrity.damage(machine),
                 name: "KESTREL".into(),
                 state: kestrel_state(kestrel).into(),
                 distance: self
@@ -955,6 +1169,7 @@ impl Mining {
             rows.push(MachineListing {
                 machine,
                 condition: self.wear.condition(machine),
+                damage: self.integrity.damage(machine),
                 name: format!("FLIER {}", index + 1),
                 state: match flier.state {
                     FlierState::Idle => "IDLE".into(),
@@ -962,6 +1177,7 @@ impl Mining {
                     FlierState::ToPickup { .. } => "COLLECTING".into(),
                     FlierState::ToBase => "RETURNING".into(),
                     FlierState::Manual => "PILOTED".into(),
+                    FlierState::Lost => "WRECKED".into(),
                 },
                 distance: self
                     .machine_eye(machine)
@@ -1071,6 +1287,11 @@ impl Mining {
                 .already_relative()
         };
 
+        // The hulks first, so a machine that is still working draws over one
+        // that is not — a crew standing round a wreck reads better than a
+        // wreck standing in front of a crew.
+        objects.extend(self.wrecks.objects(&relative));
+
         if let Some(area) = self.area {
             for corner in area_corners(area) {
                 objects.push(marker(corner, MARKER_SIZE));
@@ -1095,6 +1316,13 @@ impl Mining {
         if let Some(operation) = &self.operation {
             for (index, drone) in operation.drones.iter().enumerate() {
                 if feed == Some(MachineRef::Digger(index)) {
+                    continue;
+                }
+                // A tombstone is not a machine. The hulk it left is drawn
+                // below, out of `wrecks`, where it actually fell — the
+                // tombstone's `position` is only there to keep the index
+                // honest.
+                if drone.state == DroneState::Lost {
                     continue;
                 }
                 let yaw = self.heading(MachineRef::Digger(index));
@@ -1161,6 +1389,12 @@ impl Mining {
         if let Some(complaint) = self.wear.complaint(diggers, self.fleet.fliers.len()) {
             return Some(complaint.to_lowercase());
         }
+        // And a machine that is bent rather than worn, which is the other
+        // half of the same sentence: a player staring at a short crew
+        // deserves to be told which one is down and where.
+        if let Some(complaint) = self.integrity.complaint(diggers, self.fleet.fliers.len()) {
+            return Some(complaint.to_lowercase());
+        }
 
         // A working flier outranks the mining readout: it is the thing the
         // player just ordered.
@@ -1176,6 +1410,7 @@ impl Mining {
         if let Some(flier) = self.fleet.fliers.first() {
             match flier.state {
                 FlierState::Manual => {}
+                FlierState::Lost => {}
                 FlierState::Scanning { .. } => {
                     return Some(format!(
                         "scanning: {} pings so far",
@@ -1463,6 +1698,65 @@ mod tests {
         assert_ne!(mining.fleet.fliers[0].state, FlierState::Manual);
     }
 
+    /// **Fly into a mountain and you lose the machine; brush a ridge and you
+    /// do not.** The threshold is the feature.
+    #[test]
+    fn a_dive_into_rock_writes_a_machine_off_and_a_scrape_does_not() {
+        let (mut world, mut mining) = flying_world();
+        let events = EventBus::new();
+        let cruise = mining.fleet.fliers[0].position.offset([0, 40, 0]);
+
+        // A scrape: one tick of descent from clear air is a dent at worst.
+        mining.fleet.fliers[0].position = cruise;
+        mining.fleet.fliers[0].previous_position = cruise;
+        mining.take_control(MachineRef::Flier(0));
+        mining.set_pilot_command(PilotCommand {
+            climb: -1,
+            ..Default::default()
+        });
+        mining.advance(&mut world, &events, 1);
+        assert!(
+            mining.integrity.damage(MachineRef::Flier(0)) != integrity::Damage::Wrecked,
+            "one tick of descent in clear air wrote the machine off"
+        );
+
+        // The hillside: hold the stick down from cruise until it is in the
+        // rock, and it does not come out.
+        mining.advance(&mut world, &events, 200);
+        assert!(
+            mining.integrity.damage(MachineRef::Flier(0)) == integrity::Damage::Wrecked,
+            "flew into the ground and kept flying"
+        );
+        assert_eq!(mining.wrecks.len(), 1, "no hulk was left behind");
+        assert!(mining.fleet.is_lost(0), "the fleet still counts it");
+        assert_eq!(mining.fleet.live_fliers(), 0);
+        // And the wheel is not still being held by a dead machine.
+        assert_eq!(mining.piloted(), None);
+    }
+
+    /// A wreck is filed once, however long the crash goes on for.
+    #[test]
+    fn one_crash_is_one_hulk() {
+        let (mut world, mut mining) = flying_world();
+        let events = EventBus::new();
+        mining.take_control(MachineRef::Flier(0));
+        mining.set_pilot_command(PilotCommand {
+            heading: Some(vx_agent::Heading::PosX),
+            ..Default::default()
+        });
+        mining.advance(&mut world, &events, 400);
+        assert_eq!(
+            mining.wrecks.len(),
+            1,
+            "the same machine was buried more than once"
+        );
+        assert_eq!(mining.take_downed().len(), 1);
+        assert!(
+            mining.take_downed().is_empty(),
+            "the same loss was announced twice"
+        );
+    }
+
     #[test]
     fn a_piloted_machine_takes_its_yaw_from_the_look_not_the_movement() {
         let (_, mut mining) = flying_world();
@@ -1485,6 +1779,16 @@ mod tests {
         // Piloting is a change of driver, not of physics: one cell per tick.
         let (mut world, mut mining) = flying_world();
         let events = EventBus::new();
+        // **In clear air, deliberately.** `flying_world` parks the machine on
+        // the deck, which stage 57 made a fatal place to hold a heading: the
+        // guard rail that used to float a hand-flown machine over the ground
+        // is gone, so from there it flies into the hill and this measures how
+        // long a flier survives rather than how fast one travels. Lifted to
+        // cruise, it measures the tick rate again — which is all it was ever
+        // about.
+        let up = mining.fleet.fliers[0].position.offset([0, 40, 0]);
+        mining.fleet.fliers[0].position = up;
+        mining.fleet.fliers[0].previous_position = up;
         mining.take_control(MachineRef::Flier(0));
         mining.set_pilot_command(PilotCommand {
             heading: Some(vx_agent::Heading::PosX),

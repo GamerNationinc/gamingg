@@ -52,6 +52,10 @@ pub enum FlierState {
     ToBase,
     /// Under the player's direct control.
     Manual,
+    /// Destroyed. The same tombstone rule the ground machines follow — see
+    /// [`crate::drone::DroneState::Lost`] for why a loss is a state and not a
+    /// removal.
+    Lost,
 }
 
 /// A single flying drone.

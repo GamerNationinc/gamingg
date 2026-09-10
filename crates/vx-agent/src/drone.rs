@@ -59,6 +59,26 @@ pub enum DroneState {
     Stuck,
     /// Under the player's direct control; the tick loop leaves it alone.
     Manual,
+    /// Destroyed. Its hulk is somewhere in the world; this is the hole it
+    /// left in the crew.
+    ///
+    /// # Why a state rather than a removal
+    ///
+    /// The obvious way to lose a machine is `drones.remove(index)`, and it is
+    /// the wrong way here. [`crate::job::DroneId`] is stable but the *vector
+    /// position* is what the app names a machine by — `MachineRef::Digger(i)`
+    /// — and the wear ledger, the integrity ledger, the route caches, the
+    /// roster rows and [`crate::operation::Operation`]'s own `controlled`
+    /// field are all keyed on it. Removing from the middle renumbers every
+    /// machine above, which would silently transplant one machine's history
+    /// onto another's.
+    ///
+    /// So a lost machine leaves a **tombstone in place**. Every index stays
+    /// valid for the life of the save, and the crew is one machine short
+    /// rather than one machine different. It is the same argument `JobId`
+    /// already makes: *"never reused, so a stale reference resolves to
+    /// nothing instead of to whatever took its slot."*
+    Lost,
 }
 
 /// A single ground drone.

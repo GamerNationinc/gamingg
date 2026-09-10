@@ -360,7 +360,7 @@ const BACKGROUND: [u8; 4] = [10, 12, 16, 240];
 /// The control scheme, written for the player. One row per physical
 /// control, in the order a hand finds them, grouped by layer. A row whose
 /// control is empty is a heading. Tested drawable.
-pub const SCHEME: [(&str, &str); 38] = [
+pub const SCHEME: [(&str, &str); 39] = [
     ("", "ON FOOT"),
     ("LEFT STICK", "MOVE, CLICK TO SPRINT"),
     ("RIGHT STICK", "LOOK, CLICK FOR OPTICS"),
@@ -392,6 +392,7 @@ pub const SCHEME: [(&str, &str); 38] = [
     ("R-STICK", "THE DRILL SONAR"),
     ("START", "YOUR PACK"),
     ("LB", "HEAP THE MARKED SPOIL"),
+    ("LB+A", "STRIP A WRECK YOU ARE STANDING BY"),
     ("SELECT", "TAP: THIS PANEL"),
     ("", "IN A PANEL"),
     ("A, B", "CONFIRM, BACK OUT"),

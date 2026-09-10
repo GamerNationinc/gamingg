@@ -194,6 +194,35 @@ impl Rig {
         }
     }
 
+    /// What is left of a machine.
+    ///
+    /// The machine's own rig with two changes, and both are the point: every
+    /// part is repainted to [`slot::WRECK`], and **the spinning parts are
+    /// gone**. A rotor or a nose drill is the first thing to shear off and
+    /// the first thing an eye looks for, so a hulk with no rotor reads as
+    /// broken from across a valley without a label on it.
+    ///
+    /// Built from the live rig rather than authored separately, so a machine
+    /// that gains a part gains it in its own wreck too. A second hand-written
+    /// model would drift the first time anybody touched the first one.
+    pub fn wreck(of: Rig) -> Self {
+        Rig {
+            parts: of
+                .parts
+                .into_iter()
+                .filter(|part| part.spin.is_none())
+                .map(|part| Part {
+                    tile: slot::WRECK,
+                    ..part
+                })
+                .collect(),
+        }
+    }
+
+    /// How far a wreck lies over. Not upright, not flat: a machine that came
+    /// down hard rests on a corner.
+    pub const WRECK_TILT: f32 = 0.55;
+
     /// A villager: boots, trousers, jacket, arms, a head and a face, with the
     /// proportions nudged per variant so the town is not staffed by clones.
     ///

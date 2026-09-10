@@ -116,7 +116,12 @@ pub struct Wear {
 /// runs on a cell and a cooldown, which is its own budget, and charging it
 /// wear as well would be charging twice for the same wing — the same line
 /// the fuel loop drew.
-fn key(machine: MachineRef) -> Option<(u8, u32)> {
+///
+/// Shared with [`crate::integrity`], which keys its own ledger the same way.
+/// Two ledgers about the same machines have to agree about what a machine
+/// *is*, and the cheap way to guarantee that is one function rather than two
+/// that look alike.
+pub(crate) fn key(machine: MachineRef) -> Option<(u8, u32)> {
     match machine {
         MachineRef::Digger(index) => Some((0, index as u32)),
         MachineRef::Flier(index) => Some((1, index as u32)),
