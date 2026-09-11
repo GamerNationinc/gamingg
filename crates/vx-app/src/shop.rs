@@ -132,6 +132,32 @@ impl Shop {
     /// you already own, and what you have learned. Bundling them would only
     /// move the list somewhere else.
     #[allow(clippy::too_many_arguments)]
+    /// Which good the cursor is sitting on, if the row under it is a sale.
+    ///
+    /// The panel's half of [`crate::journal::Command::Sell`]: the order says
+    /// which good left the pile, and this is where that is known. `None` for
+    /// every buy row and for a cursor past the end, which is the honest answer
+    /// — nothing is being sold.
+    #[allow(clippy::too_many_arguments)]
+    pub fn selected_good(
+        &self,
+        pile: Option<&Stockpile>,
+        walletbook: &Wallet,
+        market: &Market,
+        shed: &Garage,
+        rack: &Arsenal,
+        kit: &Intrusions,
+        security: u32,
+        offers: &[Offer],
+    ) -> Option<usize> {
+        let rows = Shop::rows(pile, walletbook, market, shed, rack, kit, security, offers);
+        match rows.get(self.cursor)? {
+            Row::Sell(name) => economy::good_index(name),
+            _ => None,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn rows(
         pile: Option<&Stockpile>,
         walletbook: &Wallet,
@@ -408,6 +434,9 @@ fn order(offer: &Offer, walletbook: &mut Wallet, post: &mut MailContext) -> Stri
         depart,
         arrive,
         owner: Owner::Mail,
+        // Settled at the counter a moment ago. A mail order in the air is a
+        // parcel, not a trade.
+        paid: 0,
     });
     "ORDERED. WATCH THE SKY.".into()
 }
@@ -1069,6 +1098,7 @@ mod order_tests {
             depart: 0,
             arrive: 10_000,
             owner: Owner::Mail,
+            paid: 0,
         });
 
         // ...one more parcel exactly reaches the cap and is allowed...

@@ -106,6 +106,37 @@ impl Standing {
         }
     }
 
+    /// The band as one byte, for the wire.
+    ///
+    /// A standing shades what a counter pays, so it is a lever on the
+    /// simulation rather than a presentation detail — and since stage 58 a
+    /// sale is journalled, which means the band has to travel with it. The
+    /// replay has no reputation ledger of its own to ask, the same way it has
+    /// no wallet: this is the stated-muzzle rule from stage 45 applied to a
+    /// price.
+    pub fn as_byte(self) -> u8 {
+        match self {
+            Standing::Enemy => 0,
+            Standing::Cold => 1,
+            Standing::Neutral => 2,
+            Standing::Warm => 3,
+            Standing::Friend => 4,
+        }
+    }
+
+    /// And back. An unknown byte reads as `Neutral`, which is the band that
+    /// shades nothing — a damaged log sells at the board price rather than
+    /// refusing to replay.
+    pub fn from_byte(byte: u8) -> Standing {
+        match byte {
+            0 => Standing::Enemy,
+            1 => Standing::Cold,
+            3 => Standing::Warm,
+            4 => Standing::Friend,
+            _ => Standing::Neutral,
+        }
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Standing::Enemy => "ENEMY",

@@ -142,13 +142,14 @@ pub fn begin(directory: &Path, name: &str) -> std::io::Result<Writing> {
 /// the loads bind to locals named `rads`, `sightings`, `bath`, `eyes`, `press`,
 /// `rack`, `cabinet`, `holes` and `vaults`, and matching those to their files
 /// was, until now, a job for whoever was reading.
-pub const FILES: [(&str, &str); 40] = [
+pub const FILES: [(&str, &str); 41] = [
     ("log.dat", "journal"),
     ("explored.dat", "map"),
     ("player.dat", "skills"),
     ("wallet.dat", "wallet"),
     ("clock.dat", "clock"),
     ("economy.dat", "economy"),
+    ("masonry.dat", "masonry"),
     ("garage.dat", "garage"),
     ("postings.dat", "beacon"),
     ("homestead.dat", "homestead"),
@@ -265,6 +266,10 @@ pub fn worth_saving_now(command: &crate::journal::Command) -> bool {
         | Command::Spud { .. }
         | Command::Gift { .. }
         | Command::Salvage { .. }
+        // A counter emptied is an afternoon's haul turned into money, and the
+        // price moved for whoever sells next. Resenting doing that twice is
+        // the whole of this list.
+        | Command::Sell { .. }
         // Emptying the pack moves an afternoon's mining from your back into a
         // container. Doing that twice is exactly the kind of thing this list
         // is for.

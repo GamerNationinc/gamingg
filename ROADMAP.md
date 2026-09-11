@@ -134,6 +134,7 @@ Written down because they are easy to forget and expensive to get wrong.
 | 55 | `036e546` | The pack. Asked for the Minecraft thing — what you mine becomes a small block that pops into your inventory, with a visible count and a carrying limit you can later upgrade with an exoskeleton — and the honest starting point was that **there is no player inventory**, and never has been. Everything broken routed straight onto `Fleet::base`, a container standing somewhere else entirely, *and that pile was what the movement system weighed you down by*: the README's oldest rough edge, unchanged since stage 16. So the round mostly points a thing that already exists at the thing it was always describing. `pack.rs` is a `Stockpile` of the player's own plus the game's **third per-good table** (after `economy::BASE_PRICE` and `BlockDef::hardness`, and the first about mass): leaves 1, timber 4-7, stone 10 — the yardstick — copper 18, bars 25, uranium 30, with a drift test that fails if a block the registry knows has no weight. Capacity is `pack::UNIT` times the two curves that have existed since stage 25 and had only ever been applied to a number nobody could see, so a fresh pack is exactly sixty-four stone and nothing a player knows got smaller. Two thresholds, not one: free to three tenths, then the same `mass_from_byte` curve the game has always had, then a hard stop — and `pack::load_byte` is **one function called by both** `App::frame` and `Session`, killing the duplicated arithmetic that let the windowed game and the headless one drift. `drops.rs` is what a limit needs in order not to be a punishment: a full pack does not refuse the swing and does not eat the block, it lets what came out lie in the cell it came from — settled onto the first floor under it, so a ceiling block is not left hanging at head height — drawn in the good's own tile like `arsenal::Crash` has been drawn since stage 13, collected by walking near, and saved to `drops.dat` because a drop you deliberately left is exactly what stage 54 spent a round refusing to lose. **The oracle got stricter, and it caught two of its own.** `Command::Break`'s replay arm broke the block and banked *nothing* — from stage 6 to here, replay's pile was short every hand-cut rock, hidden because the load byte is re-installed off the wire rather than re-derived, and load-bearing because that pile is what the fleet's fuel burns out of. Teaching it `drill::deposit` needed the pack size, which replay cannot know (the counter and the fabricator are both live-only), so `Command::Carry` (tag 31) states it when it changes — a capability re-installed, the same bargain the `Move` load byte struck in stage 10b — and `Command::Stow` (tag 30) is **payload-free**, replay re-deriving the manifest from its own pack rather than trusting a number in a file. Writing that test found the second: `Command::Place` of a container never *declared the base*, so every replayed `Stow` and every replayed delivery tipped into nowhere. Journal `VERSION` 32. `wallet::EXO` is the eighth line, at the counter and appended to the fabricator's catalogue rather than filed by difficulty — `Command::Print` records a recipe by its **index**, so a row slotted into the middle silently re-points every print order in every log ever written. And the search for somewhere to put the count found a live panic: the HUD has fifteen conditional rows and room for ten, `font::draw_text` clips and `draw_bar` did **not**, so six optional rows plus the drill trigger indexed past the end of an 82,720-byte buffer. Verified red first, then guarded. The count went on a panel (`I`, slot 20) and in a line on every swing instead |
 | 56 | `451f53f` | The spoil heap. Asked for the last of the three rounds the drill-mod note named: *"it makes more logical sense to move blocks with the drone e.g. a rubble pile beside the mine — let's have different variations of stacking the blocks like square base pyramid, spiral tower or straight shaft."* The board had been calling this the expensive one for three stages on the grounds that **nothing in `vx-agent` can place a block** — "not a missing function, a missing concept" — and that was exactly half right. `vx_world::place_block` already did the occupancy check, the standing-there check and the cancellable `BlockPlaceEvent` a mod can veto; it just took a `&RayHit`, because until now the only thing that ever placed a block was a player pointing at one. Splitting `place_at` out of it left all 314 world tests passing untouched, and gave the permit gate to the heap for free at the *block* rather than only at the order. `heap.rs` sits beside `mine.rs` and is the same problem with the sign flipped: three shapes, and **`cells` in strictly bottom-up order, which is the whole safety argument** — a drone placing in that order is never asked to stand on air and never has to reach above a cell that is not there yet, so "can a machine reach the top of a pile it is itself building" is a property of the plan and therefore a test rather than a hope. Each column starts from **its own** `surface_y`, not the footprint's: taking the highest ground under the whole footprint buried the high side inside the hill and left the low side hanging. `PLACE_OFFSETS` is `REACH_OFFSETS`' mirror — same seventeen cells, opposite order, because the reason cutting works top-down is the reason stacking works bottom-up — and `JobKind::Stack` carries **no material**, so a heap is made of the actual mixed stone and dirt that came out of the actual hole. **The oracle test was the round**, and it found three bugs that had nothing to do with shapes. `post_heap` priced courses `-1_000 - (courses - step)`, which *rises* with height, so the board handed out the apex first and a drone was sent seven blocks up to a cell with nothing under it, found no station, and carried its load home for ever. `Session::dispatch_using` **never wrote `Command::Dispatch` down** — `App::start_mining` has since stage 9 — so every replay of a crew was replaying a journal with no crew in it and re-derived untouched ground; and `Session::fuel_the_fleet` conjured canisters onto the pile instead of banking them through the electrolyser's existing order, so the replayed crew stood on a dry tank. Two of the three were invisible until an order asked a *crew* to change the ground and then checked the log, which is the first thing this stage did. Then the played run found a fourth: order a heap after the dig is finished and every block of spoil is already in town, so the crew has nothing to build with — the yard now hands rock back, and "not ore" turned out to be the wrong rule for a pile that also holds the fleet's **fuel**. `Command::Heap` (tag 32), journal `VERSION` 33, `dig.dat` 3, key `B`, a `HEAP` verb, and a heap that is *installed* on replay rather than searched for the way a dispatch's method is |
 | 57 | `843a8c9` | The drone you can lose. Task #221, on the board since stage 49 split in two, and the roadmap stated the gap in one line: **a machine cannot collide with anything, so it cannot crash.** From stage 10a to here `garage.rs` had `grant` and no opposite, and `wear.rs` modelled a machine grinding down to `Seized` and then stopping it for ever, recoverably, for two spare parts — so every machine a player ever bought was permanent. A fleet you cannot lose is not capital. `integrity.rs` sits beside `wear.rs` and is deliberately its shape: the same `wear::key` so a machine cannot be one thing to one ledger and another to the other, four graded states, a bench repair, and a tolerant `integrity.dat`. Four ways to die, and **three of them were nearly free** because the vocabulary already existed: a falling trunk has drawn a `Sweep` since stage 36 and `main.rs` already ran it against the posse, the garrisons, the stalker and the player's own box, so gunfire and getting flattened are the same three lines and one shared hull test; and a shot-down caravan has left an `arsenal::Crash` on the ground since stage 13, which is what a wreck is with a longer life and a verb on it. The fourth is the crash proper: `Flier::pilot_step` enforced the *autonomous* rule — never enter a column below its safe altitude, climb instead — under manual control as well, and that single line is why a machine could not be flown into a hillside. It is off for a hand-flown machine and untouched for one flying itself, with a test on each half, and the dive it reports is charged quadratically so a scrape is a scratch and a four-block dive is most of a hull. **The expensive part was indices.** `MachineRef::Digger(i)` is a vector position and 127 sites index those vectors; the wear ledger, the roster, the route caches and `Operation::controlled` are all keyed on it, so `drones.remove(index)` would hand machine three's history to machine two. A lost machine leaves a **tombstone** — `DroneState::Lost` (byte 7, `Stacking` took 6) and `FlierState::Lost` — and the tick steps over it exactly as it already stepped over a piloted one. **No new journal tag and no `VERSION` bump**: every way a machine dies is a consequence of `Pilot`, `Fire` or `Advance`, all already recorded, and salvage reuses `Command::Salvage`, whose own doc has said "a haul derived from a position" since stage 19. Two real bugs on the way: the hit test reached for `machine_eye`, which interpolates by the frame accumulator and adds a *drawn* gimbal — presentation used as a lever, exactly what stage 53's own test was written against — so the replay killed the machine a cell from where the session did and the salvage order then carved air out of the wrong place; and replay's `Advance` arm **dropped shot and fall sweeps** on the honest argument that craters are the part the hash checks, which stopped being true the moment a sweep could destroy a machine that would otherwise keep cutting. `wrecks.dat` (`VXWK`), `integrity.dat` (`VXIT`), `keeping::FILES` 38 → 40, tile 68 for the scorched skin, key `K`, a `WRECK` verb, and `garage::lose` — the first mutator this game has ever had that subtracts |
+| 58 | `_this_` | The towns that grow, and the money that moves between them. Asked to *"work the economy — real towns that grow in size based on economy, and local towns that buy and trade with each other."* Both halves were half-built since 9b and both stopped in the same place. The network moved goods and **nobody paid for them**: `Market::till` moved for exactly one reason, `TILL_REFILL` ticking up against how full the shelves were, so a town on a busy corner of the map and a town nobody shipped to ended up with the same money — and `dispatch` placed **one** load a window across the entire frontier, which is a map with freight drawn on it rather than a network. And a town's size was fixed at worldgen: `core_half` is one of three values assigned by a hash, it feeds the *terrain plateau* through `blend_height`, so it feeds the world hash and cannot move at runtime. The buyer now draws `price x amount` from its own till at dispatch and the seller takes it — a town that cannot cover a load does not order one, so a poor town stays short, its prices stay high, and the first thing it can afford is the thing it needs most — up to four loads a window, never twice from one source. `Market` gains what it has **earned selling on for its life**, deliberately not the same number as the till, because a till is spent and a place that is doing well is a place money moves *through*; crossing `GROWTH_AT` puts a building up, and a ratchet, so a town that has a good decade and then a bad year keeps what it built. **The buildings are edits, not worldgen.** `stamp` lays down the authored plan and nothing else and is pure in `(seed, pos, sites)`, which is what lets `save.rs` write only modified chunks and is what the world hash is a hash *of*; a growth shed reaches the world the way a founded town's chunks do — blocks written into loaded chunks, which mark themselves modified and save. Which means it has to be **deferred**: `masonry.dat` records what is *standing*, which is not the same number as what a town has *earned*, and a town three thousand blocks out grows on its books and builds when you arrive. Two real holes had to close at once. `Economy::run` had exactly one caller, `main.rs`, so a headless `Session` had **never run the freight network** and no test had watched it end to end; and selling had never been written down, which was harmless for eight stages and stopped being harmless the moment a town's books could move a block — `Command::Sell` (tag 33), journal `VERSION` 34, with the reputation band stated on the wire for the same reason a shot's muzzle is. Two bugs found by the oracle, both about *when*: `CommandLog` coalesces consecutive `Advance`s, so a whole afternoon arrived as one order and the crew dug through ground a town had already built on — merging now stops at a dispatch window; and `Session::run_the_network` read `journal.tick()`, which is already at the far end of the order before the loop that works through it has started. `economy.dat` 6, `keeping::FILES` 40 -> 41, `Role::Works`, three pockets of bare plateau inside even the smallest core, and `books_hash` over the money as well as the goods |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -3895,6 +3896,142 @@ whatever `integrity::impact` charged for the dive. On the shipped seed: cruise
 at 90, down at y 78 with six spare parts aboard, stripped into the pack, and
 the roster down to nothing.
 
+## Shipped — Stage 58: the towns that grow
+
+The ask: *work the economy — real towns that grow in size based on economy, and
+local towns that buy and trade with each other.*
+
+Both halves were half-built since stage 9b, and both stopped in the same place.
+
+**Trade between towns existed and no money changed hands.** `Economy::dispatch`
+found the biggest surplus in radio range, found the nearest town short of that
+good, withdrew a `LOAD` and put it in the air; `settle` deposited it at the far
+end. Nobody paid. `Market::till` moved for exactly one reason — `TILL_REFILL`
+ticking up against how full the shelves were — so a town on a busy corner of
+the network and a town nobody ever shipped to ended up with the same money,
+which meant the till said nothing about how a place was doing and there was
+nothing for growth to be measured against. Worse, `dispatch` placed **one**
+load per window across the whole frontier, so a dozen towns in range produced
+one wagon every four in-game minutes. That is a map with freight drawn on it
+rather than a network.
+
+**And a town's size was fixed at worldgen.** `TownSite::core_half` is one of
+three values assigned by a hash, and it feeds the *terrain plateau* through
+`blend_height` — so it feeds the world hash and cannot move at runtime.
+`plan_for(site)` returned one of four `&'static [Blueprint]` lists by
+speciality, and that was the whole town, for ever, however rich it got.
+
+### The buyer pays, and it changes the shape of the game
+
+The destination now draws `price × amount` from its own till at dispatch and
+the source takes it, through `Market::affords` and `Market::draw` — which
+already existed and were used only by the player's counter. A town that cannot
+cover a load **does not order one**. That one rule is the whole reason the till
+is worth having: a poor town stays short, its prices stay high, and the first
+load it can afford is the one it needs most. Up to four loads a window now, and
+never twice out of the same source, so one glutted mine cannot take every run
+while the rest of the frontier sits still.
+
+Only `Owner::Town` pays. A player's load and a mail order were settled at a
+counter before they were ever in the air, and charging for them here would be
+the same goods paid for twice.
+
+### Prosperity is a ratchet, and it is not the till
+
+`Market` gains what it has **earned selling on, for its whole life** —
+deliberately a different number from the till, because a till is spent and a
+place that is doing well is a place money moves *through* rather than piles up
+in. A town pinned at `TILL_CAP` would otherwise read as one that had stopped
+trading. Crossing each entry of `GROWTH_AT` puts a building up; going broke
+afterwards keeps them, because the measure is lifetime earnings and nothing
+ever has to be un-built. And growth pays for itself: `step_market`'s extraction
+and conversion terms scale with it, so a mine grows into more of a mine rather
+than every town growing into the same thing.
+
+All of it goes **inside `step_market`**, which is quantised, so the two
+invariants the whole module is arranged around keep holding — "catching up in
+one go matches catching up in pieces" and "the network is the same however
+often it is run" — and both got a growth assertion bolted on rather than a new
+test beside them.
+
+### The buildings are edits, not worldgen
+
+`stamp` lays down a town's authored plan and nothing else, and it is pure in
+`(seed, chunk position, sites)`. That purity is what lets `save.rs` write only
+modified chunks, and it is what the world hash is a hash *of*. A town that grew
+by changing what worldgen produced would break both: every chunk generated
+before the town got rich would hold the old town, and the terrain under a
+bigger plan would have to be levelled differently, which moves `core_half`,
+which moves the plateau, which moves the hash.
+
+So a growth shed reaches the world the way a founded town's chunks do and the
+way anything the player builds does — blocks written into loaded chunks, which
+mark themselves modified and save. `World::raise` was the wrong tool and says
+so in its own doc: *"the plot is levelled, and that means anything dug on it is
+filled"*, which is fine once at founding and intolerable every four minutes.
+
+Which means it has to be **deferred**. `masonry.dat` records how many steps
+each town has had *stamped*, which is deliberately not the same number as its
+`Market::growth`: a town three thousand blocks out grows on its books wherever
+it is, and the sheds go up the next time somebody is near enough for there to
+be somewhere to put them. That gap is the level of detail, the same rule the
+freight network already followed with its `reachable` list, and the `TOWN` verb
+names it rather than hiding it.
+
+Three pockets of bare plateau, `plan::POCKETS`, all within eleven blocks of the
+centre — because the fort's curtain is a *polar radius*, so a pocket out at the
+corner of the core square would be inside the square and straight through the
+wall. `Role::Works` carries no lockbox: the streets claim already covers the
+ground a town builds on, so `permits.rs` needed nothing at all.
+
+### Two holes that had to close at once
+
+`Economy::run` had exactly one caller — `main.rs` — so a headless `Session` had
+**never run the freight network**, which is why no test had ever watched it end
+to end and the replay oracle had no opinion about the books. And **selling had
+never been written down**: there is no `Command::Sell`, so the live books and
+the replayed books drifted apart at every counter. That was harmless for eight
+stages, for exactly one reason — a town's books could not move a block. They
+can now, so both closed together: `Command::Sell` is tag 33 and journal
+`VERSION` 34, carrying the reputation band on the wire for the same reason a
+shot's muzzle has been carried since 45 (it shades the unit rate, so it is a
+lever on the simulation and the replay has no reputation ledger of its own to
+ask), and `masonry::tick_the_network` is the one copy of the tick that the
+live game, a played session and the replay all run.
+
+### Both bugs the oracle found were about *when*
+
+`CommandLog::record` folds consecutive `Advance` orders into one, which has
+been a pure win since stage 9b because `mining.advance` is splittable. It
+stopped being a pure win the moment something *else* in the tick started
+editing the same ground: a whole afternoon arrived at the replay as one order,
+`mining.advance` was handed all of it at once, and the crew dug through ground
+the live game had watched a town build on halfway through. Demonstrated at two
+hashes over the same orders. Merging now stops at a dispatch-window boundary —
+one extra entry every four in-game minutes, against a journal that carries
+thousands.
+
+And `Session::run_the_network` read `journal.tick()`, which is already at the
+**far end** of the order before the loop that works through it has started, so
+a played session ran the network once at the end of a long advance while the
+replay ran it at every window it crossed. The session counts its own ticks now,
+exactly as the replay counts its.
+
+### Played
+
+`--grow` runs one session in three beats and photographs the same square of the
+same town each time: the plaza on arrival, the plaza after the first threshold,
+and the plaza at growth two. Nothing is placed for the camera — the crew cuts,
+the counter sells, the network trades on its own windows, and the books cross
+`GROWTH_AT` on their own. On the shipped seed STONEHAVEN went 0 → 14 670 →
+22 950 credits earned, growth 0 → 1 → 2, with the warehouse landing on the east
+pocket and the loading yard on the west.
+
+`economy.dat` 6, `keeping::FILES` 40 → 41, and `books_hash` now covers the
+money as well as the goods — a network where the goods land in the same places
+but the credits do not is a network that has diverged, and a hash over stock
+alone would have called it identical.
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -4277,12 +4414,18 @@ that the ray which would have drawn one was already being cast twice a frame
 and thrown away both times.
 
 Both rounds are shipped now: 55 the pack, and 56 the spoil heap — the last of
-what 53's note asked for.
+what 53's note asked for. Then 57 gave the fleet an end, and 58 took the ask to
+*work the economy* and found that the network had been moving goods for eight
+stages without anybody paying for them, that a town's size was a worldgen
+constant it could never outgrow, and that a headless session had never run the
+freight network at all. Next is the city.
 
 | Stage | What | Why here |
 |---|---|---|
 | ~~55~~ | ~~The pack~~ — **shipped** | Blocks that pop to you as drops, a real player inventory with visible counts, and a carrying weight that **slows you first and hard-stops you second**, upgradeable by an exoskeleton. It is also the fix for the oldest rough edge in the README: the movement system weighs you down by a pile sitting in a container somewhere else entirely. The `load` byte already rides the journal and replay never re-derives it, so repointing it at a real pack costs nothing on the wire |
 | ~~56~~ | ~~The spoil heap~~ — **shipped** | You mark a spot, pick a shape — square-base pyramid, spiral tower, straight shaft — and the crew hauls spoil there and stacks it, reusing the mark / choose-a-method / dispatch flow and the job board. The expensive one, and honestly so: **nothing in `vx-agent` can place a block.** Not a missing function, a missing concept — `JobKind` has two behaviourless variants, a `Job` carries only a region with nowhere to say *what to put there*, `DroneState` has no build state, and `REACH_OFFSETS` is shaped entirely by the rules of cutting. Stacked blocks are ground and ground is the hash, so it is a journal order and `VERSION` 33 — 32 went to the pack |
+| ~~58~~ | ~~The towns that grow~~ — **shipped** | Real towns that grow in size on the strength of their economy, and local towns that buy and trade with each other. The buyer pays out of its own till, four loads a window, and what a town earns selling on is a ratchet that puts buildings up. The buildings are **edits**, not worldgen, so the terrain and the world hash do not move — and they are deferred, so a town grows wherever it is and builds when you arrive |
+| 59 | The Ruined City | One city per seed, at a fixed place, on the map from the first frame — not discovered, not founded, not on the lattice. Modern plate and light retrofitted into the ruins of an ancient giant star fort, which `fort.rs` already authors traces and ruins of. **Citizenship costs 10 000 credits, once, for ever**, and buys three things and only three: passage through the gate at all, the use of the Outpost counter with its rocket, and safe-zone protection inside the walls — never a price advantage anywhere, because the city is a place you earn your way into rather than a permanent discount card. The Outpost is deliberately Rust's: a walled compound you cannot fight in, one counter, and a till and a stock ceiling far above `TILL_CAP` and `CAPACITY`, because it is not a frontier town, it is the terminal. Everything sold there leaves by rocket for an orbital station — flavour, and the honest kind: the launch is the animation, the station is the name on the manifest, and neither simulates anything. It lands after 58 because it needs prices that mean something, tills that move, and a freight network worth being the hub of |
 | ~~49b~~ | ~~The drone you can lose~~ — **shipped as 57** | A machine cannot collide with anything, so it cannot crash. Integrity beside `wear.rs` and on the oracle for the same reason wear is; the flier's auto-climb off under manual control so it can be flown into a cliff, while the digger keeps the standability rule that stops a hand-driven drone stranding itself; gunfire through `segment_hits_box`; a persistent, mapped wreck you walk out to and salvage or rebuild; and `garage.rs`'s first `lose` mutator, since `grant` only ever added |
 
 Beyond those the board holds the outstanding engineering below, and whatever
@@ -4290,7 +4433,7 @@ the next note says.
 
 ## The feature map
 
-The whole game at a glance, as of stage 57.
+The whole game at a glance, as of stage 58.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -4519,18 +4662,21 @@ as the standing fallback.
 real min-cost flow for freight; ammunition as a trade good; the rest of the
 weapon table; the kestrel's
 cell state surviving a reload; anything that hacks *you* (the hardened link
-has no adversary until factions); **selling on the journal** — there is no
-`Command::Sell`, so the wallet, the pile's contents and the market sit outside
-the replayed hash and `--replay` cannot see wealth (found while building the
-played session in 48, and named there rather than smuggled into it).
+has no adversary until factions); the fleet itself on the wire, which is the
+last thing a played session buys that a replay cannot (`SpawnMachine`'s replay
+arm is a no-op, named in 57); and **more people in a bigger town** — growth
+adds buildings and capacity but not residents, because `people::PEOPLE` is a
+constant `ballot.rs`, `disposition.rs` and `villagers.rs` all count on, and
+making population per-town is its own round. **Selling on the journal closed in
+58** — `Command::Sell`, tag 33 — because a town's books can move a block now
+and a drifting till is a drifting world hash.
 
 ## Known rough edges
 
 Tracked in `README.md` under "Known rough edges" — currently ~28 entries, the
 notable ones being: saves store a whole chunk snapshot per modified chunk;
 water is alpha-blended without depth sorting; only one drone and one flier are
-ever created; selling is not on the journal, so a session replays to the same
-ground but not to the same books; the played session steers rather than paths,
+ever created; the played session steers rather than paths,
 so a route with a doorway in it needs the doorway named; a save costs about
 six milliseconds, which is most of a frame at sixty, so an autosave is a small
 visible hitch and threading it is its own round; a region damaged *in place* by

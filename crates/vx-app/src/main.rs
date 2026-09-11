@@ -30,6 +30,7 @@
 //! | Skills | `player.dat` |
 //! | The command journal (the replay oracle) | `log.dat` |
 //! | Town books, shipments and tills | `economy.dat` |
+//! | Which sheds a prospering town has actually put up | `masonry.dat` |
 //! | Machines owned | `garage.dat` |
 //! | The fleet's base pile, and goods held after a container broke | `pile.dat` |
 //! | The running dispatch: crew, board, claims, cargo | `dig.dat` |
@@ -131,6 +132,7 @@ mod intrusion;
 mod journal;
 mod keeping;
 mod map;
+mod masonry;
 mod mining;
 mod people;
 mod pack;
@@ -348,6 +350,9 @@ struct Options {
     /// The drone you can lose: a machine flown into a hillside, the hulk it
     /// leaves, and the walk out to strip it.
     wreck: bool,
+    /// The town that grows: a square before, the shed going up, and the same
+    /// square after a season of trade.
+    grow: bool,
     /// Durability: save, snapshot, tear, fall back — and the first timings
     /// this game has ever taken of its own save.
     keeping: bool,
@@ -451,6 +456,7 @@ fn parse_args() -> Result<Options, String> {
         pack: false,
         heap: false,
         wreck: false,
+        grow: false,
         keeping: false,
         terminal: false,
         people: false,
@@ -563,6 +569,7 @@ fn parse_args() -> Result<Options, String> {
             "--pack" => options.pack = true,
             "--heap" => options.heap = true,
             "--wreck" => options.wreck = true,
+            "--grow" => options.grow = true,
             "--keeping" => options.keeping = true,
             "--payroll" => options.payroll = true,
             "--terminal" => options.terminal = true,
@@ -688,6 +695,7 @@ fn parse_args() -> Result<Options, String> {
                      --storm             rain over the country with the sky down\n  \
                      --season <name>     spring, summer, autumn or winter\n  \
                      --town              the beacon console, with who runs the place\n  \
+                     --grow              a town's square before and after it prospers\n  \
                      --warrant           the same console with a warrant standing\n  \
                      --ballot            the console's voting page, with a poll due\n  \
                      --elected           the voting page of a town that elected you\n  \
@@ -1024,6 +1032,12 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     // leaves behind, and the walk out to strip it.
     if options.wreck {
         return photograph_the_wreck(&context, &mut renderer, &mut camera, options, path);
+    }
+
+    // The town that grows: a square before, and the same square after the
+    // frontier has traded its way into new buildings.
+    if options.grow {
+        return photograph_the_growth(&context, &mut renderer, &mut camera, options, path);
     }
 
     // Durability: a save torn on purpose, and the world coming back from the
@@ -5857,6 +5871,141 @@ fn open_ground(
 /// end to end, from `heap::plan` through the job board to the ground.
 ///
 /// Writes one image per shape beside `path`.
+/// A town growing on the strength of its own trade, photographed.
+///
+/// Three beats over one session, so the "before" and the "after" are the same
+/// square of the same town rather than two different towns: the plaza on the
+/// day you arrive, the plaza once the frontier has traded its way through the
+/// first growth threshold, and the plaza again at the top of the table.
+///
+/// Nothing is conjured for the camera. The session sells a load over the
+/// counter, the network runs on its own dispatch windows, the books cross
+/// `GROWTH_AT`, and `masonry` puts the sheds up out of blocks — which is the
+/// whole claim of the round, made where it can be looked at.
+fn photograph_the_growth(
+    context: &GpuContext,
+    renderer: &mut Renderer,
+    camera: &mut Camera,
+    options: &Options,
+    path: &str,
+) -> Result<(), String> {
+    let stem = path.strip_suffix(".ppm").unwrap_or(path);
+
+    let mut session = session::Session::open(options.seed);
+    let home = session.home();
+    let chest = vx_world::town::chest_position(&home);
+    let base = vx_core::BlockPos::new(chest.x, chest.y, chest.z);
+    session.place_base(base);
+    session.fuel_the_fleet(160);
+    session.wallet.earn(5_000);
+    if !session.buy(garage::DRONE) {
+        return Err("could not afford a drone".to_string());
+    }
+
+    // A face under the ground beside the house, so there is something to sell
+    // and the town has a reason to be trading with anybody.
+    let face = vx_agent::VoxelAabb::new(
+        vx_core::BlockPos::new(base.x + 4, base.y - 10, base.z + 4),
+        vx_core::BlockPos::new(base.x + 12, base.y - 2, base.z + 12),
+    );
+    session
+        .dispatch_using(face, vx_agent::MineMethod::Decline)
+        .ok_or("the crew never took the plan")?;
+
+    // The three pockets a town builds into, framed together: they sit at
+    // `plan::POCKETS`, either side of the paving cross and just north of the
+    // supply shed, so the middle of them is a couple of blocks west and south
+    // of the town centre.
+    //
+    // From the south-east and well up, because that is the one bearing with
+    // nothing tall on it — the radio tower is due north of the square and the
+    // bank is north-east, and the first framing of this fixture photographed
+    // both of them instead of the sheds.
+    let middle = glam::DVec3::new(
+        f64::from(home.centre.0) - 3.0,
+        f64::from(home.ground) + 1.0,
+        f64::from(home.centre.1) - 2.0,
+    );
+    let stand = middle + glam::DVec3::new(22.0, 17.0, 20.0);
+
+    // Beat, ticks of trade to run before it, and what the caption is about.
+    let beats: [(&str, u32); 3] = [
+        ("before", 0),
+        ("first-shed", 8 * 900),
+        ("grown", 8 * 2_600),
+    ];
+
+    for (shot, (name, ticks)) in beats.iter().enumerate() {
+        if *ticks > 0 {
+            session.work(*ticks);
+            // Sell what the crew lifted: the player's own trade is part of
+            // what moves the town's books, and a counter that never opens is
+            // a town trading with nobody but its neighbours.
+            session.sell_everything();
+            // And a little longer, so the dispatch window after the sale
+            // actually turns: a town's books cross a threshold the moment the
+            // counter closes, and the shed goes up at the next window. The
+            // gap between the two is real and the `TOWN` verb names it, but a
+            // photograph of a pending building is a photograph of nothing.
+            session.work(8 * 300);
+        }
+
+        let now = session.journal.tick();
+        let earned = session.economy.market(&home, now).trade();
+        let grown = session.economy.market(&home, now).growth();
+        let standing = session.masonry.built(home.centre);
+        let neighbours: u64 = session
+            .world
+            .towns_near(home.centre, RADIO_RANGE)
+            .iter()
+            .map(|site| u64::from(session.masonry.built(site.centre)))
+            .sum();
+        println!(
+            "  {name}: {} earned {earned} CR, grown {grown} of {}, {standing} standing \
+             ({neighbours} on the frontier), {} loads in the air",
+            home.name,
+            economy::MAX_GROWTH,
+            session.economy.shipments().len()
+        );
+
+        let here = vx_core::BlockPos::new(
+            middle.x.floor() as i32,
+            middle.y.floor() as i32,
+            middle.z.floor() as i32,
+        )
+        .chunk();
+        session.world.load_around(here, 4);
+        let dropped: Vec<vx_core::ChunkPos> = session
+            .world
+            .loaded_chunks()
+            .filter(|pos| (pos.x - here.x).abs() > 5 || (pos.z - here.z).abs() > 5)
+            .collect();
+        for pos in dropped {
+            renderer.remove_chunk(pos);
+        }
+        session.world.unload_beyond(here, 5);
+        remesh_all(context, renderer, &mut session.world);
+
+        camera.position = stand;
+        look_at(camera, middle);
+        renderer.update_camera(&context.queue, camera);
+
+        let origin = renderer.render_origin().as_dvec3();
+        let objects: Vec<vx_render::Object> = session
+            .mining
+            .objects(|at: glam::DVec3| (at - origin).as_vec3(), None);
+        renderer.set_objects(&context.device, &context.queue, &objects);
+
+        let out = format!("{stem}-{:02}-{name}.ppm", shot + 1);
+        capture_frame(context, renderer, options.width, options.height)
+            .write_ppm(&out)
+            .map_err(|error| format!("could not write {out}: {error}"))?;
+        println!("  shot {}: {name} -> {out}", shot + 1);
+    }
+
+    Ok(())
+}
+
 fn photograph_the_heap(
     context: &GpuContext,
     renderer: &mut Renderer,
@@ -6964,6 +7113,10 @@ struct Active {
     journal: CommandLog,
     /// Town markets: what each place holds, makes and charges.
     economy: economy::Economy,
+    /// Which sheds each prospering town has actually had put up. See
+    /// `masonry.rs`: the books say what a town has earned, this says what is
+    /// standing, and the two are deliberately different numbers.
+    masonry: masonry::Masonry,
     /// The machines the player actually owns.
     garage: garage::Garage,
     /// The house: the chest, the mailbox, and what they hold.
@@ -7705,27 +7858,40 @@ impl App {
             }
         }
 
-        // The towns do business. Once a dispatch window, not once a frame:
-        // the network only looks for work every four in-game minutes, and the
-        // one real cost here is gathering who is within radio range.
+        // The towns do business, and build what they have earned. Once a
+        // dispatch window, not once a frame: the network only looks for work
+        // every four in-game minutes, and the one real cost here is gathering
+        // who is within radio range.
+        //
+        // Through the same function a played session and the replay both
+        // call, so what the books do and what the sheds do is decided in one
+        // place. Everything below is the *window dressing* — a toast, a
+        // mailbox, a credit — which is the half a headless session has no use
+        // for.
         let now = active.journal.tick();
-        let window = now / economy::DISPATCH_EVERY;
-        if window != active.last_network {
-            active.last_network = window;
-            let column = (
-                active.player.position.x.floor() as i32,
-                active.player.position.z.floor() as i32,
-            );
+        let column = (
+            active.player.position.x.floor() as i32,
+            active.player.position.z.floor() as i32,
+        );
+        let landed = masonry::tick_the_network(
+            &mut active.economy,
+            &mut active.masonry,
+            &mut active.world,
+            &mut active.last_network,
+            column,
+            now,
+        );
+        if !landed.is_empty() {
             let reachable = active.world.towns_near(column, RADIO_RANGE);
-            for landed in active.economy.run(&reachable, now) {
+            for load in landed {
                 // Mail lands whether or not the player is anywhere near home:
                 // nothing about it needs the destination market, so it must
                 // run before the radio-range guard below.
-                if landed.owner == economy::Owner::Mail {
+                if load.owner == economy::Owner::Mail {
                     active
                         .homestead
                         .mailbox
-                        .add(economy::GOODS[landed.good], landed.amount.round() as u64);
+                        .add(economy::GOODS[load.good], load.amount.round() as u64);
                     active.greeting = Some((
                         "MAIL FOR YOU. CHECK THE MAILBOX AT HOME".into(),
                         Instant::now(),
@@ -7734,16 +7900,16 @@ impl App {
                 }
                 // A load of the player's that has arrived: paid at the far
                 // town's price, which is the whole reason to have sent it.
-                let Some(site) = reachable.iter().find(|site| site.centre == landed.to) else {
+                let Some(site) = reachable.iter().find(|site| site.centre == load.to) else {
                     continue;
                 };
-                let paid = landed.amount.round() as u64
-                    * active.economy.market(site, now).price(landed.good);
+                let paid = load.amount.round() as u64
+                    * active.economy.market(site, now).price(load.good);
                 active.wallet.earn(paid);
                 active.greeting = Some((
                     format!(
                         "{} DELIVERED AT {}. +{paid} CR",
-                        shop::display_name(economy::GOODS[landed.good]),
+                        shop::display_name(economy::GOODS[load.good]),
                         site.name
                     ),
                     Instant::now(),
@@ -9611,6 +9777,45 @@ impl App {
                     ["ONE", "TWO", "THREE", "FOUR", "FIVE", "SIX", "SEVEN"]
                         [schedule::market_weekday(&site) as usize % 7]
                 ));
+                // What the place is worth to itself, and what it has built
+                // with it. The gap between the two is a town that has earned
+                // a shed and is waiting for somebody to be standing near
+                // enough for it to go up — see `masonry.rs`.
+                {
+                    let books = active.economy.market(&site, tick);
+                    let (earned, grown) = (books.trade(), books.growth());
+                    let standing = active.masonry.built(site.centre);
+                    lines.push(format!(
+                        "TRADE    {earned} CR EARNED - GROWTH {grown} OF {}{}",
+                        economy::MAX_GROWTH,
+                        if standing < grown { " (ONE PENDING)" } else { "" }
+                    ));
+                }
+                // And the freight in the air on this town's account, with
+                // what was paid for it.
+                let freight: Vec<String> = active
+                    .economy
+                    .shipments()
+                    .iter()
+                    .filter(|load| load.from == site.centre || load.to == site.centre)
+                    .take(4)
+                    .map(|load| {
+                        let (way, other) = if load.from == site.centre {
+                            ("OUT TO", load.to)
+                        } else {
+                            ("IN FROM", load.from)
+                        };
+                        format!(
+                            "FREIGHT  {} {} {} {} - {} CR",
+                            shop::display_name(economy::GOODS[load.good]),
+                            way,
+                            other.0,
+                            other.1,
+                            load.paid
+                        )
+                    })
+                    .collect();
+                lines.extend(freight);
                 for (index, person) in people::roster(&site).iter().enumerate() {
                     let place = schedule::where_is(&site, index, day, active.clock, false);
                     lines.push(format!(
@@ -12489,6 +12694,7 @@ impl App {
                     active.shop.move_cursor(delta, rows);
                 }
                 KeyCode::Enter | KeyCode::NumpadEnter => {
+                    let held_before = active.mining.fleet.held();
                     let pile = active
                         .mining
                         .fleet
@@ -12509,6 +12715,20 @@ impl App {
                         now,
                     };
                     let compact_before = active.wallet.credits();
+                    // Which good the cursor is over, before the sale moves the
+                    // shelf out from under it — `Row::Sell` rows come first,
+                    // so the row under the cursor is what the Enter key is
+                    // about to sell. Journalled below, if it sells anything.
+                    let selling = active.shop.selected_good(
+                        pile.as_deref(),
+                        &active.wallet,
+                        &market,
+                        &active.garage,
+                        &active.arsenal,
+                        &active.intrusion,
+                        security,
+                        &offers,
+                    );
                     // A town with paper out on you will not deal with you.
                     let closed = active.warrants.pending_in(site.centre);
                     active.shop.confirm(
@@ -12525,6 +12745,18 @@ impl App {
                         !closed,
                     );
                     *active.economy.market_mut(&site, now) = market;
+                    // On the wire, and only if it actually sold: a sale moves
+                    // a town's books, and since stage 58 a town's books move
+                    // blocks. See `Command::Sell`.
+                    if let Some(good) = selling {
+                        if active.mining.fleet.held() != held_before {
+                            active.journal.record(journal::Command::Sell {
+                                town: site.centre,
+                                good: good as u32,
+                                standing: active.reputation.compact().as_byte(),
+                            });
+                        }
+                    }
                     // Honest trade is how a county comes to know you: a
                     // trickle per sale, seasons to matter.
                     if active.wallet.credits() > compact_before {
@@ -15028,6 +15260,13 @@ impl App {
                 failed.push("the town books");
             }
         }
+        match active.masonry.save(save.root()) {
+            Ok(()) => log::info!("saved what {} towns have built", active.masonry.towns()),
+            Err(error) => {
+                log::error!("could not save what the towns have built: {error}");
+                failed.push("what the towns have built");
+            }
+        }
 
         // Last, and only last: the stamp that makes the thirty-six files one
         // save. A crash before this leaves a generation that never happened
@@ -15339,6 +15578,7 @@ impl ApplicationHandler for App {
             aspect: size.width as f32 / size.height.max(1) as f32,
             ..Camera::default()
         };
+        let mut masonry = masonry::Masonry::new();
         renderer.update_camera(&context.queue, &camera);
 
         let mut map = MapState::new();
@@ -15384,6 +15624,7 @@ impl ApplicationHandler for App {
             ledger.load(save.root());
             journal = CommandLog::load(save.root());
             economy.load(save.root());
+            masonry.load(save.root());
             garage.load(save.root());
             homestead.load(save.root());
             town_permits.load(save.root());
@@ -15593,6 +15834,7 @@ impl ApplicationHandler for App {
             ledger,
             journal,
             economy,
+            masonry,
             garage,
             homestead,
             home_panel: homestead::HomePanel::default(),

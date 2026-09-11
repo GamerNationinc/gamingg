@@ -117,6 +117,15 @@ pub struct Session {
     pub wallet: Wallet,
     pub skills: Skills,
     pub economy: Economy,
+    /// Which sheds each prospering town has actually had put up. Stage 58: a
+    /// `Session` runs the freight network now, so the towns around a played
+    /// session grow, and a growth that never reached the ground would be a
+    /// number in a file nobody could walk into.
+    pub masonry: crate::masonry::Masonry,
+    /// The last dispatch window the network was run for, so it runs once a
+    /// window rather than once a tick. `Active` keeps the same field for the
+    /// same reason.
+    last_network: u64,
     pub shop: Shop,
     /// The machines the player actually owns. A `Session` had none until
     /// stage 52, which is why nothing had ever played the loop this round is
@@ -191,6 +200,10 @@ impl Session {
             wallet: Wallet::new(),
             skills: Skills::default(),
             economy: Economy::new(),
+            masonry: crate::masonry::Masonry::new(),
+            // `MAX_VALUE` rather than zero, so the first advance runs the
+            // network instead of deciding it already had.
+            last_network: u64::MAX,
             shop: Shop::new(),
             garage: crate::garage::Garage::new(),
             journal: CommandLog::new(),
@@ -225,6 +238,7 @@ impl Session {
         self.wallet.save(root)?;
         self.skills.save(root)?;
         self.economy.save(root)?;
+        self.masonry.save(root)?;
         self.mining.tank.save(root)?;
         self.mining.wear.save(root)?;
         self.mining.integrity.save(root)?;
@@ -320,6 +334,7 @@ impl Session {
         session.wallet.load(root);
         session.skills.load(root);
         session.economy.load(root);
+        session.masonry.load(root);
         session.mining.tank.load(root);
         session.mining.wear.load(root);
         session.mining.integrity.load(root);
@@ -454,8 +469,64 @@ impl Session {
                     .under_fire(sweep.from, sweep.to, crate::integrity::SLUG_HIT);
             }
             self.bury_the_downed();
+            // Inside the loop for the reason the replay's arm gives: the
+            // network turns on a window boundary, and a long advance crosses
+            // several. The two have to agree tick for tick.
+            self.run_the_network();
         }
         self.keep_chunks_loaded();
+    }
+
+    /// The towns do business, and build what they have earned.
+    ///
+    /// Once a dispatch window, the same boundary `App::frame` uses — and until
+    /// stage 58 a `Session` did not do this at all, which meant no test had
+    /// ever watched the freight network run end to end and the replay oracle
+    /// had no opinion about the books.
+    ///
+    /// Deliberately after `keep_chunks_loaded`: a town that has earned a shed
+    /// can only have it built if its ground is resident, so the streaming pass
+    /// goes first and the masonry gets the best chance of a loaded chunk.
+    fn run_the_network(&mut self) {
+        // `self.tick`, **not** `journal.tick()`. The `Advance` order is
+        // recorded before the loop runs, so the journal's clock is already at
+        // the end of the whole order while the loop is still working through
+        // it — reading it here would run the network once, at the far end,
+        // and a long advance would put a town's new shed up after a crew had
+        // spent the afternoon digging where it stands. The replay counts its
+        // own ticks for the same reason, and the two have to agree.
+        let now = self.tick;
+        let column = (
+            self.player.position.x.floor() as i32,
+            self.player.position.z.floor() as i32,
+        );
+        let landed = crate::masonry::tick_the_network(
+            &mut self.economy,
+            &mut self.masonry,
+            &mut self.world,
+            &mut self.last_network,
+            column,
+            now,
+        );
+        for load in landed {
+            // A load of the player's that has arrived, paid at the far town's
+            // price. Mail has nowhere to land in a session — there is no
+            // homestead here — so it is simply not collected.
+            if load.owner != crate::economy::Owner::Player {
+                continue;
+            }
+            let Some(site) = self
+                .world
+                .towns_near(column, crate::RADIO_RANGE)
+                .into_iter()
+                .find(|site| site.centre == load.to)
+            else {
+                continue;
+            };
+            let paid =
+                load.amount.round() as u64 * self.economy.market(&site, now).price(load.good);
+            self.wallet.earn(paid);
+        }
     }
 
     /// The streamer's one job, done by hand: the ground under the walker
@@ -1547,6 +1618,19 @@ impl Session {
                 break;
             }
             self.shop.open_at_counter();
+            let selling = {
+                let pile = self.mining.fleet.base.as_ref().map(|base| &base.stockpile);
+                self.shop.selected_good(
+                    pile,
+                    &self.wallet,
+                    &market,
+                    &shed,
+                    &rack,
+                    &kit,
+                    security,
+                    &[],
+                )
+            };
             self.shop.confirm(
                 self.mining
                     .fleet
@@ -1565,6 +1649,17 @@ impl Session {
                 true,
             );
             *self.economy.market_mut(&site, now) = market;
+            // On the wire, and only if it actually sold. See `Command::Sell`:
+            // a sale moves a town's books, and a town's books move blocks.
+            if self.mining.fleet.held() != held {
+                if let Some(good) = selling {
+                    self.journal.record(crate::journal::Command::Sell {
+                        town: site.centre,
+                        good: good as u32,
+                        standing: crate::reputation::Standing::Neutral.as_byte(),
+                    });
+                }
+            }
             if self.mining.fleet.held() == held {
                 stalled += 1;
                 // Two passes that moved nothing: this counter has bought
@@ -1862,6 +1957,88 @@ mod tests {
             rebuilt.mining.heap_progress().map(|(done, _)| done),
             Some(stacked),
             "the replay stacked a different number of blocks"
+        );
+    }
+
+    /// **The oracle, for a town that got rich.**
+    ///
+    /// A session that sells over a counter, runs the freight network for long
+    /// enough that a town trades its way into new buildings, and then demands
+    /// that the log reproduces all of it: the same ground, and the same books.
+    ///
+    /// This is the test the round turns on. Until stage 58 a `Session` never
+    /// ran the network at all, and selling was never written down — which was
+    /// harmless exactly as long as a town's books could not move a block. They
+    /// can now, so both had to be closed at once: `Command::Sell` puts the
+    /// counter on the wire, and `masonry::tick_the_network` is the one copy of
+    /// the tick that both sides run. If this goes red, something about the
+    /// economy is being decided outside the tick.
+    #[test]
+    fn a_town_that_trades_its_way_into_new_buildings_replays_to_the_same_ground() {
+        let mut session = dug_in();
+        // Cut a load and sell it, so the counter is on the wire and the
+        // player's own trade is part of what the replay has to reproduce.
+        session.work(8 * 40);
+        let earned = session.sell_everything();
+        assert!(earned > 0, "the fixture sold nothing, so nothing is proved");
+
+        // Then let the frontier trade. Long enough to cross a good number of
+        // dispatch windows, which is what puts a shed up.
+        session.work(8 * 900);
+
+        let here = session.home();
+        let grown = session.masonry.built(here.centre);
+        let standing: u8 = session
+            .world
+            .towns_near(
+                (
+                    session.player.position.x.floor() as i32,
+                    session.player.position.z.floor() as i32,
+                ),
+                crate::RADIO_RANGE,
+            )
+            .iter()
+            .map(|site| session.masonry.built(site.centre))
+            .sum();
+        eprintln!(
+            "the hometown built {grown}; the neighbourhood built {standing} between them"
+        );
+        assert!(
+            standing > 0,
+            "nobody on the frontier built anything, so this proves nothing"
+        );
+
+        let ground = vx_world::world_hash(&session.world);
+        let books = session.economy.books_hash();
+        let start = session.player.position;
+
+        let mut fresh = vx_world::World::new(session.world.seed());
+        fresh.load_around(
+            BlockPos::new(
+                start.x.floor() as i32,
+                start.y.floor() as i32,
+                start.z.floor() as i32,
+            )
+            .chunk(),
+            KEEP_LOADED,
+        );
+        let events = vx_core::EventBus::new();
+        let rebuilt = crate::journal::replay_from(&session.journal, &mut fresh, &events, start);
+
+        assert_eq!(
+            rebuilt.economy.books_hash(),
+            books,
+            "the replayed frontier kept different books"
+        );
+        assert_eq!(
+            rebuilt.masonry.built(here.centre),
+            grown,
+            "the replayed hometown built a different number of sheds"
+        );
+        assert_eq!(
+            vx_world::world_hash(&fresh),
+            ground,
+            "the replay walked past a different town"
         );
     }
 
@@ -2942,11 +3119,12 @@ mod tests {
     /// module docs is the human-readable half of the same promise.
     #[test]
     fn the_census_covers_every_saved_subsystem() {
-        const EXPECTED: [&str; 18] = [
+        const EXPECTED: [&str; 19] = [
             "log.dat",
             "wallet.dat",
             "player.dat",
             "economy.dat",
+            "masonry.dat",
             "fuel.dat",
             "wear.dat",
             "integrity.dat",

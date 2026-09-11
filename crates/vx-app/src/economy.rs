@@ -56,7 +56,12 @@ const MAGIC: &[u8; 4] = b"VXEC";
 /// five numbers cannot be read as eight without inventing three. A town's
 /// books are re-derived from its site instead, which is cheaper than a
 /// migration and more honest than a guess.
-const VERSION: u32 = 5;
+/// Six is the round towns started paying each other. A market gains what it
+/// has earned selling on and how far it has grown on the strength of it, and a
+/// load in the air gains what the buyer put up for it. A version-five file is
+/// read back as a town that has traded nothing and built nothing, which is not
+/// a lie — it is a book kept before anybody was counting.
+const VERSION: u32 = 6;
 
 /// What the network moves.
 ///
@@ -143,6 +148,30 @@ const TILL_CAP: f32 = 9_000.0;
 /// everything it had to trade.
 const TILL_REFILL: f32 = 26.0;
 
+/// What a town must have earned selling on before it builds each new shed.
+///
+/// Measured against lifetime earnings rather than the till for the reason
+/// [`Market::earn`] gives: a till is spent, and a place that is doing well is
+/// a place money moves *through*, not one it piles up in. The steps rise
+/// steeply on purpose — the first is a good week for a town on the network,
+/// the last is a town that has become the reason the network goes that way.
+const GROWTH_AT: [f32; 3] = [6_000.0, 20_000.0, 50_000.0];
+
+/// The most a town can outgrow itself. One per entry in [`GROWTH_AT`], and one
+/// blueprint per step in [`vx_world::town::plan::growth_plan`] — a town that
+/// grew past what has been authored for it would ask for a building that does
+/// not exist, so the two are pinned together by a test rather than by hope.
+pub const MAX_GROWTH: u8 = GROWTH_AT.len() as u8;
+
+/// What one growth step is worth to the works, as a fraction.
+///
+/// The new sheds are the town's new capacity: this is the whole reason growth
+/// is a loop rather than decoration. A town that trades well builds, and what
+/// it builds lets it trade more — and because it multiplies extraction and
+/// conversion rather than adding to them, a mine grows into more of a mine
+/// instead of every town growing into the same thing.
+const WORKS_PER_STEP: f32 = 0.15;
+
 /// Look up a good by its namespaced name.
 pub fn good_index(name: &str) -> Option<usize> {
     GOODS.iter().position(|good| *good == name)
@@ -154,6 +183,13 @@ pub struct Market {
     stock: [f32; GOODS.len()],
     /// What the counter can actually pay out. See [`TILL_CAP`].
     till: f32,
+    /// Everything this town has ever earned selling goods on, which is not
+    /// the same number as the till and must not be: a till is spent, and a
+    /// town that has had a good decade and a bad year has still had the good
+    /// decade. See [`GROWTH_AT`].
+    trade: f32,
+    /// How many times this town has outgrown itself. A ratchet.
+    growth: u8,
     /// The last step boundary this was brought up to date at.
     last_tick: u64,
 }
@@ -206,6 +242,29 @@ impl Market {
     /// Has it more than it can use?
     pub fn surplus(&self, good: usize) -> f32 {
         (self.stock[good] - TARGET * 1.2).max(0.0)
+    }
+
+    /// What this town has earned selling goods on, for its whole life.
+    pub fn trade(&self) -> u64 {
+        self.trade.max(0.0) as u64
+    }
+
+    /// How many times this town has outgrown itself, `0..=MAX_GROWTH`.
+    pub fn growth(&self) -> u8 {
+        self.growth
+    }
+
+    /// Credits in, from a sale that actually happened.
+    ///
+    /// The one way money *enters* a town, and deliberately not the same thing
+    /// as the till: the till is capped and spent, `trade` is neither. A town
+    /// whose till is already full still earned what it earned, and that is the
+    /// number growth is measured against — otherwise the richest towns on the
+    /// frontier, the ones pinned at [`TILL_CAP`], would be the ones that
+    /// looked like they had stopped trading.
+    pub fn earn(&mut self, amount: u64) {
+        self.trade += amount as f32;
+        self.till = (self.till + amount as f32).min(TILL_CAP);
     }
 
     /// Move goods in or out, clamped to what is actually there.
@@ -304,6 +363,10 @@ pub fn opening_books(site: &TownSite) -> Market {
     Market {
         stock,
         till: TILL_CAP * (0.25 + float * 0.35),
+        // A town opens having sold nothing to anybody. Whatever it had before
+        // the player turned up is scenery, and scenery does not build sheds.
+        trade: 0.0,
+        growth: 0,
         last_tick: 0,
     }
 }
@@ -454,16 +517,21 @@ fn worked_steps(site: &TownSite, index: usize, tick: u64) -> u64 {
 fn step_market(market: &mut Market, site: &TownSite, step: u64) {
     let speciality = site.speciality;
     let dt = STEP as f32;
+    // What the town has built for itself, as a multiplier on its own works.
+    // Applied to the rates rather than to the run, so a grown refinery gets
+    // through more ore *and* makes more bar, which is what another furnace is.
+    let works = 1.0 + market.growth as f32 * WORKS_PER_STEP;
 
     // Out of the ground first: unconditional, and stops at capacity.
     for (good, rate) in extraction(speciality).into_iter().enumerate() {
         if rate > 0.0 {
-            market.stock[good] = (market.stock[good] + rate * dt).min(CAPACITY);
+            market.stock[good] = (market.stock[good] + rate * works * dt).min(CAPACITY);
         }
     }
 
     // Then the works, which run only as long as their inputs last.
     if let Some((inputs, output, rate)) = conversion(speciality) {
+        let rate = rate * works;
         let mut run = dt;
         for (good, need) in inputs.into_iter().enumerate() {
             if need > 0.0 {
@@ -497,6 +565,16 @@ fn step_market(market: &mut Market, site: &TownSite, step: u64) {
     let held: f32 = market.stock.iter().sum();
     let trading = (held / (TARGET * GOODS.len() as f32)).clamp(0.15, 1.0);
     market.till = (market.till + TILL_REFILL * trading).min(TILL_CAP);
+
+    // And whether any of that has added up to another building. Inside the
+    // step, so it inherits the quantised catch-up: forty steps at once grows a
+    // town exactly as forty steps one at a time, which is the invariant the
+    // whole module is arranged around. A count rather than a comparison, so
+    // crossing two thresholds in one catch-up is two buildings and not one.
+    market.growth = GROWTH_AT
+        .iter()
+        .filter(|threshold| market.trade >= **threshold)
+        .count() as u8;
 }
 
 /// Who a load belongs to.
@@ -530,6 +608,16 @@ pub struct Shipment {
     pub depart: u64,
     pub arrive: u64,
     pub owner: Owner,
+    /// What the buyer put up when the load left, and what the seller took.
+    ///
+    /// Only ever non-zero for [`Owner::Town`]: a player's load and a mail
+    /// order were both settled at a counter before they were ever in the air,
+    /// and charging for them again here would be the same goods paid for
+    /// twice. Carried on the load rather than recomputed on arrival because
+    /// the price a thing sold at is the price it sold at — a load that takes
+    /// three in-game minutes to cross the map must not be repriced by what the
+    /// market did while it was flying.
+    pub paid: u64,
 }
 
 /// How many ticks a load takes per block travelled.
@@ -581,6 +669,14 @@ pub const MAILBOX_CAP: u64 = 120;
 
 /// How often the network looks for a run worth making. Four in-game minutes.
 pub const DISPATCH_EVERY: u64 = STEP * 8;
+
+/// The most loads the network puts in the air in one dispatch window.
+///
+/// Four rather than one, and one per source town. The bound exists so that a
+/// player who walks into a neighbourhood nobody has visited for a week does
+/// not watch two hundred wagons appear at once when the catch-up runs: a
+/// window is a window however long ago it was.
+const MAX_RUNS: usize = 4;
 
 /// Every town whose books have moved away from what its site implies, and
 /// every load currently in the air.
@@ -731,27 +827,64 @@ impl Economy {
         }
     }
 
-    /// Look for a run worth making and put one load in the air.
+    /// Look for the runs worth making and put loads in the air.
+    ///
+    /// Up to [`MAX_RUNS`] a window, and never twice out of the same town: a
+    /// network of a dozen places that moved one wagon every four in-game
+    /// minutes was a map with freight drawn on it rather than a network, and
+    /// the source rule is what stops one glutted mine taking every run while
+    /// the rest of the frontier sits still.
+    fn dispatch(&mut self, reachable: &[TownSite], now: u64) {
+        let mut sent: Vec<(i32, i32)> = Vec::new();
+        for _ in 0..MAX_RUNS {
+            if !self.dispatch_one(reachable, now, &mut sent) {
+                break;
+            }
+        }
+    }
+
+    /// One run, or nothing left worth making. Returns whether a load left.
     ///
     /// Greedy nearest-deficit matching: for the town with the biggest surplus,
-    /// ship to the nearest town within reach that is short of that good. This
-    /// is a deliberate simplification of the min-cost flow a full treatment
-    /// would use — at a few dozen towns the two agree on the runs that matter,
-    /// and the greedy version is a fraction of the code. Worth revisiting only
-    /// if the traffic it produces disappoints.
-    fn dispatch(&mut self, reachable: &[TownSite], now: u64) {
-        let mut best: Option<(f32, usize, usize, usize)> = None; // surplus, from, to, good
+    /// ship to the nearest town within reach that is short of that good *and
+    /// can pay for it*. This is a deliberate simplification of the min-cost
+    /// flow a full treatment would use — at a few dozen towns the two agree on
+    /// the runs that matter, and the greedy version is a fraction of the code.
+    /// Worth revisiting only if the traffic it produces disappoints.
+    ///
+    /// The buyer pays the buyer's own price, which is the same rule the
+    /// player's trade runs settle under: you are paid what it is worth where
+    /// it was wanted, not what it was worth where it was lying about. A town
+    /// that cannot cover a load does not order one — so a poor town stays
+    /// short, its prices stay high, and the first thing it can afford is the
+    /// thing it needs most. That is the till doing the work the stock curve
+    /// cannot do on its own.
+    fn dispatch_one(
+        &mut self,
+        reachable: &[TownSite],
+        now: u64,
+        sent: &mut Vec<(i32, i32)>,
+    ) -> bool {
+        // surplus, from, to, good
+        let mut best: Option<(f32, usize, usize, usize)> = None;
 
         for (from_index, from) in reachable.iter().enumerate() {
+            if sent.contains(&from.centre) {
+                continue;
+            }
             for good in 0..GOODS.len() {
                 let surplus = self.market(from, now).surplus(good);
                 if surplus < LOAD {
                     continue;
                 }
-                // Nearest town that actually wants it.
+                // Nearest town that wants it and has the money for it.
                 let mut nearest: Option<(i64, usize)> = None;
                 for (to_index, to) in reachable.iter().enumerate() {
-                    if to.centre == from.centre || !self.market(to, now).wants(good) {
+                    if to.centre == from.centre {
+                        continue;
+                    }
+                    let buyer = self.market(to, now);
+                    if !buyer.wants(good) || (buyer.affords(buyer.price(good)) as f32) < LOAD {
                         continue;
                     }
                     let dx = (from.centre.0 - to.centre.0) as i64;
@@ -770,7 +903,7 @@ impl Economy {
         }
 
         let Some((_, from_index, to_index, good)) = best else {
-            return;
+            return false;
         };
         let from = reachable[from_index];
         let to = reachable[to_index];
@@ -779,8 +912,18 @@ impl Economy {
         // conjure freight out of nothing.
         let loaded = self.market_mut(&from, now).withdraw(good, LOAD);
         if loaded <= 0.0 {
-            return;
+            return false;
         }
+        // And take the money out before it goes on the load, for the same
+        // reason: the buyer is short of it from the moment the order is
+        // placed, not from the moment the wagon arrives. `draw` is bounded by
+        // what is actually in the till, so an order placed against a till that
+        // moved between the check and here is short-paid rather than overdrawn.
+        let rate = self.market(&to, now).price(good);
+        let owed = (loaded.round() as u64).saturating_mul(rate);
+        let paid = self.market_mut(&to, now).draw(owed);
+        self.market_mut(&from, now).earn(paid);
+
         self.ship(Shipment {
             from: from.centre,
             to: to.centre,
@@ -789,7 +932,10 @@ impl Economy {
             depart: now,
             arrive: now + Shipment::travel_ticks(from.centre, to.centre),
             owner: Owner::Town,
+            paid,
         });
+        sent.push(from.centre);
+        true
     }
 
     /// A summary for hashing, so the replay oracle can cover the economy.
@@ -812,6 +958,15 @@ impl Economy {
                         .wrapping_mul(0xbf58_476d_1ce4_e5b9),
                 );
             }
+            // And the money, since stage 58: a network where the goods land
+            // in the same places but the credits do not is a network that has
+            // diverged, and a hash over stock alone would call it identical.
+            // Whole credits, for the same reason the stocks are whole units.
+            town = vx_world::seed::finalise(
+                town ^ (market.till() ^ market.trade().wrapping_mul(31))
+                    .wrapping_mul(0x94d0_49bb_1331_11eb)
+                    ^ market.growth as u64,
+            );
             hash ^= town;
         }
         hash
@@ -836,6 +991,9 @@ impl Economy {
             // one their site opens on, which is the honest answer: a save from
             // before towns had money cannot say how much they had.
             file.write_all(&market.till.to_le_bytes())?;
+            // Version 6: what it has earned, and what it has built with it.
+            file.write_all(&market.trade.to_le_bytes())?;
+            file.write_all(&[market.growth])?;
         }
 
         file.write_all(&self.last_dispatch.to_le_bytes())?;
@@ -854,6 +1012,7 @@ impl Economy {
                 Owner::Player => 1,
                 Owner::Mail => 2,
             }])?;
+            file.write_all(&load.paid.to_le_bytes())?;
         }
         file.commit()
     }
@@ -948,11 +1107,26 @@ fn read_economy(path: &Path) -> std::io::Result<Option<Economy>> {
         } else {
             f32::NAN
         };
+        // A book from before towns paid each other has traded nothing and
+        // built nothing. Not a lie — a book kept before anybody was counting.
+        let (trade, growth) = if version >= 6 {
+            let trade = read_f32(&mut file)?;
+            let mut step = [0u8; 1];
+            file.read_exact(&mut step)?;
+            if step[0] > MAX_GROWTH {
+                return Err(std::io::Error::other("a town grown past what is authored"));
+            }
+            (trade, step[0])
+        } else {
+            (0.0, 0)
+        };
         economy.towns.insert(
             centre,
             Market {
                 stock,
                 till,
+                trade,
+                growth,
                 last_tick,
             },
         );
@@ -972,6 +1146,7 @@ fn read_economy(path: &Path) -> std::io::Result<Option<Economy>> {
         let arrive = read_u64(&mut file)?;
         let mut owner = [0u8; 1];
         file.read_exact(&mut owner)?;
+        let paid = if version >= 6 { read_u64(&mut file)? } else { 0 };
         economy.shipments.push(Shipment {
             from,
             to,
@@ -985,6 +1160,7 @@ fn read_economy(path: &Path) -> std::io::Result<Option<Economy>> {
                 2 => Owner::Mail,
                 other => return Err(std::io::Error::other(format!("unknown owner {other}"))),
             },
+            paid,
         });
     }
     Ok(Some(economy))
@@ -1246,14 +1422,27 @@ mod tests {
             let far = 200_000; // a good twenty in-game days
 
             let mut all_at_once = Economy::new();
-            all_at_once.market(&site, far);
-
             let mut in_pieces = Economy::new();
+            // Seeded past the first two growth thresholds, so the catch-up
+            // being compared is one that *builds* — the works multiplier is a
+            // term in extraction and conversion, and a town that grew at a
+            // different moment would make a different amount of everything.
+            for economy in [&mut all_at_once, &mut in_pieces] {
+                economy.market_mut(&site, 0).earn(GROWTH_AT[1] as u64 + 1);
+            }
+
+            all_at_once.market(&site, far);
             for at in (0..=far).step_by(STEP as usize * 7) {
                 in_pieces.market(&site, at);
             }
             in_pieces.market(&site, far);
 
+            assert_eq!(
+                all_at_once.market(&site, far).growth(),
+                2,
+                "{} did not grow, so this proves nothing about growth",
+                speciality.name()
+            );
             assert_eq!(
                 all_at_once.market(&site, far),
                 in_pieces.market(&site, far),
@@ -1519,6 +1708,7 @@ mod tests {
             depart: 0,
             arrive,
             owner: Owner::Town,
+            paid: 0,
         });
 
         // In the air: still accounted for, and not yet on anyone's shelves.
@@ -1546,6 +1736,7 @@ mod tests {
             depart: 1_000,
             arrive: 2_000,
             owner: Owner::Town,
+            paid: 0,
         };
         assert_eq!(load.position_at(1_000), (0.0, 0.0));
         assert_eq!(load.position_at(2_000), (1_000.0, -500.0));
@@ -1607,6 +1798,223 @@ mod tests {
             rarely.books_hash(),
             "the network's books depend on how often it was looked at"
         );
+        // And the hash is over money as well as goods since stage 58, so a
+        // frontier that traded its way into a new building either did so in
+        // both runs or the assertion above catches it. This says it happened
+        // at all, so the test is not passing on a network that never moved.
+        assert!(
+            sites
+                .iter()
+                .any(|site| often.market(site, far).growth() > 0),
+            "thirty windows of trade did not put a single building up"
+        );
+    }
+
+    /// The first round in which credits move between towns.
+    ///
+    /// Before stage 58 the network moved goods and nothing else, so a town on
+    /// a busy corner of the map and a town nobody shipped to ended up with the
+    /// same money — which meant the till said nothing about how a place was
+    /// doing, and there was nothing for growth to be measured against.
+    #[test]
+    fn a_town_pays_for_what_it_orders_and_the_seller_takes_it() {
+        let sites = frontier();
+        let now = DISPATCH_EVERY;
+        let mut economy = Economy::new();
+
+        // Bring every book up to the window first, so the only thing that
+        // moves across the dispatch is the dispatch.
+        let before: Vec<(u64, u64)> = sites
+            .iter()
+            .map(|site| {
+                let market = economy.market(site, now);
+                (market.till(), market.trade())
+            })
+            .collect();
+
+        economy.dispatch(&sites, now);
+
+        let freight: Vec<&Shipment> = economy
+            .shipments()
+            .iter()
+            .filter(|load| load.owner == Owner::Town)
+            .collect();
+        assert!(!freight.is_empty(), "the network put nothing in the air");
+        assert!(
+            freight.iter().all(|load| load.paid > 0),
+            "a town took a load without paying for it"
+        );
+
+        let owed: u64 = freight.iter().map(|load| load.paid).sum();
+        let buyers: Vec<(i32, i32)> = freight.iter().map(|load| load.to).collect();
+        let sellers: Vec<(i32, i32)> = freight.iter().map(|load| load.from).collect();
+
+        let mut spent = 0u64;
+        let mut earned = 0u64;
+        for (site, (till, trade)) in sites.iter().zip(before) {
+            let market = economy.market(site, now);
+            if buyers.contains(&site.centre) {
+                spent += till.saturating_sub(market.till());
+            }
+            if sellers.contains(&site.centre) {
+                earned += market.trade().saturating_sub(trade);
+            }
+        }
+        assert_eq!(spent, owed, "the buyers did not put up what the loads cost");
+        assert_eq!(earned, owed, "the sellers did not take what was put up");
+    }
+
+    /// A town orders what it can pay for and nothing else.
+    ///
+    /// The till doing work the stock curve cannot do on its own: a poor town
+    /// stays short, so its prices stay high, so the first load it can afford
+    /// is the one it needs most.
+    #[test]
+    fn a_town_that_cannot_pay_does_not_order() {
+        let sites = frontier();
+        let now = DISPATCH_EVERY;
+        let mut broke = Economy::new();
+        for site in &sites {
+            let market = broke.market_mut(site, now);
+            let all = market.till();
+            market.draw(all);
+        }
+        broke.dispatch(&sites, now);
+        assert!(
+            broke
+                .shipments()
+                .iter()
+                .all(|load| load.owner != Owner::Town),
+            "a frontier with empty tills went shopping anyway"
+        );
+
+        // And the same frontier with money in it does trade, so the test above
+        // is measuring the till rather than a network that never runs.
+        let mut solvent = Economy::new();
+        solvent.dispatch(&sites, now);
+        assert!(
+            solvent
+                .shipments()
+                .iter()
+                .any(|load| load.owner == Owner::Town),
+            "the same frontier with money in it shipped nothing either"
+        );
+    }
+
+    /// Nothing is conjured — the money half of the conservation identity.
+    ///
+    /// Not an equality, and deliberately: [`Market::earn`] caps the till at
+    /// [`TILL_CAP`], so a sale into a full till loses the overflow. What must
+    /// never happen is the other direction.
+    #[test]
+    fn a_dispatch_never_creates_credits() {
+        let sites = frontier();
+        let now = DISPATCH_EVERY * 4;
+        let mut economy = Economy::new();
+        let before: u64 = sites
+            .iter()
+            .map(|site| economy.market(site, now).till())
+            .sum();
+        economy.dispatch(&sites, now);
+        let after: u64 = sites
+            .iter()
+            .map(|site| economy.market(site, now).till())
+            .sum();
+        assert!(
+            after <= before,
+            "the frontier came out of a dispatch richer than it went in: {before} -> {after}"
+        );
+    }
+
+    /// Growth is a ratchet: a town that has a good decade and then a bad year
+    /// has still had the good decade, and keeps what it built.
+    #[test]
+    fn growth_is_a_ratchet_and_survives_going_broke() {
+        let site = of(Speciality::Depot);
+        let mut economy = Economy::new();
+
+        let market = economy.market_mut(&site, 0);
+        market.earn(GROWTH_AT[0] as u64 + 1);
+        // Growth lands on a step boundary, like everything else here.
+        assert_eq!(economy.market(&site, 0).growth(), 0, "growth outran the step");
+        assert_eq!(economy.market(&site, STEP).growth(), 1);
+
+        // Now strip it bare: no money, no goods, and a long time to think
+        // about it.
+        let market = economy.market_mut(&site, STEP);
+        let all = market.till();
+        market.draw(all);
+        for good in 0..GOODS.len() {
+            market.withdraw(good, CAPACITY);
+        }
+        assert_eq!(
+            economy.market(&site, STEP * 500).growth(),
+            1,
+            "a town that went broke pulled its own buildings down"
+        );
+    }
+
+    /// Every threshold is reachable, crossing two at once is two steps, and a
+    /// town cannot grow past what has been authored for it.
+    #[test]
+    fn a_town_grows_step_by_step_and_stops_at_the_top() {
+        let site = of(Speciality::Mine);
+        for (step, threshold) in GROWTH_AT.iter().enumerate() {
+            let mut economy = Economy::new();
+            economy.market_mut(&site, 0).earn(*threshold as u64);
+            assert_eq!(
+                economy.market(&site, STEP).growth() as usize,
+                step + 1,
+                "threshold {step} did not put a building up"
+            );
+        }
+
+        // Past the top of the table, and it stays at the top: one blueprint is
+        // authored per step, so a town grown past the table would ask for a
+        // building that does not exist.
+        let mut rich = Economy::new();
+        rich.market_mut(&site, 0).earn(GROWTH_AT[GROWTH_AT.len() - 1] as u64 * 100);
+        assert_eq!(rich.market(&site, STEP).growth(), MAX_GROWTH);
+        assert_eq!(
+            MAX_GROWTH as usize,
+            vx_world::town::plan::growth_steps(&site),
+            "the growth table and the blueprints disagree about how big a town gets"
+        );
+    }
+
+    /// What a new shed is *for*: a grown town gets more out of its own works.
+    /// This is the loop closing — a town that trades well builds, and what it
+    /// builds lets it trade more.
+    #[test]
+    fn a_grown_town_makes_more_of_what_it_makes() {
+        for speciality in [Speciality::Mine, Speciality::Refinery, Speciality::Depot] {
+            let site = of(speciality);
+            let run = STEP * 40;
+
+            let mut small = Economy::new();
+            let mut large = Economy::new();
+            // Bare shelves both, so the comparison is about what is made
+            // rather than about where a clamp happens to bite.
+            for economy in [&mut small, &mut large] {
+                let market = economy.market_mut(&site, 0);
+                for good in 0..GOODS.len() {
+                    market.withdraw(good, CAPACITY);
+                }
+            }
+            large.market_mut(&site, 0).growth = MAX_GROWTH;
+
+            let made: f32 = (0..GOODS.len())
+                .map(|good| small.market(&site, run).stock(good))
+                .sum();
+            let more: f32 = (0..GOODS.len())
+                .map(|good| large.market(&site, run).stock(good))
+                .sum();
+            assert!(
+                more > made,
+                "{} got nothing out of growing: {made} -> {more}",
+                speciality.name()
+            );
+        }
     }
 
     #[test]
@@ -1627,6 +2035,7 @@ mod tests {
             depart: 10,
             arrive: 9_000,
             owner: Owner::Player,
+            paid: 0,
         });
         economy.save(&directory).unwrap();
 
@@ -1653,6 +2062,7 @@ mod tests {
             depart: 10,
             arrive: 500,
             owner: Owner::Town,
+            paid: 0,
         });
         let before = economy.market(&sites[1], 0).stock(BAR);
 
@@ -1674,6 +2084,7 @@ mod tests {
                 depart: 10,
                 arrive: 500,
                 owner: Owner::Town,
+                paid: 0,
             });
             untouched.run(&sites, 600);
             untouched.market(&sites[1], 600).stock(BAR)
@@ -1736,6 +2147,7 @@ mod mail_tests {
             depart: 0,
             arrive: 10,
             owner: Owner::Mail,
+            paid: 0,
         });
 
         let landed = economy.run(&[home, source], 20);
@@ -1768,6 +2180,7 @@ mod mail_tests {
             depart: 5,
             arrive: 500,
             owner: Owner::Player,
+            paid: 0,
         });
         economy.save(&directory).unwrap();
 

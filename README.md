@@ -175,6 +175,25 @@ build in it, and it survives quitting — skills included.
 
 ### Known rough edges
 
+- **A town grows in buildings and capacity, not in people.** `people::PEOPLE`
+  is a constant that the ballot, the friendship ledger and the villagers all
+  count on, so a grown town has new sheds and a better output rate and exactly
+  the same three residents standing in it. Making population per-town is its
+  own round, and it is the obvious next one.
+- **A town never shrinks.** Growth is measured against lifetime earnings and is
+  deliberately a ratchet, so a place that boomed and then went broke keeps
+  every shed it put up. That is the right call while nothing can un-build a
+  building, and it means a long enough game ends with every town it can see at
+  the top of its table.
+- **Three growth buildings, and then a town is finished.** `growth_plan` is
+  three authored blueprints per speciality dropped into three fixed pockets of
+  the plaza, so two grown depots look alike and the third threshold is the end
+  of what a town can become.
+- **A shed goes up while you are not looking, never while you are.** The stamp
+  needs the chunks resident, so a town with its ground unloaded waits — which
+  is right — but it also means you will essentially never *watch* a building
+  appear. You walk in and it is there. The `TOWN` verb says `ONE PENDING` so at
+  least the gap is legible.
 - A **flier crash is not on the oracle**, because a flier is not on the wire.
   Machines are bought live and `Command::SpawnMachine` is an admin cheat whose
   replay arm is a no-op, so a replayed session has diggers (the dispatch order
@@ -275,11 +294,6 @@ build in it, and it survives quitting — skills included.
   edge, now reachable at higher speed.
 - A 2.2 m mantle lets the player leave a hole a ground drone cannot drive out
   of. The planner does not warn about it yet.
-- Selling is not on the journal. There is no `Command::Sell`, so the wallet,
-  the pile's contents and the market sit outside the replayed world hash and
-  `--replay` cannot see wealth: a session that mined and sold replays to the
-  same *ground* but not to the same books. Found while building the played
-  session; it wants a round of its own rather than a corner of one.
 - The played session walks by holding forward, working along a face when it is
   stuck, and — since stage 50 — sweeping the ground it can see when that stops
   working. It is still not a route planner: it can only see as far as the
@@ -766,6 +780,49 @@ storage chest, a mailbox for mail orders, and a one-time welcome panel whose
 changelog is parsed straight out of `ROADMAP.md` (`--changelog` prints it).
 The spawn area is pregenerated before the first frame and the hometown is held
 resident permanently; `--view-distance <n>` (4–16) picks the streaming radius.
+
+### The towns get bigger
+
+Every town on the frontier keeps books, and until now those books were a
+readout. The towns hauled to each other and **nobody paid for anything**: a
+town's money went up on a timer against how full its shelves were, so a place
+on the busiest corner of the map and a place nobody had ever shipped to ended
+up with exactly the same till. And the whole network moved one wagon every four
+in-game minutes, which is a map with freight drawn on it rather than a network.
+
+Now the buyer pays, out of its own till, at its own price, the moment the load
+leaves — and **a town that cannot cover a load does not order one**. That single
+rule is what makes the money mean anything: a poor town stays short, its prices
+stay high, and the first thing it can afford is the thing it needs most. Up to
+four runs a window, never twice out of the same town, so one glutted mine cannot
+take every wagon while the rest of the country sits still.
+
+And a town that trades well **builds**. What a place has earned selling on, over
+its whole life, is tracked separately from what is in the till — a till is spent,
+and a town doing well is one money moves *through* — and each time that number
+crosses a threshold the town puts up another building: a second warehouse, a
+holding tank, a bunkhouse, a loading yard, chosen by what the place does for a
+living. The new sheds are new capacity, so growing makes it easier to grow. Walk
+back into a town you sold to a week ago and the square is fuller than you left it.
+
+It is a ratchet. A town that has a good decade and then a bad year keeps what it
+built, because the measure is what it earned and not what it currently has.
+
+The buildings are real blocks, written into the world the same way anything you
+build yourself is — terrain generation is untouched, so nothing about the ground
+or the world hash moves. Which means they are **deferred**: a town three
+kilometres away grows on its books wherever it is, and the sheds go up the next
+time somebody is near enough for there to be somewhere to put them. Nothing is
+lost by the wait; the `TOWN` verb tells you when a building has been earned and
+is still pending.
+
+Two things had to be fixed to make any of it checkable. The freight network had
+exactly one caller — the windowed game — so a headless session had never run it
+and no test had ever watched it end to end. And selling had never been written
+down at all, which was harmless for eight stages for exactly one reason: a
+town's books could not move a block. They can now, so the counter is on the
+journal, and a session that trades its way into a new building replays to the
+same ground *and* the same books.
 
 ### A build you can just run
 

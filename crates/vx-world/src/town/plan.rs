@@ -10,7 +10,7 @@
 //!
 //! Doors and windows are gaps in the wall grid. Nothing is carved afterwards.
 
-use vx_core::{BlockPos, ChunkPos, LocalPos, CHUNK_SIZE};
+use vx_core::{BlockId, BlockPos, ChunkPos, LocalPos, CHUNK_SIZE};
 
 use crate::chunk::Chunk;
 use crate::gen::TerrainBlocks;
@@ -108,6 +108,11 @@ pub enum Role {
     /// The clinic: two cots, a counter of sorts, and the only door on the
     /// frontier that is worth walking a long way to.
     Clinic,
+    /// What a town puts up for itself once it is making money: a second
+    /// warehouse, a tank, a bunkhouse. Town property with no lock on it —
+    /// the streets claim already covers the ground it stands on, so nothing
+    /// has to be said about who owns a shed the town built.
+    Works,
 }
 
 impl Role {
@@ -117,7 +122,8 @@ impl Role {
             Role::Dwelling | Role::PlayerHouse => Some(Tier::One),
             Role::Shop | Role::Security | Role::Civic | Role::Clinic => Some(Tier::Two),
             Role::Bank => Some(Tier::Three),
-            Role::Paving => None,
+            // Nothing to pick. See [`Role::Works`].
+            Role::Paving | Role::Works => None,
         }
     }
 }
@@ -140,6 +146,7 @@ pub fn strip_depth(role: Role) -> i32 {
         Role::Shop | Role::Security | Role::Clinic => 3,
         Role::Civic => 4,
         Role::Bank => 5,
+        Role::Works => 3,
     }
 }
 
@@ -655,6 +662,201 @@ const HOME_TOWN: &[Blueprint] = &[
     PATHS,
 ];
 
+// ---------------------------------------------------------------------------
+// What a town builds when it prospers
+// ---------------------------------------------------------------------------
+//
+// Three pockets of bare plateau the authored plans leave empty, and four
+// shapes that can stand in any of them. Which three a town builds, and in
+// which order, is what it does for a living — a mine tanks its water before it
+// houses anybody, a depot wants the shed first.
+//
+// These are **not stamped by worldgen**. `stamp` lays down the authored plan
+// and nothing else, so the terrain, the world hash and every already-generated
+// chunk are exactly what they were before this existed. A growth building
+// reaches the world the way a founded town's chunks do and the way anything
+// the player builds does: as an edit, written when the town has earned it. See
+// `growth_blocks`, and `masonry.rs` in `vx-app` for who calls it.
+
+/// Where a growth building can stand: pockets of bare plateau inside even the
+/// smallest core, clear of every authored building and of the paving cross.
+///
+/// All three are within eleven blocks of the centre, which matters because the
+/// fort's curtain is a polar radius — a pocket out at the corner of the core
+/// square would be inside the *square* and straight through the *wall*.
+const POCKETS: [(i32, i32); 3] = [(3, 0), (-9, 0), (-9, -9)];
+
+/// A second warehouse: plain metal, a wide door on the north face, roofed.
+const WAREHOUSE: &[&[&str]] = &[
+    &["GGGGGG", "GGGGGG", "GGGGGG", "GGGGGG", "GGGGGG"],
+    &["MM..MM", "M....M", "M....M", "M....M", "MMMMMM"],
+    &["MMMMMM", "M....M", "M....M", "M....M", "MMMMMM"],
+    &["GGGGGG", "GGGGGG", "GGGGGG", "GGGGGG", "GGGGGG"],
+];
+
+/// A holding tank: rusted, round as a grid gets, and taller than anything else
+/// a town builds for itself.
+const TANK: &[&[&str]] = &[
+    &["..XX..", ".XXXX.", "XXXXXX", ".XXXX.", "..XX.."],
+    &["..XX..", ".X..X.", "X....X", ".X..X.", "..XX.."],
+    &["..XX..", ".X..X.", "X....X", ".X..X.", "..XX.."],
+    &["..XX..", ".X..X.", "X....X", ".X..X.", "..XX.."],
+    &["..XX..", ".X..X.", "X....X", ".X..X.", "..XX.."],
+    &["..GG..", ".GGGG.", "GGGGGG", ".GGGG.", "..GG.."],
+];
+
+/// A bunkhouse: two containers stacked, a walkway over the top.
+const BUNKHOUSE: &[&[&str]] = &[
+    &["GGGGGG", "GGGGGG", "GGGGGG", "GGGGGG", "GGGGGG"],
+    &["MMM..M", "M....M", "M....M", "M....M", "MMMMMM"],
+    &["MMMMMM", "M....M", "M....M", "M....M", "MMMMMM"],
+    &["GGGGGG", "GGGGGG", "GGGGGG", "GGGGGG", "GGGGGG"],
+    &["XXX..X", "X....X", "X....X", "X....X", "XXXXXX"],
+    &["XXXXXX", "X....X", "X....X", "X....X", "XXXXXX"],
+    &["GGGGGG", "GGGGGG", "GGGGGG", "GGGGGG", "GGGGGG"],
+];
+
+/// A loading yard: paved, open to the north, a lean-to along the back.
+const YARD: &[&[&str]] = &[
+    &["PPPPPP", "PPPPPP", "PPPPPP", "PPPPPP", "PPPPPP"],
+    &["......", "X....X", "X....X", "X....X", "XXXXXX"],
+    &["......", "......", "......", "......", "XXXXXX"],
+    &["......", "GGGGGG", "GGGGGG", "GGGGGG", "GGGGGG"],
+];
+
+/// A depot grows outward: sheds, then a yard to stand the freight in, then
+/// somewhere for the hands who work it.
+const DEPOT_GROWTH: &[Blueprint] = &[
+    Blueprint { role: Role::Works, min: POCKETS[0], layers: WAREHOUSE },
+    Blueprint { role: Role::Works, min: POCKETS[1], layers: YARD },
+    Blueprint { role: Role::Works, min: POCKETS[2], layers: BUNKHOUSE },
+];
+
+/// A mine grows downward and needs water for it: the tank goes up first, and
+/// the bunkhouse before the warehouse, because a camp is people before it is
+/// storage.
+const MINE_GROWTH: &[Blueprint] = &[
+    Blueprint { role: Role::Works, min: POCKETS[0], layers: TANK },
+    Blueprint { role: Role::Works, min: POCKETS[1], layers: BUNKHOUSE },
+    Blueprint { role: Role::Works, min: POCKETS[2], layers: WAREHOUSE },
+];
+
+/// A refinery grows in tankage, and then in tankage again.
+const REFINERY_GROWTH: &[Blueprint] = &[
+    Blueprint { role: Role::Works, min: POCKETS[0], layers: TANK },
+    Blueprint { role: Role::Works, min: POCKETS[1], layers: WAREHOUSE },
+    Blueprint { role: Role::Works, min: POCKETS[2], layers: TANK },
+];
+
+/// Every building a town puts up as it prospers, in the order it puts them up.
+///
+/// Pure in the site, like the authored plan beside it.
+fn growth_plan(site: &TownSite) -> &'static [Blueprint] {
+    match site.speciality {
+        Speciality::Depot => DEPOT_GROWTH,
+        Speciality::Mine => MINE_GROWTH,
+        Speciality::Refinery => REFINERY_GROWTH,
+    }
+}
+
+/// How many times this town can outgrow itself.
+///
+/// Exactly `economy::MAX_GROWTH` — a town grown past the end of its own table
+/// would ask for a building nobody has drawn. A test in `vx-app` pins the two
+/// together rather than leaving it to whoever edits one of them next.
+pub fn growth_steps(site: &TownSite) -> usize {
+    growth_plan(site).len()
+}
+
+/// The ground one growth step claims, or nothing if the step is past the end.
+pub fn growth_building(site: &TownSite, step: usize) -> Option<Building> {
+    let blueprint = growth_plan(site).get(step)?;
+    let (width, depth) = blueprint.extent();
+    Some(Building {
+        role: blueprint.role,
+        min: BlockPos::new(
+            site.centre.0 + blueprint.min.0,
+            site.ground - strip_depth(blueprint.role).max(1),
+            site.centre.1 + blueprint.min.1,
+        ),
+        max: BlockPos::new(
+            site.centre.0 + blueprint.min.0 + width - 1,
+            site.ground + blueprint.layers.len() as i32,
+            site.centre.1 + blueprint.min.1 + depth - 1,
+        ),
+    })
+}
+
+/// Every block one growth step lays down, in the order it should be laid.
+///
+/// Footings first and then layers bottom-up, which is the order [`stamp`] runs
+/// for the same reason: a wall poured before its own foundation is the wrong
+/// way round in a stamp as well as on a site. Empty when the step is past the
+/// end of the town's table.
+///
+/// Pure in `(site, step)`, so the same building always lands on the same
+/// blocks however many times it is asked for — which is what lets the caller
+/// treat stamping as idempotent instead of having to remember what it wrote.
+pub fn growth_blocks(
+    site: &TownSite,
+    step: usize,
+    blocks: &TerrainBlocks,
+) -> Vec<(BlockPos, BlockId)> {
+    let Some(blueprint) = growth_plan(site).get(step) else {
+        return Vec::new();
+    };
+    let (width, depth) = blueprint.extent();
+    let strip = strip_depth(blueprint.role);
+    let mut laid = Vec::new();
+
+    for row in 0..depth {
+        for col in 0..width {
+            let x = site.centre.0 + blueprint.min.0 + col;
+            let z = site.centre.1 + blueprint.min.1 + row;
+            let filled = |layer: usize| -> bool {
+                blueprint
+                    .layers
+                    .get(layer)
+                    .and_then(|rows| rows.get(row as usize))
+                    .and_then(|line| line.as_bytes().get(col as usize))
+                    .is_some_and(|glyph| *glyph != b'.')
+            };
+            // The same rule `footing_at` applies to the authored plan: a strip
+            // under anything load-bearing, a slab under bare floor, nothing
+            // under nothing.
+            let deep = if filled(1) {
+                strip
+            } else if filled(0) {
+                SLAB_DEPTH
+            } else {
+                0
+            };
+            for below in 1..=deep {
+                laid.push((BlockPos::new(x, site.ground - below, z), blocks.footing));
+            }
+        }
+    }
+
+    for (layer, rows) in blueprint.layers.iter().enumerate() {
+        for (row, line) in rows.iter().enumerate() {
+            for (col, glyph) in line.bytes().enumerate() {
+                let Some(cell) = cell_of(glyph) else {
+                    continue;
+                };
+                laid.push((
+                    BlockPos::new(
+                        site.centre.0 + blueprint.min.0 + col as i32,
+                        site.ground + layer as i32,
+                        site.centre.1 + blueprint.min.1 + row as i32,
+                    ),
+                    block_of(cell, blocks),
+                ));
+            }
+        }
+    }
+    laid
+}
+
 /// The buildings a site puts up.
 ///
 /// A plan is picked, never generated: `&'static` throughout, so stamping
@@ -732,6 +934,54 @@ pub fn permit_offset_player_house() -> (i32, i32) {
     (-16, 10)
 }
 
+/// The authored cell one blueprint glyph means, if it means anything.
+///
+/// The single glyph table. Both the reader (`cell_at`, which answers for the
+/// stamped plan) and the writer (`growth_blocks`, which lays down a building
+/// the plan does not contain) go through it, so a new glyph is added in one
+/// place or in none.
+fn cell_of(glyph: u8) -> Option<Cell> {
+    Some(match glyph {
+        b'M' => Cell::Metal,
+        b'X' => Cell::Rusted,
+        b'G' => Cell::Grate,
+        b'T' => Cell::Mast,
+        b'B' => Cell::Beacon,
+        b'C' => Cell::Counter,
+        b'P' => Cell::Path,
+        b'S' => Cell::Chest,
+        b'O' => Cell::Mailbox,
+        b'1' => Cell::Permit(Tier::One),
+        b'2' => Cell::Permit(Tier::Two),
+        b'3' => Cell::Permit(Tier::Three),
+        b'R' => Cell::Roost,
+        b'V' => Cell::Vault,
+        b'H' => Cell::Cot,
+        _ => return None,
+    })
+}
+
+/// The block an authored cell is built from. The other half of the table.
+fn block_of(cell: Cell, blocks: &TerrainBlocks) -> BlockId {
+    match cell {
+        Cell::Metal => blocks.metal_wall,
+        Cell::Rusted => blocks.rusted_metal,
+        Cell::Grate => blocks.catwalk,
+        Cell::Mast => blocks.mast,
+        Cell::Beacon => blocks.beacon,
+        Cell::Counter => blocks.counter,
+        Cell::Path => blocks.stone,
+        Cell::Chest => blocks.chest,
+        Cell::Mailbox => blocks.mailbox,
+        Cell::Permit(Tier::One) => blocks.permit_box_i,
+        Cell::Permit(Tier::Two) => blocks.permit_box_ii,
+        Cell::Permit(Tier::Three) => blocks.permit_box_iii,
+        Cell::Roost => blocks.roost,
+        Cell::Vault => blocks.vault,
+        Cell::Cot => blocks.ward_cot,
+    }
+}
+
 /// The authored cell at a world position for one site, if any.
 pub fn cell_at(site: &TownSite, x: i32, y: i32, z: i32) -> Option<Cell> {
     let layer = y - site.ground;
@@ -751,23 +1001,9 @@ pub fn cell_at(site: &TownSite, x: i32, y: i32, z: i32) -> Option<Cell> {
         let Some(line) = rows.get(row as usize) else {
             continue;
         };
-        match line.as_bytes().get(col as usize) {
-            Some(b'M') => return Some(Cell::Metal),
-            Some(b'X') => return Some(Cell::Rusted),
-            Some(b'G') => return Some(Cell::Grate),
-            Some(b'T') => return Some(Cell::Mast),
-            Some(b'B') => return Some(Cell::Beacon),
-            Some(b'C') => return Some(Cell::Counter),
-            Some(b'P') => return Some(Cell::Path),
-            Some(b'S') => return Some(Cell::Chest),
-            Some(b'O') => return Some(Cell::Mailbox),
-            Some(b'1') => return Some(Cell::Permit(Tier::One)),
-            Some(b'2') => return Some(Cell::Permit(Tier::Two)),
-            Some(b'3') => return Some(Cell::Permit(Tier::Three)),
-            Some(b'R') => return Some(Cell::Roost),
-            Some(b'V') => return Some(Cell::Vault),
-            Some(b'H') => return Some(Cell::Cot),
-            _ => continue,
+        match line.as_bytes().get(col as usize).copied().and_then(cell_of) {
+            Some(cell) => return Some(cell),
+            None => continue,
         }
     }
     None
@@ -892,23 +1128,7 @@ pub fn stamp(chunk: &mut Chunk, position: ChunkPos, sites: &[TownSite], blocks: 
                     let Some(cell) = cell_at(site, world_x, world_y, world_z) else {
                         continue;
                     };
-                    let block = match cell {
-                        Cell::Metal => blocks.metal_wall,
-                        Cell::Rusted => blocks.rusted_metal,
-                        Cell::Grate => blocks.catwalk,
-                        Cell::Mast => blocks.mast,
-                        Cell::Beacon => blocks.beacon,
-                        Cell::Counter => blocks.counter,
-                        Cell::Path => blocks.stone,
-                        Cell::Chest => blocks.chest,
-                        Cell::Mailbox => blocks.mailbox,
-                        Cell::Permit(Tier::One) => blocks.permit_box_i,
-                        Cell::Permit(Tier::Two) => blocks.permit_box_ii,
-                        Cell::Permit(Tier::Three) => blocks.permit_box_iii,
-                        Cell::Roost => blocks.roost,
-                        Cell::Vault => blocks.vault,
-                        Cell::Cot => blocks.ward_cot,
-                    };
+                    let block = block_of(cell, blocks);
                     if let Some(local) = LocalPos::new(local_x, world_y, local_z) {
                         chunk.set(local, block);
                     }
@@ -1237,7 +1457,7 @@ mod tests {
             TownSite { centre: (512, 0), speciality: Speciality::Mine, ..town::home_site() },
             TownSite { centre: (0, 512), speciality: Speciality::Refinery, ..town::home_site() },
         ] {
-            for blueprint in plan_for(&site) {
+            for blueprint in plan_for(&site).iter().chain(growth_plan(&site)) {
                 let (width, depth) = blueprint.extent();
                 for (layer, rows) in blueprint.layers.iter().enumerate() {
                     assert_eq!(
@@ -1484,4 +1704,142 @@ mod tests {
             println!("{:?}: cots at {cots:?}", site.speciality);
         }
     }
+    /// A growth building stands on bare plateau, inside even the smallest
+    /// core, and clear of everything the town was already built with.
+    ///
+    /// The load-bearing geometry check of the whole round. A shed stamped
+    /// through the bank, out past the curtain wall, or half off the levelled
+    /// plot is not a town growing — it is a town breaking, and it would only
+    /// break for the players whose towns got rich.
+    #[test]
+    fn a_growth_building_stands_on_free_ground_inside_the_smallest_core() {
+        for speciality in [Speciality::Depot, Speciality::Mine, Speciality::Refinery] {
+            let site = TownSite {
+                centre: (0, 0),
+                speciality,
+                core_half: town::MIN_CORE_HALF,
+                ..town::home_site()
+            };
+            // The hometown's plan is the most crowded there is, so checking
+            // against it checks against every other one at the same time.
+            let crowded = TownSite { core_half: town::MIN_CORE_HALF, ..town::home_site() };
+            let authored = buildings(&crowded);
+
+            assert_eq!(growth_steps(&site), 3, "{} has no growth table", speciality.name());
+            for step in 0..growth_steps(&site) {
+                let shed = growth_building(&site, step).expect("a step with no building");
+                assert!(
+                    shed.role == Role::Works,
+                    "a growth building is not town works"
+                );
+                for x in shed.min.x..=shed.max.x {
+                    for z in shed.min.z..=shed.max.z {
+                        assert!(
+                            x.abs() <= town::MIN_CORE_HALF && z.abs() <= town::MIN_CORE_HALF,
+                            "{} step {step} reaches ({x}, {z}), off the levelled plot",
+                            speciality.name()
+                        );
+                        // Inside the curtain at its tightest. The trace is a
+                        // polar radius, so being inside the core *square* is
+                        // not the same as being inside the wall.
+                        let reach = ((x * x + z * z) as f32).sqrt();
+                        assert!(
+                            reach <= 21.0,
+                            "{} step {step} reaches ({x}, {z}), {reach} out and through the wall",
+                            speciality.name()
+                        );
+                        for other in &authored {
+                            // Paving claims its whole rectangle and not just
+                            // the cells it actually pays — every dwelling in
+                            // the game already overlaps it. What matters is
+                            // the road itself, checked below.
+                            if other.role == Role::Paving {
+                                continue;
+                            }
+                            assert!(
+                                !(x >= other.min.x
+                                    && x <= other.max.x
+                                    && z >= other.min.z
+                                    && z <= other.max.z),
+                                "{} step {step} is stamped through {:?} at ({x}, {z})",
+                                speciality.name(),
+                                other.role
+                            );
+                        }
+                        // And never in the road: the paving cross is how you
+                        // walk from the plaza to the counter, and a shed
+                        // across it would be a town that grew a wall through
+                        // its own high street.
+                        assert_ne!(
+                            cell_at(&crowded, x, crowded.ground, z),
+                            Some(Cell::Path),
+                            "{} step {step} stands in the road at ({x}, {z})",
+                            speciality.name()
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Two growth buildings never stand on the same ground.
+    #[test]
+    fn no_two_growth_buildings_share_a_pocket() {
+        let site = town::home_site();
+        let sheds: Vec<Building> = (0..growth_steps(&site))
+            .filter_map(|step| growth_building(&site, step))
+            .collect();
+        for (index, shed) in sheds.iter().enumerate() {
+            for other in &sheds[index + 1..] {
+                let overlaps = shed.min.x <= other.max.x
+                    && shed.max.x >= other.min.x
+                    && shed.min.z <= other.max.z
+                    && shed.max.z >= other.min.z;
+                assert!(!overlaps, "two growth buildings share ground: {shed:?} {other:?}");
+            }
+        }
+        assert!(growth_building(&site, growth_steps(&site)).is_none());
+    }
+
+    /// Every block a growth step lays is inside the building it claims, the
+    /// footings run below grade and the walls above it, and asking twice gives
+    /// the same answer — which is what lets the caller treat stamping as
+    /// idempotent rather than having to remember what it wrote.
+    #[test]
+    fn a_growth_step_lays_the_same_blocks_every_time_and_only_its_own() {
+        let blocks = TerrainBlocks::register_builtins(&mut vx_core::BlockRegistry::new());
+        for speciality in [Speciality::Depot, Speciality::Mine, Speciality::Refinery] {
+            let site = TownSite { speciality, ..town::home_site() };
+            for step in 0..growth_steps(&site) {
+                let laid = growth_blocks(&site, step, &blocks);
+                assert_eq!(laid, growth_blocks(&site, step, &blocks), "not pure in the site");
+                assert!(!laid.is_empty(), "{} step {step} laid nothing", speciality.name());
+
+                let claim = growth_building(&site, step).unwrap();
+                let mut below = 0;
+                let mut above = 0;
+                for (at, _) in &laid {
+                    assert!(
+                        at.x >= claim.min.x
+                            && at.x <= claim.max.x
+                            && at.z >= claim.min.z
+                            && at.z <= claim.max.z
+                            && at.y >= claim.min.y
+                            && at.y <= claim.max.y,
+                        "{at:?} is outside the ground the building claims"
+                    );
+                    if at.y < site.ground {
+                        below += 1;
+                    } else {
+                        above += 1;
+                    }
+                }
+                assert!(below > 0, "a growth building with no footings");
+                assert!(above > 0, "a growth building with nothing above grade");
+            }
+        }
+        assert!(growth_blocks(&town::home_site(), 99, &blocks).is_empty());
+    }
+
 }
+

@@ -217,6 +217,8 @@ impl Board {
             depart: now,
             arrive: now + crate::economy::Shipment::travel_ticks(here.centre, to),
             owner: crate::economy::Owner::Player,
+            // Paid on arrival, at the far town's price, not now.
+            paid: 0,
         });
         self.feedback = Some(format!(
             "{} AWAY TO {} {}",

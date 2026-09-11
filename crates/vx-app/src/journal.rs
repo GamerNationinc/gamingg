@@ -197,7 +197,14 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // demonstrated at two different hashes over the same orders before it was
 // fixed. `Wheel` and `Pilot` close it, and a log recorded under 30 replays a
 // session in which nobody ever took the controls.
-const VERSION: u32 = 33;
+// 34: the counter (stage 58). Selling was never written down, so the live
+// books and the replayed books drifted apart at every counter — which was
+// harmless exactly as long as a town's books could not move a block. Stage 58
+// makes a prospering town put buildings up, and buildings are ground, so a
+// divergence in the till is now a divergence in the hash. `Sell` closes it,
+// and a log recorded under 33 replays a session in which nobody ever sold
+// anything.
+const VERSION: u32 = 34;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -406,6 +413,26 @@ pub enum Command {
     /// drawn nose (`Mining::set_pilot_look`) and never a world edit, so it is
     /// presentation and stays off the wire.
     Pilot { bits: u8 },
+
+    /// A stack sold over a town's counter.
+    ///
+    /// An order, not an outcome: what is written down is *which good, at
+    /// whose counter, at what standing*, and both sides re-derive the price,
+    /// the amount and the payment by running [`crate::shop::sell_all`] over
+    /// their own pile and their own books. The standing is stated on the wire
+    /// for the same reason a shot's muzzle is — it shades the unit rate, so it
+    /// is a lever on the simulation and not a presentation detail, and the
+    /// replay has no reputation ledger of its own to ask.
+    ///
+    /// Nothing was written down here until stage 58, and it did not matter
+    /// while a town's books could not move a block. They can now.
+    Sell {
+        town: (i32, i32),
+        /// Index into [`crate::economy::GOODS`].
+        good: u32,
+        /// [`crate::reputation::Standing`] as a byte.
+        standing: u8,
+    },
     /// The pack tipped into a container.
     ///
     /// **No payload at all**, and that is the whole design. Replay carries its
@@ -749,14 +776,30 @@ impl CommandLog {
             if ticks == 0 {
                 return;
             }
+            let before = self.tick;
             self.tick += u64::from(ticks);
             if let Some(Entry {
                 command: Command::Advance { ticks: last },
                 ..
             }) = self.entries.last_mut()
             {
-                *last += ticks;
-                return;
+                // Merged, **unless the merge would swallow a dispatch
+                // window**. The towns turn on that boundary and a town that
+                // has earned a shed puts it up there, while `mining.advance`
+                // is handed a whole order at once — so folding "a frame, then
+                // another frame" into one order across a boundary replays a
+                // crew that dug the whole afternoon *before* the town built,
+                // where the live game had it build in the middle. Same orders,
+                // different ground, and it was demonstrated at two hashes
+                // before this line existed.
+                //
+                // The cost is one extra entry every four in-game minutes,
+                // against a journal that carries thousands.
+                let window = crate::economy::DISPATCH_EVERY;
+                if before / window == self.tick / window {
+                    *last += ticks;
+                    return;
+                }
             }
         }
         self.entries.push(Entry {
@@ -862,6 +905,20 @@ pub struct Rebuilt {
     /// Every town's strongroom. Carried because a deposit moves the pile,
     /// and the pile is what half the log's arithmetic runs over.
     pub banks: crate::bank::Bank,
+    /// The frontier's books.
+    ///
+    /// New in stage 58, and it is a *ground* concern now rather than a
+    /// bookkeeping one: a town that trades well puts buildings up, and a
+    /// building is blocks. A replay whose books were empty while the live
+    /// game's were busy would walk past a town with three fewer sheds on it
+    /// and report a different world hash — correctly.
+    pub economy: crate::economy::Economy,
+    /// And which of those buildings have actually been stamped.
+    pub masonry: crate::masonry::Masonry,
+    /// The last dispatch window the network was run for. `Session` and
+    /// `Active` both keep the same field, and all three run the same
+    /// function.
+    last_network: u64,
     /// What the player is carrying.
     ///
     /// New in stage 55, and it closes a hole that had been open since stage 6:
@@ -903,6 +960,12 @@ impl Default for Rebuilt {
             stands: crate::succession::Ledger::default(),
             tick: 0,
             banks: crate::bank::Bank::default(),
+            economy: crate::economy::Economy::new(),
+            masonry: crate::masonry::Masonry::new(),
+            // `MAX_VALUE` rather than zero, so the first `Advance` runs the
+            // network instead of deciding it already had. `Session` and
+            // `Active` open on the same number for the same reason.
+            last_network: u64::MAX,
             pack: crate::pack::Pack::new(),
             drops: crate::drops::Drops::new(),
             // The stock frame, until a `Carry` says otherwise — which is
@@ -1088,6 +1151,38 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                 }
                 None => state.mining.release_control(),
             }
+        }
+        Command::Sell { town, good, standing } => {
+            // The same function the counter runs, over the replay's own pile
+            // and the replay's own books. Nothing about the sale is trusted
+            // from the log: the log says *which good, whose counter, at what
+            // standing*, and the price, the amount and the payment all fall
+            // out of state both sides already have.
+            let Some(site) = world
+                .towns_near(*town, 1)
+                .into_iter()
+                .find(|site| site.centre == *town)
+            else {
+                log::warn!("a sale at {town:?}, which is not a town");
+                return;
+            };
+            let Some(pile) = mining.fleet.base.as_mut().map(|base| &mut base.stockpile) else {
+                return;
+            };
+            let now = state.tick;
+            // A scratch wallet: credits are not ground, and `Rebuilt` has
+            // never carried one — the same reason `Stand` and `Take` are
+            // live-only. What the sale does to the *town* is the part that
+            // moves blocks, and that lands in the books below.
+            let mut takings = crate::wallet::Wallet::new();
+            let market = state.economy.market_mut(&site, now);
+            crate::shop::sell_all(
+                pile,
+                &mut takings,
+                market,
+                crate::economy::GOODS[*good as usize],
+                crate::reputation::Standing::from_byte(*standing),
+            );
         }
         Command::Pilot { bits } => {
             // Sticky, like `Move`: it holds until the next one arrives, and
@@ -1331,6 +1426,31 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                     world,
                     state.tick,
                     standing,
+                );
+                // And the towns do business, through the one function the
+                // live game and a played session both call. Its buildings are
+                // blocks, so this is not bookkeeping bolted onto the replay —
+                // it is the replay covering ground it could not see before.
+                //
+                // **Inside the loop, and it has to be.** `CommandLog::record`
+                // coalesces consecutive `Advance`s into one, so "sixteen ticks
+                // eight hundred times" arrives here as a single order — and a
+                // network run once at the end of that would stamp a town's new
+                // shed *after* a crew had spent the afternoon digging where it
+                // stands, instead of before. Same orders, different ground.
+                // Cheap, because the call returns on a division the moment the
+                // window has not turned.
+                let column = (
+                    state.player.position.x.floor() as i32,
+                    state.player.position.z.floor() as i32,
+                );
+                let _ = crate::masonry::tick_the_network(
+                    &mut state.economy,
+                    &mut state.masonry,
+                    world,
+                    &mut state.last_network,
+                    column,
+                    state.tick,
                 );
             }
         }
@@ -1651,6 +1771,13 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
                 HeapShape::Shaft => 2,
             }])?;
             file.write_all(&crew.to_le_bytes())?;
+        }
+        Command::Sell { town, good, standing } => {
+            file.write_all(&[33u8])?;
+            file.write_all(&town.0.to_le_bytes())?;
+            file.write_all(&town.1.to_le_bytes())?;
+            file.write_all(&good.to_le_bytes())?;
+            file.write_all(&[*standing])?;
         }
         Command::Gift { town, person, good } => {
             file.write_all(&[20u8])?;
@@ -1990,6 +2117,21 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
                 crew: read_u32(file)?,
             }
         }
+        33 => {
+            let mut word = [0u8; 4];
+            file.read_exact(&mut word)?;
+            let x = i32::from_le_bytes(word);
+            file.read_exact(&mut word)?;
+            let z = i32::from_le_bytes(word);
+            let town = (x, z);
+            let good = read_u32(file)?;
+            if good as usize >= crate::economy::GOODS.len() {
+                return Err(std::io::Error::other(format!("unknown good {good}")));
+            }
+            let mut standing = [0u8; 1];
+            file.read_exact(&mut standing)?;
+            Command::Sell { town, good, standing: standing[0] }
+        }
         21 => {
             let mut kind = [0u8; 1];
             file.read_exact(&mut kind)?;
@@ -2134,8 +2276,9 @@ mod tests {
 
         // Frames of wildly different lengths, as a real session has.
         for ticks in [1u32, 7, 3, 16, 2, 11, 16, 16, 9, 4] {
-            rebuilt.mining.advance(&mut world, &events, ticks);
-            journal.record(Command::Advance { ticks });
+            let step = Command::Advance { ticks };
+            apply(&step, &mut world, &events, &mut rebuilt);
+            journal.record(step);
         }
 
         // And some work by hand on top.
@@ -2175,8 +2318,9 @@ mod tests {
         apply(&dispatch, &mut world, &events, &mut rebuilt);
         journal.record(dispatch);
         for ticks in [5u32, 16, 16, 16, 11] {
-            rebuilt.mining.advance(&mut world, &events, ticks);
-            journal.record(Command::Advance { ticks });
+            let step = Command::Advance { ticks };
+            apply(&step, &mut world, &events, &mut rebuilt);
+            journal.record(step);
         }
 
         let span = vx_agent::working_span(area, area.min);
@@ -2295,8 +2439,9 @@ mod tests {
         apply(&dispatch, &mut world, &events, &mut rebuilt);
         journal.record(dispatch);
         for ticks in [5u32, 16] {
-            rebuilt.mining.advance(&mut world, &events, ticks);
-            journal.record(Command::Advance { ticks });
+            let step = Command::Advance { ticks };
+            apply(&step, &mut world, &events, &mut rebuilt);
+            journal.record(step);
         }
 
         // Take the wheel and cut by hand, exactly as `R` and the trigger do.
@@ -2315,8 +2460,9 @@ mod tests {
             apply(&driving, &mut world, &events, &mut rebuilt);
             journal.record(driving);
             for ticks in [8u32, 8, 8] {
-                rebuilt.mining.advance(&mut world, &events, ticks);
-                journal.record(Command::Advance { ticks });
+                let step = Command::Advance { ticks };
+                apply(&step, &mut world, &events, &mut rebuilt);
+                journal.record(step);
             }
         }
 
@@ -2324,8 +2470,9 @@ mod tests {
         apply(&hands_off, &mut world, &events, &mut rebuilt);
         journal.record(hands_off);
         for ticks in [16u32, 16] {
-            rebuilt.mining.advance(&mut world, &events, ticks);
-            journal.record(Command::Advance { ticks });
+            let step = Command::Advance { ticks };
+            apply(&step, &mut world, &events, &mut rebuilt);
+            journal.record(step);
         }
 
         let span = vx_agent::working_span(area, area.min);
@@ -2356,8 +2503,9 @@ mod tests {
         // Frames of wildly different lengths, as a real session has.
         for _ in 0..200 {
             for ticks in [1u32, 7, 3, 16, 2, 11, 16, 9] {
-                rebuilt.mining.advance(&mut world, &events, ticks);
-                journal.record(Command::Advance { ticks });
+                let step = Command::Advance { ticks };
+                apply(&step, &mut world, &events, &mut rebuilt);
+                journal.record(step);
             }
         }
 
@@ -2395,26 +2543,36 @@ mod tests {
     #[test]
     fn ticks_fold_so_a_running_game_does_not_bury_the_log() {
         // Sixty entries a second would drown the handful that carry meaning.
+        let window = crate::economy::DISPATCH_EVERY;
         let mut journal = CommandLog::new();
         for _ in 0..1_000 {
             journal.record(Command::Advance { ticks: 3 });
         }
-        assert_eq!(journal.len(), 1, "per-frame ticks were not folded");
         assert_eq!(journal.tick(), 3_000, "folding lost time");
+        // One entry per dispatch window, not one per frame: a thousand frames
+        // fold into a handful. The boundary is not optional — see `record`.
+        let windows = 3_000u64.div_ceil(window) as usize;
+        assert_eq!(journal.len(), windows, "per-frame ticks were not folded");
+        assert!(windows < 10, "a thousand frames left {windows} entries");
         assert_eq!(
-            journal.entries()[0].command,
-            Command::Advance { ticks: 3_000 }
+            journal.entries().iter().map(|entry| match entry.command {
+                Command::Advance { ticks } => u64::from(ticks),
+                _ => 0,
+            }).sum::<u64>(),
+            3_000,
+            "folding lost time"
         );
 
         // A zero-tick frame is not an event.
+        let folded = journal.len();
         journal.record(Command::Advance { ticks: 0 });
-        assert_eq!(journal.len(), 1);
+        assert_eq!(journal.len(), folded);
         assert_eq!(journal.tick(), 3_000);
 
         // Anything else breaks the run.
         journal.record(Command::Cancel);
         journal.record(Command::Advance { ticks: 2 });
-        assert_eq!(journal.len(), 3);
+        assert_eq!(journal.len(), folded + 2);
     }
 
     #[test]
@@ -4387,16 +4545,28 @@ mod charter_tests {
             world.load_around(ChunkPos::new(0, 0), 4);
             world
         };
+        let day = Command::Advance {
+            ticks: crate::schedule::TICKS_PER_DAY as u32,
+        };
         let mut journal = CommandLog::default();
         journal.record(Command::Take { town: site.centre });
-        journal.record(Command::Advance {
-            ticks: crate::schedule::TICKS_PER_DAY as u32,
-        });
+        journal.record(day.clone());
         let mut taken = patch();
         replay(&journal, &mut taken, &EventBus::new());
+
+        // The control is the *same day* without the seizure, not an
+        // untouched world: a day passing is a day of weather, of fire and —
+        // since stage 58 — of towns trading and putting sheds up, and
+        // comparing a replayed day against a world where no time passed at
+        // all would be testing the clock rather than the order.
+        let mut untaken = patch();
+        let mut quiet = CommandLog::default();
+        quiet.record(day);
+        replay(&quiet, &mut untaken, &EventBus::new());
+
         assert_eq!(
             region_hash(&taken, span.0, span.1),
-            region_hash(&patch(), span.0, span.1),
+            region_hash(&untaken, span.0, span.1),
             "seizing a town's chairs moved a block"
         );
         // And the order round-trips.
