@@ -56,6 +56,15 @@ pub enum Trace {
     /// Six, with the re-entrant angles deep enough to read as ravelins
     /// covering the gates.
     SixPoint,
+    /// Eight, thrown out a long way, on a curtain three times the radius of
+    /// anything the frontier builds. The Ruined City's ancient wall, and the
+    /// only trace in the game nobody is still maintaining.
+    ///
+    /// A separate variant rather than another rung of the tier table, because
+    /// it is not a bigger version of the same decision: the others are what a
+    /// settlement could afford, and this is what somebody with a state behind
+    /// them built, a long time before anybody now living got here.
+    GreatStar,
 }
 
 impl Trace {
@@ -66,6 +75,7 @@ impl Trace {
             Trace::Palisade => 0.0,
             Trace::FourPoint => 4.0,
             Trace::SixPoint => 6.0,
+            Trace::GreatStar => 8.0,
         }
     }
 
@@ -79,6 +89,9 @@ impl Trace {
             Trace::Palisade => 0.0,
             Trace::FourPoint => 7.0,
             Trace::SixPoint => 9.0,
+            // Scaled with the radius: a nine-block point on a curtain
+            // seventy-six blocks out would not read as a point at all.
+            Trace::GreatStar => ANCIENT_BASTION,
         }
     }
 
@@ -90,6 +103,9 @@ impl Trace {
     fn standoff(self) -> i32 {
         match self {
             Trace::MiniStar => 9,
+            // Unused: the great star's radius is set outright — see
+            // `ANCIENT_RADIUS` — because it is not measured off a core.
+            Trace::GreatStar => 0,
             _ => STANDOFF,
         }
     }
@@ -104,6 +120,8 @@ impl Trace {
     fn height(self) -> i32 {
         match self {
             Trace::MiniStar => 4,
+            // It was tall. Most of it is not standing.
+            Trace::GreatStar => ANCIENT_HEIGHT,
             _ => WALL_HEIGHT,
         }
     }
@@ -112,6 +130,7 @@ impl Trace {
     fn half(self) -> f32 {
         match self {
             Trace::MiniStar => 1.5,
+            Trace::GreatStar => 6.0,
             _ => WALL_HALF,
         }
     }
@@ -120,6 +139,7 @@ impl Trace {
     fn ditch(self) -> f32 {
         match self {
             Trace::MiniStar => 2.5,
+            Trace::GreatStar => 11.0,
             _ => DITCH_WIDTH,
         }
     }
@@ -130,7 +150,16 @@ impl Trace {
             Trace::Palisade => "PALISADE",
             Trace::FourPoint => "FOUR-POINT",
             Trace::SixPoint => "SIX-POINT",
+            Trace::GreatStar => "GREAT STAR",
         }
+    }
+
+    /// Does this trace carry lockboxes at its gates?
+    ///
+    /// Somebody has to be keeping the keys. Nobody has kept the great star's
+    /// for a very long time, so its gateways are simply gaps.
+    fn locked(self) -> bool {
+        !matches!(self, Trace::GreatStar)
     }
 }
 
@@ -155,6 +184,37 @@ const DITCH_WIDTH: f32 = 5.0;
 
 /// Half-width of a gateway, in blocks, measured along the wall.
 const GATE_HALF: f32 = 3.0;
+
+/// The radius of the city's modern retrofit: a ring round the compound, well
+/// inside the ancient wall it shelters under.
+const MODERN_RADIUS: f32 = 30.0;
+
+/// The radius of the city's ancient curtain, and the reach of its points.
+///
+/// **Inside the plateau**, not outside it. The first cut of this stood the
+/// great star fifty-eight blocks past the city's own core, which put it on raw
+/// hillside: `part_at` rides each column's own ground, so a wall out there
+/// follows the terrain up and down and reads as a fragment stuck on a slope
+/// rather than as a fort. On the levelled plot it reads as what it is.
+///
+/// And the *whole* trace has to fit, not just the curtain: a bastion throws
+/// sixteen blocks past the radius, the wall is six thick and the ditch outside
+/// it eleven wide, so the outermost thing the great star cuts is ninety-five
+/// blocks out — one inside the city's own ninety-six block core. Get that
+/// wrong by a dozen and the ditch runs off the levelled plot and down the
+/// hillside, which is exactly what the first cut of this did.
+pub const ANCIENT_RADIUS: f32 = 60.0;
+const ANCIENT_BASTION: f32 = 16.0;
+
+/// How high the ancient rampart stood.
+const ANCIENT_HEIGHT: i32 = 11;
+
+/// How much of the ancient curtain has come down.
+///
+/// Two thirds, against a quarter for a frontier fort that has been let go. The
+/// point of the place is the ruin: at this share you are never more than a
+/// short walk from a breach, and the wall still reads as a wall between them.
+const ANCIENT_RUIN_SHARE: f32 = 0.66;
 
 /// How far out from the town core the curtain runs, past the buildings.
 ///
@@ -205,6 +265,25 @@ fn hash01(seed: u64, salt: u64) -> f32 {
 /// never bothered" is a story the frontier does not tell, so it is gone
 /// rather than left in the table unreachable.
 pub fn fort_for(site: &TownSite) -> Fort {
+    // The city's modern retrofit is not on the tier table: it is a six-point
+    // trace drawn tight around the compound, and it is kept — the one wall out
+    // there that somebody is still maintaining.
+    if site.is_city() {
+        return Fort {
+            trace: Trace::SixPoint,
+            // A fixed radius rather than `core_half + standoff`, which would
+            // put a six-point trace a hundred and ten blocks out and wall the
+            // whole parade ground in. The retrofit is a ring round the
+            // compound, not round the ruin.
+            radius: MODERN_RADIUS,
+            phase: hash01(site.seed, 0x0f_02) * std::f32::consts::TAU,
+            ruined: false,
+            seed: site.seed,
+            centre: site.centre,
+            ground: site.ground,
+        };
+    }
+
     let roll = hash01(site.seed, 0x0f_01);
     let big = site.core_half >= crate::town::MAX_CORE_HALF;
     let middling = site.core_half >= crate::town::HOME_CORE_HALF;
@@ -212,6 +291,9 @@ pub fn fort_for(site: &TownSite) -> Fort {
         Speciality::Refinery => 0.25,
         Speciality::Mine => 0.10,
         Speciality::Depot => 0.0,
+        // Unreachable: the city returns above. Named rather than caught by a
+        // wildcard, so adding a speciality is a compile error here too.
+        Speciality::City => 0.0,
     };
 
     let trace = if big {
@@ -252,6 +334,31 @@ pub fn fort_for(site: &TownSite) -> Fort {
         centre: site.centre,
         ground: site.ground,
     }
+}
+
+/// Every wall standing on one site, in the order they were built.
+///
+/// One for a frontier town. **Two for the Ruined City**: the ancient great
+/// star out in the country, and the modern retrofit drawn in tight around the
+/// compound that squats inside it. `stamp` walks this rather than calling
+/// `fort_for` once, which is the whole of what it costs to put a second wall
+/// on a site — the trace is a polar radius, so a hundred-and-fifty block ruin
+/// is exactly as cheap per column as a forty-block palisade.
+pub fn forts_for(site: &TownSite) -> impl Iterator<Item = Fort> {
+    let modern = fort_for(site);
+    let ancient = site.is_city().then(|| Fort {
+        trace: Trace::GreatStar,
+        radius: ANCIENT_RADIUS,
+        // Its own phase, so the eight ancient points do not line up with the
+        // six modern ones and read as one wall drawn twice.
+        phase: hash01(site.seed, 0x0f_04) * std::f32::consts::TAU,
+        // Not a roll. Nobody has held this wall in a very long time.
+        ruined: true,
+        seed: site.seed,
+        centre: site.centre,
+        ground: site.ground,
+    });
+    ancient.into_iter().chain(std::iter::once(modern))
 }
 
 /// What a column of a fort holds.
@@ -316,7 +423,15 @@ impl Fort {
             return false;
         }
         let segment = (angle.rem_euclid(std::f32::consts::TAU) / SEGMENT_ARC).floor() as i64;
-        hash01(self.seed, 0x0f_10 ^ segment as u64) < RUIN_SHARE
+        // The ancient curtain is ruined on its own terms — two thirds down
+        // rather than a third — and on its own hash stream, so the great star
+        // and the modern wall inside it do not fall in the same places.
+        let (share, salt) = if matches!(self.trace, Trace::GreatStar) {
+            (ANCIENT_RUIN_SHARE, 0x0f_20)
+        } else {
+            (RUIN_SHARE, 0x0f_10)
+        };
+        hash01(self.seed, salt ^ segment as u64) < share
     }
 
     /// What stands at a world position, if anything.
@@ -383,7 +498,7 @@ impl Fort {
                 // The lock stands at the gate's edge, on the inner face,
                 // where a door's lockbox would be.
                 let at_edge = (signed + half).abs() < 1.0;
-                if at_edge && y == ground + 1 {
+                if at_edge && y == ground + 1 && self.trace.locked() {
                     return Some(Part::GateLock);
                 }
                 // Above the opening the wall carries on, so a gate reads as
@@ -441,34 +556,41 @@ pub fn stamp(
 ) {
     let origin = position.origin();
     for site in sites {
-        let fort = fort_for(site);
-        let reach = fort.reach();
-        if origin.x > site.centre.0 + reach
-            || origin.z > site.centre.1 + reach
-            || origin.x + vx_core::CHUNK_SIZE <= site.centre.0 - reach
-            || origin.z + vx_core::CHUNK_SIZE <= site.centre.1 - reach
-        {
-            continue;
-        }
+        // Every wall on the site, not just the one it lives behind — the city
+        // has two. See `forts_for`.
+        for fort in forts_for(site) {
+            let reach = fort.reach();
+            if origin.x > site.centre.0 + reach
+                || origin.z > site.centre.1 + reach
+                || origin.x + vx_core::CHUNK_SIZE <= site.centre.0 - reach
+                || origin.z + vx_core::CHUNK_SIZE <= site.centre.1 - reach
+            {
+                continue;
+            }
 
-        for local_z in 0..vx_core::CHUNK_SIZE {
-            for local_x in 0..vx_core::CHUNK_SIZE {
-                let (world_x, world_z) = (origin.x + local_x, origin.z + local_z);
-                let ground = height(world_x, world_z);
-                for y in (ground - FOOTING_DEPTH.max(DITCH_DEPTH))..=(ground + WALL_HEIGHT) {
-                    let Some(part) = fort.part_at(world_x, y, world_z, ground) else {
-                        continue;
-                    };
-                    let block = match part {
-                        Part::Footing => blocks.footing,
-                        Part::Rampart => blocks.rampart,
-                        Part::Walk => blocks.catwalk,
-                        Part::Parapet => blocks.metal_wall,
-                        Part::Ditch => vx_core::BlockId::AIR,
-                        Part::GateLock => blocks.permit_box_ii,
-                    };
-                    if let Some(local) = vx_core::LocalPos::new(local_x, y, local_z) {
-                        chunk.set(local, block);
+            // The column range is the trace's own, not the constant: the
+            // ancient curtain stood eleven above grade and a loop bounded by
+            // `WALL_HEIGHT` would saw the top off it.
+            let top = fort.trace.height();
+            for local_z in 0..vx_core::CHUNK_SIZE {
+                for local_x in 0..vx_core::CHUNK_SIZE {
+                    let (world_x, world_z) = (origin.x + local_x, origin.z + local_z);
+                    let ground = height(world_x, world_z);
+                    for y in (ground - FOOTING_DEPTH.max(DITCH_DEPTH))..=(ground + top) {
+                        let Some(part) = fort.part_at(world_x, y, world_z, ground) else {
+                            continue;
+                        };
+                        let block = match part {
+                            Part::Footing => blocks.footing,
+                            Part::Rampart => blocks.rampart,
+                            Part::Walk => blocks.catwalk,
+                            Part::Parapet => blocks.metal_wall,
+                            Part::Ditch => vx_core::BlockId::AIR,
+                            Part::GateLock => blocks.permit_box_ii,
+                        };
+                        if let Some(local) = vx_core::LocalPos::new(local_x, y, local_z) {
+                            chunk.set(local, block);
+                        }
                     }
                 }
             }
@@ -522,8 +644,21 @@ mod tests {
             let ground = |_: i32, _: i32| 90;
             for site in town::towns_near(seed, (0, 0), 12_000, &ground) {
                 let fort = fort_for(&site);
+                // The widest wall on the site, because the city's is the
+                // ancient one. A frontier town's stands outside its plot; the
+                // city's stands *inside* its own, because the plot is nine
+                // times the area and the wall rings the parade ground rather
+                // than the plateau — so what is asserted is that a wall
+                // exists and encloses what it is for, not that it is drawn at
+                // one particular radius.
+                let around = forts_for(&site).map(|wall| wall.reach()).max().unwrap_or(0);
+                let enclosed = if site.is_city() {
+                    crate::town::plan::PARADE_RADIUS
+                } else {
+                    site.core_half
+                };
                 assert!(
-                    fort.reach() > site.core_half,
+                    around > enclosed,
                     "the town at {:?} put nothing around itself",
                     site.centre
                 );
@@ -655,6 +790,12 @@ mod tests {
     fn the_wall_stands_outside_the_buildings() {
         // The fort may not eat the town it is protecting.
         for site in sample() {
+            // The city is the exception and is tested on its own terms below:
+            // its modern trace deliberately stands *inside* its plateau,
+            // because what it rings is the compound rather than the ruin.
+            if site.is_city() {
+                continue;
+            }
             let fort = fort_for(&site);
             let steps = 360;
             for step in 0..steps {
@@ -783,4 +924,88 @@ mod tests {
             }
         }
     }
+    /// **The city has two walls, and only one of them is kept.**
+    #[test]
+    fn the_city_stands_inside_an_ancient_ruin() {
+        let ground = |_: i32, _: i32| 100;
+        let city = town::city(2024, &ground);
+        let walls: Vec<Fort> = forts_for(&city).collect();
+        assert_eq!(walls.len(), 2, "the city has {} walls", walls.len());
+
+        let ancient = walls[0];
+        let modern = walls[1];
+        assert_eq!(ancient.trace, Trace::GreatStar);
+        assert!(ancient.ruined, "the great star is standing");
+        assert!(!modern.ruined, "the retrofit has been let go");
+        assert!(
+            modern.radius < ancient.radius,
+            "the retrofit is outside the ruin it shelters in"
+        );
+
+        // A frontier town has one wall and it is not a great star.
+        let town = town::towns_near(2024, (0, 0), town::CELL, &ground)
+            .into_iter()
+            .find(|site| !site.is_city())
+            .expect("no frontier town");
+        assert_eq!(forts_for(&town).count(), 1);
+        assert!(forts_for(&town).all(|wall| wall.trace != Trace::GreatStar));
+    }
+
+    /// **The whole ancient trace stands on the levelled plot.**
+    ///
+    /// Not just the curtain: a bastion throws past the radius, the wall has a
+    /// thickness and the ditch is cut outside that. Get it wrong and the ditch
+    /// runs off the plateau and down the hillside, which is what the first cut
+    /// of this did — a fort riding raw terrain reads as a fragment stuck on a
+    /// slope rather than as a fort.
+    #[test]
+    fn the_ancient_trace_fits_on_the_citys_own_plateau() {
+        let ground = |_: i32, _: i32| 100;
+        let city = town::city(2024, &ground);
+        for wall in forts_for(&city) {
+            assert!(
+                wall.reach() <= city.core_half,
+                "{:?} reaches {} past a {} block core",
+                wall.trace,
+                wall.reach(),
+                city.core_half
+            );
+        }
+    }
+
+    /// Nobody has kept the great star's keys. Its gateways are gaps.
+    #[test]
+    fn the_ancient_gates_carry_no_locks() {
+        let ground = |_: i32, _: i32| 100;
+        let city = town::city(2024, &ground);
+        let ancient = forts_for(&city).next().expect("no ancient wall");
+        let mut locks = 0;
+        let mut modern_locks = 0;
+        for step in 0..2_000 {
+            let angle = std::f32::consts::TAU * step as f32 / 2_000.0;
+            for wall in [ancient, fort_for(&city)] {
+                let radius = wall.radius_at(angle);
+                let x = city.centre.0 + (angle.cos() * radius).round() as i32;
+                let z = city.centre.1 + (angle.sin() * radius).round() as i32;
+                for probe in -2..=2 {
+                    let at = (
+                        x + (angle.cos() * probe as f32).round() as i32,
+                        z + (angle.sin() * probe as f32).round() as i32,
+                    );
+                    if wall.part_at(at.0, city.ground + 1, at.1, city.ground)
+                        == Some(Part::GateLock)
+                    {
+                        if wall.trace == Trace::GreatStar {
+                            locks += 1;
+                        } else {
+                            modern_locks += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(locks, 0, "somebody is still keeping the great star's keys");
+        assert!(modern_locks > 0, "the retrofit has no lock on its gate");
+    }
+
 }

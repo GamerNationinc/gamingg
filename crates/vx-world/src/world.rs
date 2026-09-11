@@ -76,6 +76,11 @@ impl World {
         &self.charters
     }
 
+    /// The Ruined City. Pure in the seed, and cheap enough to ask per frame.
+    pub fn city(&self) -> TownSite {
+        self.generator.city()
+    }
+
     /// Every town within `radius` of `at`, nearest first — the lattice's
     /// towns and the founded ones together.
     ///

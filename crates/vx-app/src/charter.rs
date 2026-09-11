@@ -265,6 +265,10 @@ fn speciality_byte(speciality: Speciality) -> u8 {
         Speciality::Depot => 0,
         Speciality::Mine => 1,
         Speciality::Refinery => 2,
+        // Unreachable in practice — nobody founds a city, and `site_at`
+        // always writes a depot — but named rather than caught by a wildcard
+        // so that adding a speciality is a compile error here too.
+        Speciality::City => 3,
     }
 }
 
@@ -272,6 +276,7 @@ fn speciality_from(byte: u8) -> Speciality {
     match byte {
         1 => Speciality::Mine,
         2 => Speciality::Refinery,
+        3 => Speciality::City,
         _ => Speciality::Depot,
     }
 }

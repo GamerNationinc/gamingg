@@ -57,6 +57,9 @@ pub mod colour {
     /// Where an accepted posting wants you — drawn whether or not the ground
     /// around it has ever been seen.
     pub const CONTRACT: [u8; 4] = [255, 90, 140, 255];
+    /// The Ruined City. Drawn from the first frame, over the fog, because
+    /// knowing where it is has never been the difficulty — getting there is.
+    pub const CITY: [u8; 4] = [255, 205, 90, 255];
     /// A load on the trade network, yours or a town's.
     pub const TRADE: [u8; 4] = [255, 214, 90, 255];
     /// A contact the kestrel reported: where something *was* seen.

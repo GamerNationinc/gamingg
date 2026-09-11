@@ -611,6 +611,12 @@ impl TerrainGenerator {
         crate::town::towns_overlapping(self.seed, min, max, &|x, z| self.natural_height_at(x, z))
     }
 
+    /// The Ruined City for this seed. One cell of work — see
+    /// [`crate::town::city`].
+    pub fn city(&self) -> TownSite {
+        crate::town::city(self.seed, &|x, z| self.natural_height_at(x, z))
+    }
+
     /// Towns near a column, nearest first — and without loading a thing.
     pub fn towns_near(&self, at: (i32, i32), radius: i32) -> Vec<TownSite> {
         crate::town::towns_near(self.seed, at, radius, &|x, z| self.natural_height_at(x, z))
@@ -1868,6 +1874,80 @@ mod tests {
         let top = chunk.get(LocalPos::new(0, surface, 0).unwrap());
         assert_eq!(registry.get(top).unwrap().name, "engine:stone", "spawn is not paved");
     }
+    /// **The Ruined City actually reaches the ground, and it reaches it the
+    /// same way from every direction.**
+    ///
+    /// The seam test for the widest thing on the lattice. A city is nine times
+    /// a town's area with a wall inside it and a parade ground under that, and
+    /// every chunk across it derives its own slice from the same site — so a
+    /// gather margin that is one block short is a line of wrong blocks running
+    /// through the middle of the place.
+    #[test]
+    fn the_city_reaches_the_ground_and_every_chunk_agrees_on_it() {
+        let (registry, generator) = generator(2024);
+        let city = generator.city();
+        let rampart = registry.id_of("engine:rampart").unwrap();
+        let paving = registry.id_of("engine:stone").unwrap();
+
+        let middle = vx_core::BlockPos::new(city.centre.0, 0, city.centre.1).chunk();
+        // Right across the plot, so the sweep crosses the compound, the parade
+        // ground and both walls.
+        let across: Vec<ChunkPos> = (-5..=5)
+            .flat_map(|dx| (-5..=5).map(move |dz| (dx, dz)))
+            .map(|(dx, dz)| ChunkPos::new(middle.x + dx, middle.z + dz))
+            .collect();
+
+        let forwards: Vec<Chunk> = across.iter().map(|pos| generator.generate(*pos)).collect();
+        let backwards: Vec<Chunk> = across
+            .iter()
+            .rev()
+            .map(|pos| generator.generate(*pos))
+            .collect();
+        for (ahead, behind) in forwards.iter().zip(backwards.iter().rev()) {
+            assert_eq!(ahead, behind, "a chunk of the city depends on what was asked first");
+        }
+
+        let mut walls = 0;
+        let mut paved = 0;
+        for chunk in &forwards {
+            for (_, block) in chunk.iter_blocks() {
+                if block == rampart {
+                    walls += 1;
+                } else if block == paving {
+                    paved += 1;
+                }
+            }
+        }
+        assert!(walls > 2_000, "only {walls} blocks of wall in a great star");
+        assert!(paved > 2_000, "only {paved} blocks of parade ground");
+    }
+
+    /// And the city moves nothing it does not stand on.
+    ///
+    /// It is the first thing on the lattice big enough that widening the
+    /// gather margin for it touches every chunk in the world — so the hometown
+    /// has to come out of the generator exactly as it always did.
+    #[test]
+    fn the_hometown_is_untouched_by_a_city_three_kilometres_away() {
+        let (_, generator) = generator(2024);
+        let city = generator.city();
+        assert!(
+            (f64::from(city.centre.0).hypot(f64::from(city.centre.1))) > 2_000.0,
+            "the city sited on top of home"
+        );
+        // The hometown is authored and seed-independent: its plateau is fixed,
+        // and nothing about the city may reach it.
+        // Inside its flat core, which is twenty-six blocks: past that the
+        // skirt is *meant* to blend back to the country.
+        for (x, z) in [(0, 0), (20, 20), (-20, 20), (26, 0), (0, -26)] {
+            assert_eq!(
+                generator.height_at(x, z),
+                crate::town::HOME_GROUND_Y,
+                "the hometown's plateau moved at ({x}, {z})"
+            );
+        }
+    }
+
 }
 
 

@@ -135,6 +135,7 @@ Written down because they are easy to forget and expensive to get wrong.
 | 56 | `451f53f` | The spoil heap. Asked for the last of the three rounds the drill-mod note named: *"it makes more logical sense to move blocks with the drone e.g. a rubble pile beside the mine — let's have different variations of stacking the blocks like square base pyramid, spiral tower or straight shaft."* The board had been calling this the expensive one for three stages on the grounds that **nothing in `vx-agent` can place a block** — "not a missing function, a missing concept" — and that was exactly half right. `vx_world::place_block` already did the occupancy check, the standing-there check and the cancellable `BlockPlaceEvent` a mod can veto; it just took a `&RayHit`, because until now the only thing that ever placed a block was a player pointing at one. Splitting `place_at` out of it left all 314 world tests passing untouched, and gave the permit gate to the heap for free at the *block* rather than only at the order. `heap.rs` sits beside `mine.rs` and is the same problem with the sign flipped: three shapes, and **`cells` in strictly bottom-up order, which is the whole safety argument** — a drone placing in that order is never asked to stand on air and never has to reach above a cell that is not there yet, so "can a machine reach the top of a pile it is itself building" is a property of the plan and therefore a test rather than a hope. Each column starts from **its own** `surface_y`, not the footprint's: taking the highest ground under the whole footprint buried the high side inside the hill and left the low side hanging. `PLACE_OFFSETS` is `REACH_OFFSETS`' mirror — same seventeen cells, opposite order, because the reason cutting works top-down is the reason stacking works bottom-up — and `JobKind::Stack` carries **no material**, so a heap is made of the actual mixed stone and dirt that came out of the actual hole. **The oracle test was the round**, and it found three bugs that had nothing to do with shapes. `post_heap` priced courses `-1_000 - (courses - step)`, which *rises* with height, so the board handed out the apex first and a drone was sent seven blocks up to a cell with nothing under it, found no station, and carried its load home for ever. `Session::dispatch_using` **never wrote `Command::Dispatch` down** — `App::start_mining` has since stage 9 — so every replay of a crew was replaying a journal with no crew in it and re-derived untouched ground; and `Session::fuel_the_fleet` conjured canisters onto the pile instead of banking them through the electrolyser's existing order, so the replayed crew stood on a dry tank. Two of the three were invisible until an order asked a *crew* to change the ground and then checked the log, which is the first thing this stage did. Then the played run found a fourth: order a heap after the dig is finished and every block of spoil is already in town, so the crew has nothing to build with — the yard now hands rock back, and "not ore" turned out to be the wrong rule for a pile that also holds the fleet's **fuel**. `Command::Heap` (tag 32), journal `VERSION` 33, `dig.dat` 3, key `B`, a `HEAP` verb, and a heap that is *installed* on replay rather than searched for the way a dispatch's method is |
 | 57 | `843a8c9` | The drone you can lose. Task #221, on the board since stage 49 split in two, and the roadmap stated the gap in one line: **a machine cannot collide with anything, so it cannot crash.** From stage 10a to here `garage.rs` had `grant` and no opposite, and `wear.rs` modelled a machine grinding down to `Seized` and then stopping it for ever, recoverably, for two spare parts — so every machine a player ever bought was permanent. A fleet you cannot lose is not capital. `integrity.rs` sits beside `wear.rs` and is deliberately its shape: the same `wear::key` so a machine cannot be one thing to one ledger and another to the other, four graded states, a bench repair, and a tolerant `integrity.dat`. Four ways to die, and **three of them were nearly free** because the vocabulary already existed: a falling trunk has drawn a `Sweep` since stage 36 and `main.rs` already ran it against the posse, the garrisons, the stalker and the player's own box, so gunfire and getting flattened are the same three lines and one shared hull test; and a shot-down caravan has left an `arsenal::Crash` on the ground since stage 13, which is what a wreck is with a longer life and a verb on it. The fourth is the crash proper: `Flier::pilot_step` enforced the *autonomous* rule — never enter a column below its safe altitude, climb instead — under manual control as well, and that single line is why a machine could not be flown into a hillside. It is off for a hand-flown machine and untouched for one flying itself, with a test on each half, and the dive it reports is charged quadratically so a scrape is a scratch and a four-block dive is most of a hull. **The expensive part was indices.** `MachineRef::Digger(i)` is a vector position and 127 sites index those vectors; the wear ledger, the roster, the route caches and `Operation::controlled` are all keyed on it, so `drones.remove(index)` would hand machine three's history to machine two. A lost machine leaves a **tombstone** — `DroneState::Lost` (byte 7, `Stacking` took 6) and `FlierState::Lost` — and the tick steps over it exactly as it already stepped over a piloted one. **No new journal tag and no `VERSION` bump**: every way a machine dies is a consequence of `Pilot`, `Fire` or `Advance`, all already recorded, and salvage reuses `Command::Salvage`, whose own doc has said "a haul derived from a position" since stage 19. Two real bugs on the way: the hit test reached for `machine_eye`, which interpolates by the frame accumulator and adds a *drawn* gimbal — presentation used as a lever, exactly what stage 53's own test was written against — so the replay killed the machine a cell from where the session did and the salvage order then carved air out of the wrong place; and replay's `Advance` arm **dropped shot and fall sweeps** on the honest argument that craters are the part the hash checks, which stopped being true the moment a sweep could destroy a machine that would otherwise keep cutting. `wrecks.dat` (`VXWK`), `integrity.dat` (`VXIT`), `keeping::FILES` 38 → 40, tile 68 for the scorched skin, key `K`, a `WRECK` verb, and `garage::lose` — the first mutator this game has ever had that subtracts |
 | 58 | `a10a2d4` | The towns that grow, and the money that moves between them. Asked to *"work the economy — real towns that grow in size based on economy, and local towns that buy and trade with each other."* Both halves were half-built since 9b and both stopped in the same place. The network moved goods and **nobody paid for them**: `Market::till` moved for exactly one reason, `TILL_REFILL` ticking up against how full the shelves were, so a town on a busy corner of the map and a town nobody shipped to ended up with the same money — and `dispatch` placed **one** load a window across the entire frontier, which is a map with freight drawn on it rather than a network. And a town's size was fixed at worldgen: `core_half` is one of three values assigned by a hash, it feeds the *terrain plateau* through `blend_height`, so it feeds the world hash and cannot move at runtime. The buyer now draws `price x amount` from its own till at dispatch and the seller takes it — a town that cannot cover a load does not order one, so a poor town stays short, its prices stay high, and the first thing it can afford is the thing it needs most — up to four loads a window, never twice from one source. `Market` gains what it has **earned selling on for its life**, deliberately not the same number as the till, because a till is spent and a place that is doing well is a place money moves *through*; crossing `GROWTH_AT` puts a building up, and a ratchet, so a town that has a good decade and then a bad year keeps what it built. **The buildings are edits, not worldgen.** `stamp` lays down the authored plan and nothing else and is pure in `(seed, pos, sites)`, which is what lets `save.rs` write only modified chunks and is what the world hash is a hash *of*; a growth shed reaches the world the way a founded town's chunks do — blocks written into loaded chunks, which mark themselves modified and save. Which means it has to be **deferred**: `masonry.dat` records what is *standing*, which is not the same number as what a town has *earned*, and a town three thousand blocks out grows on its books and builds when you arrive. Two real holes had to close at once. `Economy::run` had exactly one caller, `main.rs`, so a headless `Session` had **never run the freight network** and no test had watched it end to end; and selling had never been written down, which was harmless for eight stages and stopped being harmless the moment a town's books could move a block — `Command::Sell` (tag 33), journal `VERSION` 34, with the reputation band stated on the wire for the same reason a shot's muzzle is. Two bugs found by the oracle, both about *when*: `CommandLog` coalesces consecutive `Advance`s, so a whole afternoon arrived as one order and the crew dug through ground a town had already built on — merging now stops at a dispatch window; and `Session::run_the_network` read `journal.tick()`, which is already at the far end of the order before the loop that works through it has started. `economy.dat` 6, `keeping::FILES` 40 -> 41, `Role::Works`, three pockets of bare plateau inside even the smallest core, and `books_hash` over the money as well as the goods |
+| 59a | `_this_` | The Ruined City: the place. Asked for *"a large city called the Ruined City — a retrofitted modern outpost built upon the ruins of an ancient giant star fort, exactly like the Rust outpost, where citizenship costs 10 000 credits and everything you sell goes up by rocket to an orbital station."* Split at the seam the work has: **this half is the place**, and 59b is what you do there — the citizenship, the gate, the counter and the rocket, which need a journal tag and a sidecar that this half does not. Two decisions taken: **three to four kilometres out**, pinned on the map from the first frame but a trip you plan; and **ruins first, compound second** — the story is the fallen star fort, with a small modern Outpost bolted into the middle of it. The design finding is that **the city should be a `TownSite`**: every piece of machinery it needs already keys on one — the plateau through `blend_height`, the wall through `fort_for`, the buildings through `plan_for`, the market through `Economy`'s centre key, the counter through the raycast that finds the site behind an `engine:counter`, the map, the beacon and the permits — so a bespoke `CitySite` would have re-plumbed all of it while a fourth `Speciality` and a much larger `core_half` gets every one for free, across exactly ten match sites. One cell on a **round** ring seven cells out, short-circuited before the presence hash the way the hometown's cell is, so there is exactly one city, no ordinary town can share it and nothing is written down; nine jittered candidates inside that cell against a relaxed `CITY_RELIEF`, because a plot a hundred and ninety-two blocks across is a far harder thing to find than a forty-block one. **Two walls on one site**: `forts_for` yields the ancient `GreatStar` — eight points, always ruined, two thirds down, no gate locks, because nobody has kept its keys — and the modern six-point retrofit drawn tight round the compound inside it, and `stamp` walks the iterator. The parade ground is derived rather than drawn, because a hundred and fifty metres of cracked paving is a field and not a blueprint; the bastion stumps cost nothing at all, because the ruin pass has left a fallen segment's footing in the ground since stage 21. Two real findings on the way. **The gather margin was a comment rather than a contract**: `REACH` came off `MAX_CORE_HALF`, and a six-point trace has always reached about six blocks further than `core_half + SKIRT` with only `flora::CANOPY_REACH`, folded in for an unrelated reason, covering the difference — it is sized off the widest wall now and asserted against `forts_for`. And **a wall has to fit on the ground it stands on**: the first cut put the great star fifty-eight blocks past the city's own core, and because `part_at` rides each column's own surface it followed the hillside and read as a fragment stuck on a slope; the whole trace — curtain, bastion, thickness and ditch, ninety-five blocks all told — now stands inside the ninety-six block plot. `CITY_SKIRT` is double the usual so a plot that big eases into the country instead of ending in a step, and the skirt is taken from the site rather than the constant |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -4032,6 +4033,114 @@ money as well as the goods — a network where the goods land in the same places
 but the credits do not is a network that has diverged, and a hash over stock
 alone would have called it identical.
 
+## Shipped — Stage 59a: the Ruined City — the place
+
+The ask, recorded here since 58 and decided then: *a large city called the
+Ruined City, a retrofitted modern outpost built on the ruins of an ancient
+giant star fort, exactly like the Rust outpost — 10 000 credits for
+citizenship, and everything sold there goes up by rocket to an orbital
+station.*
+
+**Two decisions taken this round**: it sits **three to four kilometres out** —
+pinned on the map from the first frame, but a trip you plan — and it is **ruins
+first, compound second**: the story is the enormous fallen star fort, with a
+small modern Outpost bolted into the middle of it.
+
+### Why this is 59a and not 59
+
+The place and what you do there are two rounds with a seam between them. This
+half is a city on the map, an ancient ruined trace with breaches you walk
+through, a parade ground and the Outpost standing in it — complete and
+photographable on its own, and needing no journal tag and no new save file.
+59b is the citizenship, the gate that opens when you pay, the counter with its
+rocket and the safe zone, all of which need both.
+
+### The city is a `TownSite`, and that decided the round
+
+Every piece of machinery the city needs already keys on one: the terrain
+plateau through `blend_height`, the wall through `fort_for`, the buildings
+through `plan_for`, the market through `Economy`'s centre key, the counter
+through the raycast that finds the site behind an `engine:counter`, and the
+map, the beacon and the permits besides. A bespoke `CitySite` would have
+re-plumbed all of it. A fourth `Speciality` and a much larger `core_half` gets
+every one of them for free, across exactly ten match sites in two crates.
+
+**One cell on a round ring, seven cells out**, short-circuited before the
+presence hash exactly the way the hometown's cell is — so there is one city, no
+ordinary town can share its cell, and nothing is written down. A *round* ring
+rather than a square one, which matters more than it sounds: walking the cells
+of a square ring puts a corner city half again as far out as an edge one, and
+"three to four kilometres" would have meant "somewhere between three and five,
+depending on a hash nobody can see". Inside that cell the city gets nine
+jittered candidates against a relaxed `CITY_RELIEF`, because a plot a hundred
+and ninety-two blocks across is a far harder thing to find than a forty-block
+one, and because whoever raised the great star moved whatever was in the way.
+
+### Two walls on one site
+
+`forts_for` yields the ancient **`GreatStar`** — eight points, always ruined,
+two thirds of it down, and **no gate locks**, because somebody has to be
+keeping the keys and nobody has kept these for a very long time — and then the
+modern six-point retrofit drawn tight round the compound inside it. `stamp`
+walks the iterator, which is the whole of what a second wall costs: the trace
+is a polar radius, so a hundred-and-fifty-block ruin is exactly as cheap per
+column as a forty-block palisade.
+
+The bastion stumps cost nothing at all. `fort.rs`'s ruin pass has left a fallen
+segment's footing in the ground since stage 21 — *"a wall that came down leaves
+its foundation"* — so at two thirds ruined the great star produces its own
+stumps and its own way in.
+
+The parade ground is **derived rather than drawn**, because a hundred and fifty
+metres of cracked paving is a field and not a blueprint. What is authored is
+only what has shape: the compound, and two blocks of fallen curtain lying where
+a bastion came down.
+
+### Two real findings
+
+**The gather margin was a comment rather than a contract.** `REACH` came off
+`MAX_CORE_HALF`, and every caller expands its box by it before gathering sites
+— so a site that reaches further is a site two neighbouring chunks disagree
+about. A six-point trace has always reached about six blocks further than
+`core_half + SKIRT`, and only `flora::CANOPY_REACH`, folded into the per-chunk
+gather for an entirely unrelated reason, was covering the difference. It is
+sized off the widest wall any site can produce now, and
+`the_gather_margin_covers_the_widest_wall` asserts it against `forts_for`
+rather than trusting the arithmetic.
+
+**A wall has to fit on the ground it stands on.** The first cut stood the great
+star fifty-eight blocks past the city's own core, and because `part_at` rides
+each column's own surface — which is right, and is why a frontier fort follows
+its hillside — it went off the levelled plot and down the slope, and read as a
+fragment stuck on a hill rather than as a fort. The whole trace has to fit, not
+just the curtain: a bastion throws sixteen past the radius, the wall is six
+thick and the ditch outside it eleven wide, so the outermost thing the great
+star cuts is ninety-five blocks out, one inside the city's own ninety-six block
+core.
+
+`CITY_SKIRT` is double the usual for the same family of reason: a plot that big
+with a frontier town's skirt on it ends in a twenty-four block step all the way
+round, which is a mesa rather than a city on a plain. The skirt is taken from
+the site now instead of from the constant.
+
+### On the map, and in the books
+
+The city's pin is unconditional on the minimap and the handheld's map page, and
+the `WHERE` verb names it with a bearing — it is the one place in the game you
+are told about before you have been anywhere near it. `map.rs`'s own doc
+already promised that *"a pin in the black costs nothing"*, which is exactly
+what was wanted.
+
+And it opens on a terminal's books rather than a works': it makes nothing and
+consumes nothing, because what it buys goes up on a rocket and never comes
+back, with a till twelve times a town's and shelves eight times as deep. Both
+caps are per-site now instead of constants. The freight network reaches it by
+itself, because `dispatch` already ships to whoever is short and can pay and
+the city can always pay — which is the point of having built 58 first.
+
+`--city` plays it in five beats on the shipped seed: FARGATE, 3 999 blocks out,
+plateau at y 112.
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -4418,14 +4527,18 @@ what 53's note asked for. Then 57 gave the fleet an end, and 58 took the ask to
 *work the economy* and found that the network had been moving goods for eight
 stages without anybody paying for them, that a town's size was a worldgen
 constant it could never outgrow, and that a headless session had never run the
-freight network at all. Next is the city.
+freight network at all. Next was the city, and 59a is the half of it that is a place: a `TownSite`
+with a fourth speciality and a plot nine times a town's, one cell on a round
+ring three to four kilometres out, and two walls on it — an ancient eight-point
+ruin and the modern retrofit inside it. 59b is what you do there.
 
 | Stage | What | Why here |
 |---|---|---|
 | ~~55~~ | ~~The pack~~ — **shipped** | Blocks that pop to you as drops, a real player inventory with visible counts, and a carrying weight that **slows you first and hard-stops you second**, upgradeable by an exoskeleton. It is also the fix for the oldest rough edge in the README: the movement system weighs you down by a pile sitting in a container somewhere else entirely. The `load` byte already rides the journal and replay never re-derives it, so repointing it at a real pack costs nothing on the wire |
 | ~~56~~ | ~~The spoil heap~~ — **shipped** | You mark a spot, pick a shape — square-base pyramid, spiral tower, straight shaft — and the crew hauls spoil there and stacks it, reusing the mark / choose-a-method / dispatch flow and the job board. The expensive one, and honestly so: **nothing in `vx-agent` can place a block.** Not a missing function, a missing concept — `JobKind` has two behaviourless variants, a `Job` carries only a region with nowhere to say *what to put there*, `DroneState` has no build state, and `REACH_OFFSETS` is shaped entirely by the rules of cutting. Stacked blocks are ground and ground is the hash, so it is a journal order and `VERSION` 33 — 32 went to the pack |
 | ~~58~~ | ~~The towns that grow~~ — **shipped** | Real towns that grow in size on the strength of their economy, and local towns that buy and trade with each other. The buyer pays out of its own till, four loads a window, and what a town earns selling on is a ratchet that puts buildings up. The buildings are **edits**, not worldgen, so the terrain and the world hash do not move — and they are deferred, so a town grows wherever it is and builds when you arrive |
-| 59 | The Ruined City | One city per seed, at a fixed place, on the map from the first frame — not discovered, not founded, not on the lattice. Modern plate and light retrofitted into the ruins of an ancient giant star fort, which `fort.rs` already authors traces and ruins of. **Citizenship costs 10 000 credits, once, for ever**, and buys three things and only three: passage through the gate at all, the use of the Outpost counter with its rocket, and safe-zone protection inside the walls — never a price advantage anywhere, because the city is a place you earn your way into rather than a permanent discount card. The Outpost is deliberately Rust's: a walled compound you cannot fight in, one counter, and a till and a stock ceiling far above `TILL_CAP` and `CAPACITY`, because it is not a frontier town, it is the terminal. Everything sold there leaves by rocket for an orbital station — flavour, and the honest kind: the launch is the animation, the station is the name on the manifest, and neither simulates anything. It lands after 58 because it needs prices that mean something, tills that move, and a freight network worth being the hub of |
+| ~~59a~~ | ~~The Ruined City: the place~~ — **shipped** | The city on the map, the ancient great star and its breaches, the parade ground and the Outpost standing in it. A `TownSite` with a fourth speciality and a much larger core, on a round ring seven cells out, with two walls on one site |
+| 59b | The Ruined City: what you do there | Citizenship at 10 000 credits, once and for ever — `citizenship.dat` and `Command::Enrol`, tag 34, journal `VERSION` 35, because paying opens the gates and that is ground. The modern trace's gateways are stamped shut and enrolling writes air into them as an *edit*, through the deferred-stamping machinery `masonry.rs` built in 58: a persisted decision that reaches the world as blocks when the ground is resident, second use. The counter refuses a non-citizen and every sale launches the rocket — `Rig::rocket` on the pad, a timed arc out of frame, the manifest on the HUD, drawn off a departure tick the way `Shipment::position_at` already is. And the safe zone: inside the core, for a citizen, `Posse::stand_down`, the stalker sleeps and `Command::Fire` is refused. A non-citizen who climbed the wall gets none of it |
 | ~~49b~~ | ~~The drone you can lose~~ — **shipped as 57** | A machine cannot collide with anything, so it cannot crash. Integrity beside `wear.rs` and on the oracle for the same reason wear is; the flier's auto-climb off under manual control so it can be flown into a cliff, while the digger keeps the standability rule that stops a hand-driven drone stranding itself; gunfire through `segment_hits_box`; a persistent, mapped wreck you walk out to and salvage or rebuild; and `garage.rs`'s first `lose` mutator, since `grant` only ever added |
 
 Beyond those the board holds the outstanding engineering below, and whatever
@@ -4433,7 +4546,7 @@ the next note says.
 
 ## The feature map
 
-The whole game at a glance, as of stage 58.
+The whole game at a glance, as of stage 59a.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);

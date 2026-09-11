@@ -146,6 +146,10 @@ fn trades(site: &TownSite) -> [&'static str; PEOPLE] {
         vx_world::Speciality::Mine => ["FOREMAN", "POWDERMAN", "ASSAYER"],
         vx_world::Speciality::Refinery => ["SMELTERMAN", "GAUGER", "STOKER"],
         vx_world::Speciality::Depot => ["CLERK", "TALLYMAN", "OSTLER"],
+        // Nobody lives in the Ruined City. These are the people who work the
+        // Outpost and go home somewhere else, which is why none of them makes
+        // anything — see `economy::made_by`.
+        vx_world::Speciality::City => ["FACTOR", "PURSER", "MARSHAL"],
     }
 }
 

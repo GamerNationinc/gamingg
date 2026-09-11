@@ -192,6 +192,14 @@ pub struct Market {
     growth: u8,
     /// The last step boundary this was brought up to date at.
     last_tick: u64,
+    /// What this market can hold of any one good, and what its counter can
+    /// pay out. **Derived, never persisted**: both are a function of the site,
+    /// [`Economy::market_mut`] refreshes them from it on every read, and a
+    /// book off disk gets the right pair the first time it is looked at. Two
+    /// numbers rather than two constants because the Ruined City is not a
+    /// frontier town and the difference is the whole of why you walk there.
+    ceiling: f32,
+    vault: f32,
 }
 
 impl Market {
@@ -264,13 +272,13 @@ impl Market {
     /// looked like they had stopped trading.
     pub fn earn(&mut self, amount: u64) {
         self.trade += amount as f32;
-        self.till = (self.till + amount as f32).min(TILL_CAP);
+        self.till = (self.till + amount as f32).min(self.vault);
     }
 
     /// Move goods in or out, clamped to what is actually there.
     /// Returns the amount that really moved.
     pub fn deposit(&mut self, good: usize, amount: f32) -> f32 {
-        let room = CAPACITY - self.stock[good];
+        let room = self.ceiling - self.stock[good];
         let moved = amount.min(room).max(0.0);
         self.stock[good] += moved;
         moved
@@ -291,6 +299,8 @@ fn extraction(speciality: Speciality) -> [f32; GOODS.len()] {
         // Timber from the country around it.
         Speciality::Depot => [0.0, 0.018, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         Speciality::Refinery => [0.0, 0.004, 0.006, 0.0, 0.0, 0.0, 0.0, 0.0],
+        // The city digs nothing. Everything it has, it bought.
+        Speciality::City => [0.0; GOODS.len()],
     }
 }
 
@@ -322,6 +332,43 @@ fn consumption(speciality: Speciality) -> [f32; GOODS.len()] {
         // The refinery is the only place on the frontier with any use for
         // uranium at all, and it uses it slowly.
         Speciality::Refinery => [0.0, 0.008, 0.0, 0.002, 0.010, 0.002, 0.011, 0.007],
+        // And it consumes nothing either — because nothing is consumed *here*.
+        // What the Outpost buys goes up on the rocket, which means it leaves
+        // the network for good, which is exactly what a terminal is. A sink
+        // that never fills is what stops the frontier's prices flattening out
+        // once the towns have traded with each other for long enough.
+        Speciality::City => [0.0; GOODS.len()],
+    }
+}
+
+/// What the Ruined City can pay out, against [`TILL_CAP`] for a frontier town.
+///
+/// Twelve times a town's till. It is not a big shop; it is the other end of
+/// the trade, and the whole reason to walk three kilometres with a full pack.
+const CITY_TILL_CAP: f32 = TILL_CAP * 12.0;
+
+/// And what it can hold, against [`CAPACITY`].
+///
+/// Eight times, which sounds generous until you remember what it means: the
+/// Outpost's price for a good barely moves as you sell into it, so a haul that
+/// would have crashed a frontier market is a haul the city just takes.
+const CITY_CAPACITY: f32 = CAPACITY * 8.0;
+
+/// What this site can pay out at all.
+pub fn till_cap(site: &TownSite) -> f32 {
+    if site.is_city() {
+        CITY_TILL_CAP
+    } else {
+        TILL_CAP
+    }
+}
+
+/// And what it can hold of any one good.
+pub fn capacity(site: &TownSite) -> f32 {
+    if site.is_city() {
+        CITY_CAPACITY
+    } else {
+        CAPACITY
     }
 }
 
@@ -352,7 +399,7 @@ pub fn opening_books(site: &TownSite) -> Market {
             (_, OIL) | (_, GAS) => 0.18,
             _ => 1.0,
         };
-        *slot = (TARGET * spread * bias).min(CAPACITY);
+        *slot = (TARGET * spread * bias).min(capacity(site));
     }
     // A town opens with a working float rather than a full till: the money a
     // place has on hand is a function of how long it has been trading, and on
@@ -361,8 +408,10 @@ pub fn opening_books(site: &TownSite) -> Market {
         site.seed ^ 0x7469_6c6c_0000_0001,
     ));
     Market {
+        ceiling: capacity(site),
+        vault: till_cap(site),
         stock,
-        till: TILL_CAP * (0.25 + float * 0.35),
+        till: till_cap(site) * (0.25 + float * 0.35),
         // A town opens having sold nothing to anybody. Whatever it had before
         // the player turned up is scenery, and scenery does not build sheds.
         trade: 0.0,
@@ -463,7 +512,7 @@ fn residents(market: &mut Market, site: &TownSite, step: u64) {
                 let person = crate::people::person(site, index);
                 if let Some(good) = made_by(person.trade) {
                     let rate = HANDS * diligence(site, index);
-                    market.stock[good] = (market.stock[good] + rate * dt).min(CAPACITY);
+                    market.stock[good] = (market.stock[good] + rate * dt).min(market.ceiling);
                 }
             }
             // Market day at the square: they are buying finished goods off
@@ -525,7 +574,7 @@ fn step_market(market: &mut Market, site: &TownSite, step: u64) {
     // Out of the ground first: unconditional, and stops at capacity.
     for (good, rate) in extraction(speciality).into_iter().enumerate() {
         if rate > 0.0 {
-            market.stock[good] = (market.stock[good] + rate * works * dt).min(CAPACITY);
+            market.stock[good] = (market.stock[good] + rate * works * dt).min(market.ceiling);
         }
     }
 
@@ -543,7 +592,7 @@ fn step_market(market: &mut Market, site: &TownSite, step: u64) {
                 market.stock[good] = (market.stock[good] - need * run).max(0.0);
             }
         }
-        market.stock[output] = (market.stock[output] + rate * run).min(CAPACITY);
+        market.stock[output] = (market.stock[output] + rate * run).min(market.ceiling);
     }
 
     // Then the people who live there, who make and eat on the hours the
@@ -564,7 +613,7 @@ fn step_market(market: &mut Market, site: &TownSite, step: u64) {
     // clamped, so one glutted good cannot make a town rich on its own.
     let held: f32 = market.stock.iter().sum();
     let trading = (held / (TARGET * GOODS.len() as f32)).clamp(0.15, 1.0);
-    market.till = (market.till + TILL_REFILL * trading).min(TILL_CAP);
+    market.till = (market.till + TILL_REFILL * trading).min(market.vault);
 
     // And whether any of that has added up to another building. Inside the
     // step, so it inherits the quantised catch-up: forty steps at once grows a
@@ -718,6 +767,11 @@ impl Economy {
         if market.till.is_nan() {
             market.till = opening_books(site).till;
         }
+        // And the ceilings, for the same reason: they are the site's, so this
+        // is the one place that can know them. Refreshed rather than trusted
+        // so a book saved before the city existed opens on the right ones.
+        market.ceiling = capacity(site);
+        market.vault = till_cap(site);
 
         // Catch up in whole steps, landing on a boundary. This is what makes
         // "integrate to 5 000 then to 10 000" identical to "integrate to
@@ -1089,7 +1143,7 @@ fn read_economy(path: &Path) -> std::io::Result<Option<Economy>> {
             // or enormous stock would price every good at a clamp and read as
             // a town that cannot exist.
             let held = read_f32(&mut file)?;
-            if !held.is_finite() || !(0.0..=CAPACITY).contains(&held) {
+            if !held.is_finite() || !(0.0..=CITY_CAPACITY).contains(&held) {
                 return Err(std::io::Error::other("a stock a town could not hold"));
             }
             *slot = held;
@@ -1103,7 +1157,7 @@ fn read_economy(path: &Path) -> std::io::Result<Option<Economy>> {
             if !till.is_finite() || till < 0.0 {
                 return Err(std::io::Error::other("a till that is not money"));
             }
-            till.min(TILL_CAP)
+            till.min(CITY_TILL_CAP)
         } else {
             f32::NAN
         };
@@ -1128,6 +1182,10 @@ fn read_economy(path: &Path) -> std::io::Result<Option<Economy>> {
                 trade,
                 growth,
                 last_tick,
+                // Refreshed from the site the first time this market is read.
+                // See `Economy::market_mut`.
+                ceiling: CAPACITY,
+                vault: TILL_CAP,
             },
         );
     }
@@ -2015,6 +2073,63 @@ mod tests {
                 speciality.name()
             );
         }
+    }
+
+    /// **The Ruined City is the far end of the network, not another stop on
+    /// it.**
+    ///
+    /// Its books are why the walk is worth making: a till twelve times a
+    /// town's, a ceiling eight times, and nothing at all on either side of the
+    /// works table — it makes nothing and it consumes nothing, because what it
+    /// buys leaves on a rocket and never comes back. A sink that never fills
+    /// is what stops the frontier's prices flattening out once the towns have
+    /// been trading with each other for long enough.
+    #[test]
+    fn the_city_is_a_terminal_rather_than_a_works() {
+        let ground = |_: i32, _: i32| 96;
+        let city = town::city(2024, &ground);
+        assert!(city.is_city());
+
+        let mut books = Economy::new();
+        let market = books.market(&city, 0);
+        assert!(
+            market.till() > TILL_CAP as u64,
+            "the city opened on a frontier town's float"
+        );
+
+        // It makes nothing and burns nothing.
+        assert_eq!(extraction(Speciality::City), [0.0; GOODS.len()]);
+        assert_eq!(consumption(Speciality::City), [0.0; GOODS.len()]);
+        assert!(conversion(Speciality::City).is_none());
+
+        // And it can take a haul that would crash a frontier market.
+        let town = of(Speciality::Depot);
+        let mut frontier = Economy::new();
+        let dumped = 4_000.0;
+        let took = books.market_mut(&city, 0).deposit(ORE, dumped);
+        let refused = frontier.market_mut(&town, 0).deposit(ORE, dumped);
+        assert!(
+            took > refused * 2.0,
+            "the city's shelves are no deeper than a town's: {took} vs {refused}"
+        );
+    }
+
+    /// And a frontier town is untouched by any of it: the caps are per-site,
+    /// so the one place with a bigger till does not give every counter one.
+    #[test]
+    fn a_frontier_towns_ceilings_are_what_they_always_were() {
+        let site = of(Speciality::Mine);
+        let mut books = Economy::new();
+        let market = books.market_mut(&site, 0);
+        assert!(market.till() <= TILL_CAP as u64);
+        market.deposit(ORE, CAPACITY * 4.0);
+        assert!(
+            market.stock(ORE) <= CAPACITY,
+            "a town held {} of one good",
+            market.stock(ORE)
+        );
+        assert_eq!(till_cap(&site), TILL_CAP);
+        assert_eq!(capacity(&site), CAPACITY);
     }
 
     #[test]

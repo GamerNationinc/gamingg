@@ -175,6 +175,22 @@ build in it, and it survives quitting — skills included.
 
 ### Known rough edges
 
+- **You cannot get into the Ruined City yet, because there is nothing to get
+  into it *for*.** The place is there, the walls are there and the counter is
+  standing in the compound — but citizenship, the gate that opens when you pay
+  it, the rocket and the safe zone are 59b. Until then the Outpost is a counter
+  like any other, and the compound's gates are open.
+- **Nobody is in the city.** It has three trades on its roster like every other
+  settlement, so the villagers walk its compound and sleep in buildings it does
+  not have. A city with its own population, or honestly with none, is its own
+  piece of work.
+- **The ancient ditch is a dry trench with nothing at the bottom of it.** It is
+  cut four blocks below grade and the wall beside it stands eleven above, which
+  reads dramatically from outside and is also a fifteen-block drop you can walk
+  into in the dark.
+- **The city never grows.** `growth_plan` is empty for it, on the argument that
+  a shed in a cathedral is not an improvement. Which is true, and also means
+  the one place with the money to build is the one place that does not.
 - **A town grows in buildings and capacity, not in people.** `people::PEOPLE`
   is a constant that the ballot, the friendship ledger and the villagers all
   count on, so a grown town has new sheds and a better output rate and exactly
@@ -780,6 +796,31 @@ storage chest, a mailbox for mail orders, and a one-time welcome panel whose
 changelog is parsed straight out of `ROADMAP.md` (`--changelog` prints it).
 The spawn area is pregenerated before the first frame and the hometown is held
 resident permanently; `--view-distance <n>` (4–16) picks the streaming radius.
+
+### There is a city, and it is a ruin
+
+Three or four kilometres from your front door, pinned on your map from the
+first frame of a new world, there is a star fort somebody built a very long
+time ago and nobody has kept. Eight points, a curtain six blocks thick, a ditch
+cut into the plateau all the way round — and two thirds of it lying on the
+ground. You walk in through a breach, because the gates are gaps and the wall
+is mostly not there.
+
+Inside it is a parade ground: a hundred and fifty metres of cracked paving with
+grass coming up through where the stones have been lifted. And in the middle of
+that, small, there is a modern compound — a six-point wall somebody *is*
+maintaining, a counter under a roof, a radio mast, and a rocket standing on a
+grated pad.
+
+That is the whole of the place for now. What it is *for* — the ten thousand
+credits, the gate that opens when you pay them, everything you sell leaving on
+the rocket, and the safe zone inside the walls — is the next round.
+
+It is one city per world and its position is a function of the seed, so it is
+never in the same place twice and it is always in the same place for you. It is
+not on the town lattice and no ordinary town can share its cell. Nothing about
+it is written to disk: like every town in this game it is arithmetic, which is
+why your map can pin it before a single block of it has ever been generated.
 
 ### The towns get bigger
 

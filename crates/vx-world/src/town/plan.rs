@@ -108,6 +108,13 @@ pub enum Role {
     /// The clinic: two cots, a counter of sorts, and the only door on the
     /// frontier that is worth walking a long way to.
     Clinic,
+    /// The Ruined City's trading compound: the counter, the pad and the yard
+    /// it all stands in. Locked at Tier Two, like every other counter.
+    Outpost,
+    /// Something that fell down a long time ago. No lock, no owner, no
+    /// footing — you do not pour a foundation under a thing that is already
+    /// lying on the ground.
+    Ruin,
     /// What a town puts up for itself once it is making money: a second
     /// warehouse, a tank, a bunkhouse. Town property with no lock on it —
     /// the streets claim already covers the ground it stands on, so nothing
@@ -116,14 +123,24 @@ pub enum Role {
 }
 
 impl Role {
+    /// Does this kind of building stand on nothing at all?
+    ///
+    /// True only for a ruin: you do not pour a footing under a thing that is
+    /// already lying on the ground.
+    pub fn strip_depth_is_none(self) -> bool {
+        strip_depth(self) == 0 && self != Role::Paving
+    }
+
     /// The grade of lock this kind of building carries.
     pub fn tier(self) -> Option<Tier> {
         match self {
             Role::Dwelling | Role::PlayerHouse => Some(Tier::One),
-            Role::Shop | Role::Security | Role::Civic | Role::Clinic => Some(Tier::Two),
+            Role::Shop | Role::Security | Role::Civic | Role::Clinic | Role::Outpost => {
+                Some(Tier::Two)
+            }
             Role::Bank => Some(Tier::Three),
-            // Nothing to pick. See [`Role::Works`].
-            Role::Paving | Role::Works => None,
+            // Nothing to pick. See [`Role::Works`] and [`Role::Ruin`].
+            Role::Paving | Role::Works | Role::Ruin => None,
         }
     }
 }
@@ -147,6 +164,9 @@ pub fn strip_depth(role: Role) -> i32 {
         Role::Civic => 4,
         Role::Bank => 5,
         Role::Works => 3,
+        Role::Outpost => 3,
+        // None. See the variant.
+        Role::Ruin => 0,
     }
 }
 
@@ -632,6 +652,209 @@ const REFINERY_TOWN: &[Blueprint] = &[
     PATHS,
 ];
 
+// ---------------------------------------------------------------------------
+// The Ruined City
+// ---------------------------------------------------------------------------
+//
+// Ruins first, compound second — which is a statement about *scale* rather
+// than about how much is authored here. The ancient great star runs out at a
+// hundred and fifty-four blocks and two thirds of it is down; the modern
+// retrofit is a ring thirty-four blocks across in the middle of it; and
+// between the two is the parade ground, which is derived rather than drawn
+// because a hundred and fifty metres of cracked paving is a field, not a
+// blueprint. What is drawn here is only what has *shape*: the compound, and
+// two blocks of fallen curtain lying where a bastion came down.
+//
+// The bastion stumps cost nothing at all. `fort.rs`'s ruin pass already leaves
+// a fallen segment's footing in the ground — "a wall that came down leaves its
+// foundation" — so at two thirds ruined the great star produces its own
+// stumps, and the walk in through a breach is the wall's own geometry rather
+// than anything authored.
+
+/// How far the old parade ground runs: out to the inner face of the ancient
+/// curtain, because that is what a parade ground *is* — the ground a fort
+/// encloses.
+pub const PARADE_RADIUS: i32 = 58;
+
+/// The Outpost's counter, in the same nine-by-seven shell every supply shed on
+/// the frontier uses and at the same offset — which is deliberate, and worth a
+/// line: `counter_offset`, `counter_stand_offset` and `shop_door_offset` are
+/// geometry the walk-to-a-counter code has trusted since stage 48, and putting
+/// the city's counter anywhere else would have meant three more site-aware
+/// branches for no gain the player can see.
+///
+/// The shell is plate rather than container, because this is the one building
+/// out here somebody paid for.
+const OUTPOST_COUNTER: Blueprint = Blueprint {
+    role: Role::Outpost,
+    min: (-4, 6),
+    layers: &[
+        &[
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+        ],
+        &[
+            "MMMM.MMMM",
+            "M.......M",
+            "M.......M",
+            "M.CCCCC.M",
+            "M.......M",
+            "M2......M",
+            "MMMMMMMMM",
+        ],
+        &[
+            "MMMM.MMMM",
+            "M.......M",
+            "M.......M",
+            "M.......M",
+            "M.......M",
+            "M.......M",
+            "MMMMMMMMM",
+        ],
+        &[
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+            "GGGGGGGGG",
+        ],
+    ],
+};
+
+/// The pad, and the ship standing on it.
+///
+/// Everything sold at the counter leaves this way. In 59a it is a silhouette —
+/// a tapering stack of plate on a grated apron with the mast alongside — and
+/// what it is *for* arrives with the counter in 59b. Drawn tall on purpose:
+/// from outside the ancient wall, the rocket and the great star's points are
+/// the two things on the skyline, and they are the whole of the reason to walk
+/// three kilometres.
+const ROCKET_PAD: Blueprint = Blueprint {
+    role: Role::Outpost,
+    min: (10, -6),
+    layers: &[
+        &["GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG"],
+        &["GGGGGGG", "G.MMM.G", "G.MMM.G", "GMMMMMG", "G.MMM.G", "G.MMM.G", "GGGGGGG"],
+        &["T.....T", "..MMM..", "..MMM..", ".MMMMM.", "..MMM..", "..MMM..", "T.....T"],
+        &["T.....T", "..MMM..", ".MMMMM.", ".MMMMM.", ".MMMMM.", "..MMM..", "T.....T"],
+        &["T.....T", "..MMM..", ".MMMMM.", ".MMMMM.", ".MMMMM.", "..MMM..", "T.....T"],
+        &["T.....T", "..MMM..", ".MMMMM.", ".MMMMM.", ".MMMMM.", "..MMM..", "T.....T"],
+        &["TGGGGGT", "..MMM..", ".MMMMM.", ".MMMMM.", ".MMMMM.", "..MMM..", "TGGGGGT"],
+        &[".......", "..MMM..", "..MMM..", ".MMMMM.", "..MMM..", "..MMM..", "......."],
+        &[".......", "..MMM..", "..MMM..", "..MMM..", "..MMM..", "..MMM..", "......."],
+        &[".......", "...M...", "..MMM..", "..MMM..", "..MMM..", "...M...", "......."],
+        &[".......", ".......", "...M...", "..MMM..", "...M...", ".......", "......."],
+        &[".......", ".......", ".......", "...M...", ".......", ".......", "......."],
+    ],
+};
+
+/// The compound's yard: paving under the whole of it, so the modern half reads
+/// as swept and the ruin outside it reads as not.
+const OUTPOST_YARD: Blueprint = Blueprint {
+    role: Role::Paving,
+    min: (-14, -14),
+    layers: &[&[
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+        "PPPPPPPPPPPPPPPPPPPPPPPPPPPPP",
+    ]],
+};
+
+/// A block of the ancient curtain, lying on the parade ground where it fell.
+///
+/// Authored rather than scattered, because rubble that reads as *placed* reads
+/// as an accident and rubble that reads as *drawn* reads as a ruin. Two of
+/// them, out past the compound wall, in line with two of the great star's
+/// points — so the eye goes from the fallen block to the gap it came out of.
+const FALLEN_CURTAIN: Blueprint = Blueprint {
+    role: Role::Ruin,
+    min: (-50, -16),
+    layers: &[
+        &["XXXXXXXXXXXX", "XXXXXXXXXX..", ".XXXXXXX....", "..XXXX......"],
+        &["XXXXXXXX....", ".XXXXX......", "..XX........", "............"],
+        &["..XXXX......", "...XX.......", "............", "............"],
+    ],
+};
+
+const FALLEN_BASTION: Blueprint = Blueprint {
+    role: Role::Ruin,
+    min: (32, 22),
+    layers: &[
+        &["XXXXXXXXX", "XXXXXXXX.", "XXXXXX...", ".XXXX....", "..XX....."],
+        &["XXXXXX...", "XXXXX....", ".XXX.....", "..X......", "........."],
+        &["XXX......", ".XX......", ".........", ".........", "........."],
+    ],
+};
+
+/// What stands in the Ruined City.
+///
+/// Short, and that is the point: the place is mostly the wall around it and
+/// the ground inside it, both of which are derived. The radio tower is here
+/// because the beacon console is how a map learns a town's name, and the city
+/// is on the map from the first frame.
+const RUINED_CITY: &[Blueprint] = &[
+    RADIO_TOWER,
+    OUTPOST_COUNTER,
+    ROCKET_PAD,
+    FALLEN_CURTAIN,
+    FALLEN_BASTION,
+    OUTPOST_YARD,
+];
+
+/// The cracked paving of the old parade ground, derived rather than drawn.
+///
+/// Pure in `(site.seed, x, z)` like every other derived field in this crate,
+/// and it answers only for layer zero: a floor, with about a fifth of it gone
+/// back to ground where the stones have been lifted or never replaced. Inside
+/// the compound the authored yard wins, because `cell_at` walks the blueprints
+/// first.
+fn parade_at(site: &TownSite, x: i32, z: i32) -> Option<Cell> {
+    let (dx, dz) = (x - site.centre.0, z - site.centre.1);
+    if dx * dx + dz * dz > PARADE_RADIUS * PARADE_RADIUS {
+        return None;
+    }
+    let worn = crate::seed::unit(crate::seed::finalise(
+        site.seed
+            ^ 0x0c17_0000_0000_00a7
+            ^ (dx as i64 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)
+            ^ (dz as i64 as u64).wrapping_mul(0xc2b2_ae3d_27d4_eb4f),
+    ));
+    (worn > 0.22).then_some(Cell::Path)
+}
+
 /// The hometown: a depot, plus the one building no other town has — yours.
 ///
 /// Kept as its own plan rather than a conditional inside the depot's, so
@@ -756,6 +979,10 @@ fn growth_plan(site: &TownSite) -> &'static [Blueprint] {
         Speciality::Depot => DEPOT_GROWTH,
         Speciality::Mine => MINE_GROWTH,
         Speciality::Refinery => REFINERY_GROWTH,
+        // The city does not grow. It is already the biggest thing there is,
+        // and what would go up in a pocket of its parade ground is a shed in
+        // a cathedral.
+        Speciality::City => &[],
     }
 }
 
@@ -869,6 +1096,7 @@ fn plan_for(site: &TownSite) -> &'static [Blueprint] {
         Speciality::Depot => DEPOT_TOWN,
         Speciality::Mine => MINE_TOWN,
         Speciality::Refinery => REFINERY_TOWN,
+        Speciality::City => RUINED_CITY,
     }
 }
 
@@ -1006,6 +1234,12 @@ pub fn cell_at(site: &TownSite, x: i32, y: i32, z: i32) -> Option<Cell> {
             None => continue,
         }
     }
+    // And, for the city, the parade ground under all of it — after the
+    // blueprints, so the compound's yard and its buildings win where they
+    // overlap.
+    if site.is_city() && layer == 0 {
+        return parade_at(site, x, z);
+    }
     None
 }
 
@@ -1080,6 +1314,18 @@ pub fn lockboxes(site: &TownSite) -> Vec<(BlockPos, Tier)> {
     found
 }
 
+/// How far from its centre a site draws anything at all.
+///
+/// The buildable square for a town; the parade ground for the city, which
+/// reaches past it.
+pub fn plan_reach(site: &TownSite) -> i32 {
+    if site.is_city() {
+        PARADE_RADIUS
+    } else {
+        site.core_half
+    }
+}
+
 /// The tallest authored layer of a site's plan, for the stamping loop's bound.
 fn max_layers(site: &TownSite) -> i32 {
     plan_for(site)
@@ -1097,8 +1343,11 @@ pub fn stamp(chunk: &mut Chunk, position: ChunkPos, sites: &[TownSite], blocks: 
     let origin = position.origin();
 
     for site in sites {
-        // Quick reject: does this chunk overlap the site's buildable square?
-        let reach = site.core_half;
+        // Quick reject: does this chunk overlap the ground this site draws on?
+        // Not `core_half` — the city's parade ground runs past its own plateau
+        // edge, and rejecting on the square would have shaved the outer ring
+        // of it off in exactly the chunks nobody would think to look at.
+        let reach = plan_reach(site);
         if origin.x > site.centre.0 + reach
             || origin.z > site.centre.1 + reach
             || origin.x + CHUNK_SIZE <= site.centre.0 - reach
@@ -1839,6 +2088,84 @@ mod tests {
             }
         }
         assert!(growth_blocks(&town::home_site(), 99, &blocks).is_empty());
+    }
+
+    /// **What stands in the Ruined City is a ruin, and what is locked is the
+    /// Outpost.**
+    ///
+    /// The shape of the round in one assertion: a lock on a fallen block of
+    /// curtain would say somebody owns the rubble, and an unlocked counter
+    /// would say the compound was not worth walling.
+    #[test]
+    fn the_city_is_ruins_with_one_locked_thing_in_it() {
+        let ground = |_: i32, _: i32| 100;
+        let city = town::city(2024, &ground);
+        let standing = buildings(&city);
+        assert!(!standing.is_empty(), "the city is empty ground");
+
+        let ruins = standing.iter().filter(|b| b.role == Role::Ruin).count();
+        let outposts = standing.iter().filter(|b| b.role == Role::Outpost).count();
+        assert!(ruins >= 2, "only {ruins} ruins in a ruined city");
+        assert!(outposts >= 2, "no compound in the Ruined City");
+        assert_eq!(Role::Ruin.tier(), None, "somebody owns the rubble");
+        assert!(Role::Ruin.strip_depth_is_none(), "a ruin was given a footing");
+        assert_eq!(Role::Outpost.tier(), Some(Tier::Two));
+
+        // Every lockbox in the city is inside the compound.
+        for (at, _) in lockboxes(&city) {
+            let inside = standing.iter().any(|building| {
+                building.role != Role::Ruin
+                    && at.x >= building.min.x
+                    && at.x <= building.max.x
+                    && at.z >= building.min.z
+                    && at.z <= building.max.z
+            });
+            assert!(inside, "a lock at {at:?} with nothing behind it");
+        }
+    }
+
+    /// The parade ground is paving, it is inside the ancient wall, and it does
+    /// not run off the levelled plot.
+    #[test]
+    fn the_parade_ground_is_paved_inside_the_ancient_wall() {
+        let ground = |_: i32, _: i32| 100;
+        let city = town::city(2024, &ground);
+        assert!(
+            (PARADE_RADIUS as f32) < crate::fort::ANCIENT_RADIUS,
+            "the parade ground runs past the wall that encloses it"
+        );
+        assert!(PARADE_RADIUS < city.core_half, "the paving runs off the plot");
+
+        // Most of it is stone, and some of it has gone back to ground.
+        let mut paved = 0;
+        let mut bare = 0;
+        for step in 0..400 {
+            let x = city.centre.0 - PARADE_RADIUS + step % (PARADE_RADIUS / 2);
+            let z = city.centre.1 + step / 12 - 16;
+            match cell_at(&city, x, city.ground, z) {
+                Some(Cell::Path) => paved += 1,
+                _ => bare += 1,
+            }
+        }
+        assert!(paved > bare * 2, "the parade ground is mostly gone: {paved} vs {bare}");
+        assert!(bare > 0, "not a stone of it has been lifted in all that time");
+
+        // And nothing at all past the wall.
+        let out = PARADE_RADIUS + 6;
+        assert_eq!(cell_at(&city, city.centre.0 + out, city.ground, city.centre.1), None);
+    }
+
+    /// A frontier town is untouched by any of this.
+    #[test]
+    fn a_frontier_town_has_no_parade_ground() {
+        let home = town::home_site();
+        assert!(!home.is_city());
+        assert_eq!(plan_reach(&home), home.core_half);
+        assert_eq!(
+            cell_at(&home, home.centre.0 + 40, home.ground, home.centre.1 + 40),
+            None,
+            "a town grew a parade ground"
+        );
     }
 
 }

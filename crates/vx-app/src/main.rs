@@ -353,6 +353,9 @@ struct Options {
     /// The town that grows: a square before, the shed going up, and the same
     /// square after a season of trade.
     grow: bool,
+    /// The Ruined City: the approach, the breach, the parade ground and the
+    /// Outpost standing in the middle of it.
+    city: bool,
     /// Durability: save, snapshot, tear, fall back — and the first timings
     /// this game has ever taken of its own save.
     keeping: bool,
@@ -457,6 +460,7 @@ fn parse_args() -> Result<Options, String> {
         heap: false,
         wreck: false,
         grow: false,
+        city: false,
         keeping: false,
         terminal: false,
         people: false,
@@ -570,6 +574,7 @@ fn parse_args() -> Result<Options, String> {
             "--heap" => options.heap = true,
             "--wreck" => options.wreck = true,
             "--grow" => options.grow = true,
+            "--city" => options.city = true,
             "--keeping" => options.keeping = true,
             "--payroll" => options.payroll = true,
             "--terminal" => options.terminal = true,
@@ -696,6 +701,7 @@ fn parse_args() -> Result<Options, String> {
                      --season <name>     spring, summer, autumn or winter\n  \
                      --town              the beacon console, with who runs the place\n  \
                      --grow              a town's square before and after it prospers\n  \
+                     --city              the Ruined City, three kilometres out\n  \
                      --warrant           the same console with a warrant standing\n  \
                      --ballot            the console's voting page, with a poll due\n  \
                      --elected           the voting page of a town that elected you\n  \
@@ -1038,6 +1044,12 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     // frontier has traded its way into new buildings.
     if options.grow {
         return photograph_the_growth(&context, &mut renderer, &mut camera, options, path);
+    }
+
+    // The Ruined City: the ancient star on the skyline, the breach, and the
+    // Outpost in the middle of the parade ground.
+    if options.city {
+        return photograph_the_city(&context, &mut renderer, &mut camera, options, path);
     }
 
     // Durability: a save torn on purpose, and the world coming back from the
@@ -5882,6 +5894,126 @@ fn open_ground(
 /// counter, the network runs on its own dispatch windows, the books cross
 /// `GROWTH_AT`, and `masonry` puts the sheds up out of blocks — which is the
 /// whole claim of the round, made where it can be looked at.
+/// The Ruined City, in four beats.
+///
+/// Ruins first, compound second — which is a statement about what the camera
+/// spends its time on as much as about what is built. Three of the four
+/// frames are the ancient star and what is left of it; the fourth is the
+/// Outpost, small in the middle of it.
+///
+/// Nothing is placed for the camera and nothing is walked to: the city is a
+/// pure function of the seed, so the fixture asks the world where it is and
+/// points at it.
+fn photograph_the_city(
+    context: &GpuContext,
+    renderer: &mut Renderer,
+    camera: &mut Camera,
+    options: &Options,
+    path: &str,
+) -> Result<(), String> {
+    let stem = path.strip_suffix(".ppm").unwrap_or(path);
+
+    let mut world = World::new(options.seed);
+    let city = world.city();
+    let ground = f64::from(city.ground);
+    let middle = glam::DVec3::new(
+        f64::from(city.centre.0),
+        ground,
+        f64::from(city.centre.1),
+    );
+    println!(
+        "  {}{} at {} {}, {} blocks out, plateau y={}",
+        city.name.head(),
+        city.name.tail(),
+        city.centre.0,
+        city.centre.1,
+        (f64::from(city.centre.0).hypot(f64::from(city.centre.1))) as i32,
+        city.ground
+    );
+
+    // Where the ancient curtain runs, so the camera can stand against it.
+    // Framed from *inside* the fog rather than from a long way off: the
+    // country is a hundred and twenty blocks of visibility, and the first
+    // framing of this fixture stood two hundred and seventy back and
+    // photographed a white rectangle.
+    let ancient = f64::from(vx_world::fort::ANCIENT_RADIUS);
+
+    // name, where the camera stands, and what it looks at.
+    let beats: [(&str, glam::DVec3, glam::DVec3); 5] = [
+        (
+            // The wall, from the glacis outside it. Eleven blocks of ancient
+            // plate on a bastioned trace, and two thirds of it down.
+            "curtain",
+            middle + glam::DVec3::new(-ancient - 30.0, 26.0, -26.0),
+            middle + glam::DVec3::new(-ancient + 6.0, 6.0, 4.0),
+        ),
+        (
+            // At its foot, looking through a breach at the compound beyond.
+            // This is the round in one frame: the ruin is the place, and the
+            // modern thing is the small bright bit visible through the gap.
+            "breach",
+            middle + glam::DVec3::new(-86.0, 4.0, 6.0),
+            middle + glam::DVec3::new(-6.0, 14.0, 2.0),
+        ),
+        (
+            // Inside, on the cracked paving of the old parade ground.
+            "parade",
+            middle + glam::DVec3::new(-52.0, 4.0, 22.0),
+            middle + glam::DVec3::new(6.0, 12.0, -2.0),
+        ),
+        (
+            // The whole retrofit from above: a six-point trace drawn tight
+            // round the compound, standing inside an eight-point ruin.
+            "outpost",
+            middle + glam::DVec3::new(-38.0, 26.0, -38.0),
+            middle + glam::DVec3::new(4.0, 4.0, 6.0),
+        ),
+        (
+            // And the pad, because the rocket is what the counter is for —
+            // and in 59b it is what the goods leave on.
+            "pad",
+            middle + glam::DVec3::new(-6.0, 6.0, 14.0),
+            middle + glam::DVec3::new(13.0, 12.0, -3.0),
+        ),
+    ];
+
+    for (shot, (name, stand, look)) in beats.iter().enumerate() {
+        // Around the halfway point of the shot rather than around either end,
+        // so the ground under the camera and the thing it is aimed at are
+        // both resident.
+        let between = (*stand + *look) * 0.5;
+        let here = vx_core::BlockPos::new(
+            between.x.floor() as i32,
+            between.y.floor() as i32,
+            between.z.floor() as i32,
+        )
+        .chunk();
+        world.load_around(here, 7);
+        let dropped: Vec<vx_core::ChunkPos> = world
+            .loaded_chunks()
+            .filter(|pos| (pos.x - here.x).abs() > 8 || (pos.z - here.z).abs() > 8)
+            .collect();
+        for pos in dropped {
+            renderer.remove_chunk(pos);
+        }
+        world.unload_beyond(here, 8);
+        remesh_all(context, renderer, &mut world);
+
+        camera.position = *stand;
+        look_at(camera, *look);
+        renderer.update_camera(&context.queue, camera);
+        renderer.set_objects(&context.device, &context.queue, &[]);
+
+        let out = format!("{stem}-{:02}-{name}.ppm", shot + 1);
+        capture_frame(context, renderer, options.width, options.height)
+            .write_ppm(&out)
+            .map_err(|error| format!("could not write {out}: {error}"))?;
+        println!("  shot {}: {name} -> {out}", shot + 1);
+    }
+
+    Ok(())
+}
+
 fn photograph_the_growth(
     context: &GpuContext,
     renderer: &mut Renderer,
@@ -9265,6 +9397,16 @@ impl App {
                     }
                     None => lines.push("NO TOWN WITHIN NINE HUNDRED METRES".into()),
                 }
+                // And the city, always — it is the one place in the world you
+                // are told about before you have been anywhere near it.
+                let here = (at.x.floor() as i32, at.z.floor() as i32);
+                let city = active.world.city();
+                lines.push(format!(
+                    "THE RUINED CITY {}{} - {}",
+                    city.name.head(),
+                    city.name.tail(),
+                    map::bearing(here, city.centre)
+                ));
                 lines
             }
             "pile" => match active.mining.fleet.base.as_ref() {
@@ -13779,6 +13921,16 @@ impl App {
                 radius: 1,
             });
         }
+        // And the Ruined City, on the handheld's map page from the first
+        // frame — the page you zoom out on is the one where three kilometres
+        // fits, so this is where the pin actually earns its keep.
+        let city = active.world.city();
+        markers.push(map::Marker {
+            x: city.centre.0,
+            z: city.centre.1,
+            colour: map::colour::CITY,
+            radius: 4,
+        });
         // The scout's marks, dimming as they age — a stale report should
         // not read like a live one.
         let mark_now = active.journal.tick();
@@ -15038,6 +15190,16 @@ impl App {
                 radius: 3,
             });
         }
+        // And the Ruined City, from the first frame of a new world — the one
+        // pin in the game that is on the map before you have been anywhere.
+        // Wide, so it survives zooming out to where three kilometres fits.
+        let city = active.world.city();
+        markers.push(map::Marker {
+            x: city.centre.0,
+            z: city.centre.1,
+            colour: map::colour::CITY,
+            radius: 4,
+        });
         // The player draws last, so nothing covers you.
         markers.push(map::Marker {
             x: centre.0,

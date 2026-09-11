@@ -140,6 +140,9 @@ fn wants(speciality: Speciality) -> &'static str {
         Speciality::Mine => "engine:log",
         // A refinery eats aggregate.
         Speciality::Refinery => "engine:stone",
+        // The city wants everything, and bars most of all: it is the far end
+        // of the network rather than a works with an input list.
+        Speciality::City => "engine:copper_bar",
     }
 }
 

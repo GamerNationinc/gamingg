@@ -30,6 +30,7 @@ pub mod plan;
 use vx_core::BlockPos;
 
 use crate::gen::SEA_LEVEL;
+use crate::seed::{finalise, unit};
 
 /// Lattice cell size, in blocks: one candidate town per cell.
 pub const CELL: i32 = 512;
@@ -41,8 +42,36 @@ pub const SKIRT: i32 = 24;
 pub const MIN_CORE_HALF: i32 = 20;
 pub const MAX_CORE_HALF: i32 = 34;
 
-/// The furthest a town can influence a column: the gather margin.
-pub const REACH: i32 = MAX_CORE_HALF + SKIRT;
+/// The Ruined City's flat core: a plateau 192 blocks across, about nine times
+/// a frontier town's area. It is the one settlement in the world that is not
+/// on the tier table, which is the point of it.
+pub const CITY_CORE_HALF: i32 = 96;
+
+/// And its skirt, double the usual.
+///
+/// A plot that big with a frontier town's skirt on it would end in a
+/// twenty-four block step all the way round — a mesa rather than a city on a
+/// plain. The blend is taken from the site now rather than from the constant,
+/// so a big plot eases into the country over twice the distance.
+pub const CITY_SKIRT: i32 = 48;
+
+/// The furthest any site can influence a column: the gather margin.
+///
+/// **This is a contract, not a convenience.** Every caller that gathers sites
+/// over a box expands it by this much; a site whose reach exceeds it is a site
+/// two neighbouring chunks disagree about, and the seam shows.
+///
+/// Sized by the widest thing on the lattice, which is not the widest
+/// *plateau*: the Ruined City's ancient curtain stands fifty-eight blocks
+/// outside its own core and then throws twenty-six-block points off that, with
+/// a six-block wall and an eleven-block ditch beyond them — a hundred and
+/// twelve past the core all told. `the_gather_margin_covers_the_widest_wall`
+/// asserts it against `fort::forts_for` rather than trusting the arithmetic
+/// here, and it was worth writing for a reason that predates the city: a
+/// six-point trace has always reached about six blocks further than
+/// `core_half + SKIRT`, and only `flora::CANOPY_REACH` being folded into the
+/// per-chunk gather for an unrelated reason was covering the difference.
+pub const REACH: i32 = CITY_CORE_HALF + 112;
 
 /// The hometown's authored plateau and size. Fixed, so every world's starting
 /// town is the same one.
@@ -68,6 +97,13 @@ pub enum Speciality {
     Mine,
     /// Tanks and pipework.
     Refinery,
+    /// The Ruined City: one per seed, and nothing like the other three.
+    ///
+    /// A terminal rather than a works. It makes almost nothing, holds a great
+    /// deal, and has the money to buy whatever the frontier can carry to it —
+    /// which is what turns it into the far end of the network stage 58 built
+    /// rather than another stop on it.
+    City,
 }
 
 impl Speciality {
@@ -76,6 +112,7 @@ impl Speciality {
             Speciality::Depot => "DEPOT",
             Speciality::Mine => "MINE",
             Speciality::Refinery => "REFINERY",
+            Speciality::City => "CITY",
         }
     }
 }
@@ -170,6 +207,24 @@ impl TownSite {
     pub fn is_home(&self) -> bool {
         self.centre == (0, 0)
     }
+
+    /// Is this the Ruined City?
+    ///
+    /// Asked of the speciality rather than the centre, because unlike the
+    /// hometown the city's position is the seed's business and nothing
+    /// downstream should be made to know it.
+    pub fn is_city(&self) -> bool {
+        self.speciality == Speciality::City
+    }
+
+    /// How far this site's plateau blends out past its flat core.
+    pub fn skirt(&self) -> i32 {
+        if self.is_city() {
+            CITY_SKIRT
+        } else {
+            SKIRT
+        }
+    }
 }
 
 /// The hometown: pinned at the origin, authored, and byte-identical in every
@@ -196,6 +251,174 @@ fn hash01(seed: u64, salt: u64, cell_x: i32, cell_z: i32) -> f32 {
     ))
 }
 
+/// How many lattice cells out the Ruined City sits, as a ring radius.
+///
+/// Seven cells, which is three to four kilometres once where-in-the-cell is
+/// counted: pinned on the map from the first frame, and a trip you plan rather
+/// than a walk you take. The frontier towns stay the everyday economy and the
+/// city stays the thing you work up to.
+pub const CITY_RING: i32 = 7;
+
+/// What the city will level to get its plot.
+///
+/// Looser than [`MAX_RELIEF`] because the fiction is different: a frontier town
+/// picks flat ground because it has shovels, and whoever raised the great star
+/// moved whatever was in the way. Not unbounded, though — the search below
+/// still prefers the flattest ground on offer, so the city lands on a plain
+/// where there is one.
+pub const CITY_RELIEF: i32 = 44;
+
+/// Candidate centres tried inside the city's cell, as fractions of the cell.
+///
+/// A plot 192 blocks across is a far harder thing to find than a 40-block one,
+/// so unlike a town the city gets to look around before it settles. Nine fixed
+/// offsets, walked in order, first buildable wins — deterministic, bounded, and
+/// paid only by the one cell in the world that is the city's.
+const CITY_TRIES: [(f32, f32); 9] = [
+    (0.50, 0.50),
+    (0.35, 0.35),
+    (0.65, 0.35),
+    (0.35, 0.65),
+    (0.65, 0.65),
+    (0.50, 0.30),
+    (0.50, 0.70),
+    (0.30, 0.50),
+    (0.70, 0.50),
+];
+
+/// Which lattice cell the Ruined City stands in, for this seed.
+///
+/// One bearing off one hash, and the cell nearest that bearing at
+/// [`CITY_RING`] cells out. Exactly one city exists in a world and this is the
+/// whole of why: the answer is a function of the seed alone, so no search, no
+/// list and no tie-break is ever needed, and nothing is written down.
+///
+/// A **round** ring rather than a square one, which matters more than it
+/// sounds: walking the cells of a square ring puts a corner city half again as
+/// far out as an edge one — 5.1 km against 3.6 — and "three to four
+/// kilometres" would then have meant "somewhere between three and five,
+/// depending on a hash nobody can see".
+pub fn city_cell(seed: u64) -> (i32, i32) {
+    // The cells that actually lie on the ring, gathered rather than rounded
+    // to. Taking a bearing and rounding each axis independently looks like the
+    // same thing and is not: it lands anywhere from 6.4 to 7.6 cells out
+    // depending on where the two roundings happen to fall, which turns "three
+    // to four kilometres" into "somewhere between three and four and a half,
+    // depending on a hash nobody can see". The band below is what makes the
+    // promise a promise.
+    let mut ring: Vec<(i32, i32)> = Vec::new();
+    for dz in -(CITY_RING + 1)..=(CITY_RING + 1) {
+        for dx in -(CITY_RING + 1)..=(CITY_RING + 1) {
+            let out = (((dx * dx + dz * dz) as f32).sqrt() - CITY_RING as f32).abs();
+            if out <= RING_BAND {
+                ring.push((dx, dz));
+            }
+        }
+    }
+    // Scanned in a fixed order and indexed by one hash, so this is as pure as
+    // any other lattice answer — and the origin is not on the ring, so the
+    // hometown's cell is never in the list to begin with.
+    let pick = (unit(finalise(seed ^ 0x0c17_0000_0000_0001)) * ring.len() as f32) as usize;
+    ring[pick.min(ring.len() - 1)]
+}
+
+/// How far off the ring a cell may be and still count as on it.
+const RING_BAND: f32 = 0.4;
+
+/// The Ruined City for this seed, sited.
+///
+/// One cell and at most nine terrain probes, which is what makes it cheap
+/// enough to ask every frame — and `towns_near` at four kilometres, which is
+/// the only other way to find it, is two hundred and fifty cells of hashing.
+/// The map pin needs an answer before the player has been anywhere near it,
+/// so it needs this one.
+pub fn city(seed: u64, natural_height_at: &impl Fn(i32, i32) -> i32) -> TownSite {
+    let (cell_x, cell_z) = city_cell(seed);
+    city_in_cell(seed, cell_x, cell_z, natural_height_at)
+        .expect("the city is always in its own cell")
+}
+
+/// The Ruined City, if this is its cell.
+///
+/// Short-circuited before the presence hash the way the hometown is, so the
+/// city owns its cell outright and no ordinary town can share it.
+fn city_in_cell(
+    seed: u64,
+    cell_x: i32,
+    cell_z: i32,
+    natural_height_at: &impl Fn(i32, i32) -> i32,
+) -> Option<TownSite> {
+    if (cell_x, cell_z) != city_cell(seed) {
+        return None;
+    }
+
+    // Walk the candidates, keeping the flattest as a fallback: the city is
+    // going to stand somewhere in this cell whatever the ground says, so the
+    // question is only which part of it.
+    let mut best: Option<((i32, i32), i32, i32)> = None; // centre, ground, relief
+    for (fx, fz) in CITY_TRIES {
+        let centre = (
+            cell_x * CELL + (fx * CELL as f32) as i32,
+            cell_z * CELL + (fz * CELL as f32) as i32,
+        );
+        let ground = natural_height_at(centre.0, centre.1);
+        if ground <= SEA_LEVEL + MIN_DRY {
+            continue;
+        }
+        let relief = plot_relief(natural_height_at, centre, CITY_CORE_HALF);
+        if relief <= CITY_RELIEF {
+            best = Some((centre, ground, relief));
+            break;
+        }
+        if best.is_none_or(|(_, _, worst)| relief < worst) {
+            best = Some((centre, ground, relief));
+        }
+    }
+    // Every candidate was in the sea. Take the middle of the cell and raise it
+    // out of the water: a world with no city in it is a worse answer than a
+    // city on a causeway, and the ring is wide enough that this is rare.
+    let (centre, ground, _) = best.unwrap_or_else(|| {
+        let centre = (cell_x * CELL + CELL / 2, cell_z * CELL + CELL / 2);
+        (centre, SEA_LEVEL + MIN_DRY + 1, 0)
+    });
+
+    Some(TownSite {
+        centre,
+        ground: ground.clamp(SEA_LEVEL + MIN_DRY + 1, 140),
+        core_half: CITY_CORE_HALF,
+        speciality: Speciality::City,
+        // Always the same two words, because the city is a proper noun in a
+        // world where every other settlement is a pair of them: RUINEDGATE
+        // reads as a place rather than as a roll.
+        name: TownName { head: 13, tail: 2 },
+        seed: seed
+            ^ (cell_x as i64 as u64).wrapping_mul(0x1656_67b1_9e37_79f9)
+            ^ (cell_z as i64 as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15),
+    })
+}
+
+/// How much a plot rises and falls across its corners.
+fn plot_relief(
+    natural_height_at: &impl Fn(i32, i32) -> i32,
+    centre: (i32, i32),
+    core_half: i32,
+) -> i32 {
+    let ground = natural_height_at(centre.0, centre.1);
+    let mut lowest = ground;
+    let mut highest = ground;
+    for (dx, dz) in [
+        (-core_half, -core_half),
+        (core_half, -core_half),
+        (-core_half, core_half),
+        (core_half, core_half),
+    ] {
+        let corner = natural_height_at(centre.0 + dx, centre.1 + dz);
+        lowest = lowest.min(corner);
+        highest = highest.max(corner);
+    }
+    highest - lowest
+}
+
 /// The town in one lattice cell, or nothing.
 ///
 /// `natural_height_at` **must** be the pre-town height field; see the module
@@ -211,6 +434,13 @@ fn site_in_cell(
     // is what makes it seed-*independent* rather than merely seed-stable.
     if cell_x == 0 && cell_z == 0 {
         return Some(home_site());
+    }
+
+    // And the Ruined City owns its own, for the same reason and by the same
+    // trick: one cell, decided by one hash on the seed, before the presence
+    // roll that would otherwise put an ordinary town in it.
+    if let Some(city) = city_in_cell(seed, cell_x, cell_z, natural_height_at) {
+        return Some(city);
     }
 
     let key = |salt: u64| hash01(seed, salt, cell_x, cell_z);
@@ -282,20 +512,7 @@ pub fn buildable(
     centre: (i32, i32),
     core_half: i32,
 ) -> bool {
-    let ground = natural_height_at(centre.0, centre.1);
-    let mut lowest = ground;
-    let mut highest = ground;
-    for (dx, dz) in [
-        (-core_half, -core_half),
-        (core_half, -core_half),
-        (-core_half, core_half),
-        (core_half, core_half),
-    ] {
-        let corner = natural_height_at(centre.0 + dx, centre.1 + dz);
-        lowest = lowest.min(corner);
-        highest = highest.max(corner);
-    }
-    highest - lowest <= MAX_RELIEF
+    plot_relief(natural_height_at, centre, core_half) <= MAX_RELIEF
 }
 
 /// Every town whose core or skirt could reach the column box `min..=max`.
@@ -330,7 +547,7 @@ pub fn towns_overlapping(
 
 /// Could this site's plateau touch the column box?
 fn reaches_box(site: &TownSite, min: (i32, i32), max: (i32, i32)) -> bool {
-    let span = site.core_half + SKIRT;
+    let span = site.core_half + site.skirt();
     site.centre.0 + span >= min.0
         && site.centre.0 - span <= max.0
         && site.centre.1 + span >= min.1
@@ -395,7 +612,7 @@ pub fn core_contains(sites: &[TownSite], x: i32, z: i32) -> Option<&TownSite> {
 pub fn footprint_contains(sites: &[TownSite], x: i32, z: i32) -> bool {
     sites
         .iter()
-        .any(|site| distance_to_core(site, x, z) < SKIRT as f32)
+        .any(|site| distance_to_core(site, x, z) < site.skirt() as f32)
 }
 
 /// The natural height with the nearest overlapping town's plateau blended in.
@@ -406,7 +623,7 @@ pub fn blend_height(sites: &[TownSite], x: i32, z: i32, natural: i32) -> i32 {
     let Some((site, distance)) = sites
         .iter()
         .map(|site| (site, distance_to_core(site, x, z)))
-        .filter(|(_, distance)| *distance < SKIRT as f32)
+        .filter(|(site, distance)| *distance < site.skirt() as f32)
         .min_by(|a, b| a.1.total_cmp(&b.1))
     else {
         return natural;
@@ -415,7 +632,7 @@ pub fn blend_height(sites: &[TownSite], x: i32, z: i32, natural: i32) -> i32 {
     if distance <= 0.0 {
         return site.ground;
     }
-    let t = distance / SKIRT as f32;
+    let t = distance / site.skirt() as f32;
     let smooth = t * t * (3.0 - 2.0 * t);
     site.ground + ((natural - site.ground) as f32 * smooth).round() as i32
 }
@@ -575,7 +792,11 @@ mod tests {
         for (index, a) in towns.iter().enumerate() {
             for b in &towns[index + 1..] {
                 let gap = distance_squared(a.centre, b.centre);
-                let needed = (2 * REACH) as i64;
+                // Each site's own footprint, not twice the global margin:
+                // `REACH` is the *gather* contract and is sized for the
+                // largest thing on the lattice, so measuring two hamlets
+                // against it asks them to be as far apart as two cities.
+                let needed = (a.core_half + a.skirt() + b.core_half + b.skirt()) as i64;
                 assert!(
                     gap > needed * needed,
                     "{} and {} are {gap} apart squared, closer than two footprints",
@@ -620,8 +841,12 @@ mod tests {
                 natural(site.centre.0 + half, site.centre.1 + half),
             ];
             let spread = corners.iter().max().unwrap() - corners.iter().min().unwrap();
+            // The city levels more than a town will: it is a plot nine times
+            // the area and whoever raised the great star had a state behind
+            // them. See `CITY_RELIEF`.
+            let allowed = if site.is_city() { CITY_RELIEF } else { MAX_RELIEF };
             assert!(
-                spread <= MAX_RELIEF,
+                spread <= allowed,
                 "{} was built across {spread} blocks of relief",
                 site.name
             );
@@ -636,8 +861,14 @@ mod tests {
             towns.iter().map(|site| site.name.to_string()).collect();
         assert!(names.len() > 5, "only {} distinct names", names.len());
 
-        let specialities: std::collections::HashSet<Speciality> =
-            towns.iter().map(|site| site.speciality).collect();
+        // The three frontier trades. The city is not one of them — it is not
+        // a trade, it is the far end of the network — and whether it happens
+        // to be inside this radius is the seed's business.
+        let specialities: std::collections::HashSet<Speciality> = towns
+            .iter()
+            .filter(|site| !site.is_city())
+            .map(|site| site.speciality)
+            .collect();
         assert_eq!(specialities.len(), 3, "not every trade is represented");
 
         let sizes: std::collections::HashSet<i32> =
@@ -692,4 +923,135 @@ mod tests {
             );
         }
     }
+    /// **There is exactly one Ruined City, and it is where the seed says.**
+    ///
+    /// The load-bearing claim of the whole round. A world with two of them is
+    /// a world where the word "the" is a lie; a world with none is one where
+    /// the map pins a place that is not there.
+    #[test]
+    fn every_world_has_exactly_one_city_and_it_is_a_long_way_out() {
+        let ground = |_: i32, _: i32| 96;
+        for seed in [1, 7, 99, 909, 2024, 4242, 60_003, u64::MAX] {
+            let cities: Vec<TownSite> = towns_near(seed, (0, 0), CELL * (CITY_RING + 4), &ground)
+                .into_iter()
+                .filter(|site| site.is_city())
+                .collect();
+            assert_eq!(cities.len(), 1, "seed {seed} has {} cities", cities.len());
+
+            let city = cities[0];
+            assert!(!city.is_home(), "the city took the hometown's cell");
+            assert_eq!(city.core_half, CITY_CORE_HALF);
+
+            // On the ring, and therefore a trip: three to four kilometres,
+            // which is the distance this round was asked for.
+            let out = ((city.centre.0 as f64).hypot(city.centre.1 as f64)) as i32;
+            // Three to four kilometres, every time. The cell is on the ring
+            // to within [`RING_BAND`]; the remaining spread is where inside
+            // that cell the ground lets the city settle, which is worth a
+            // quarter of a kilometre either way — see `CITY_TRIES`.
+            assert!(
+                (2_900..=4_200).contains(&out),
+                "seed {seed} put the city {out} blocks out, off the ring"
+            );
+        }
+    }
+
+    /// The city is derived, like everything else on the lattice: same seed,
+    /// same city, however often it is asked and from wherever.
+    #[test]
+    fn the_city_is_the_same_city_however_it_is_asked_for() {
+        let ground = |x: i32, z: i32| 90 + ((x / 97 + z / 89) % 17);
+        let cell = city_cell(2024);
+        let here = (cell.0 * CELL + CELL / 2, cell.1 * CELL + CELL / 2);
+        let near = towns_near(2024, here, CELL, &ground)
+            .into_iter()
+            .find(|site| site.is_city())
+            .expect("no city in its own cell");
+        for probe in [
+            (here.0 - 400, here.1 - 400),
+            (here.0 + 400, here.1 + 400),
+            (here.0, here.1 + 300),
+        ] {
+            let again = towns_overlapping(2024, probe, probe, &ground)
+                .into_iter()
+                .find(|site| site.is_city());
+            if let Some(again) = again {
+                assert_eq!(again, near, "two answers for one city");
+            }
+        }
+    }
+
+    /// **The gather margin covers the widest wall any site can produce.**
+    ///
+    /// Every caller expands its box by `REACH` before gathering, so a site
+    /// that reaches further is a site two neighbouring chunks disagree about.
+    /// Worth an assertion rather than a comment: a six-point trace has always
+    /// reached further than `core_half + SKIRT` and it was `flora`'s canopy
+    /// margin, folded in for an unrelated reason, that was covering it.
+    #[test]
+    fn the_gather_margin_covers_the_widest_wall() {
+        let ground = |_: i32, _: i32| 96;
+        for seed in [7, 2024, 4242] {
+            for site in towns_near(seed, (0, 0), CELL * (CITY_RING + 4), &ground) {
+                let widest = crate::fort::forts_for(&site)
+                    .map(|wall| wall.reach())
+                    .max()
+                    .unwrap_or(0);
+                assert!(
+                    widest <= REACH,
+                    "{} reaches {widest}, past the {REACH} block gather margin",
+                    site.name
+                );
+                assert!(
+                    site.core_half + site.skirt() <= REACH,
+                    "{}'s plateau reaches past the gather margin",
+                    site.name
+                );
+            }
+        }
+    }
+
+    /// A big plot eases into the country rather than ending in a step.
+    #[test]
+    fn the_citys_plateau_is_flat_inside_and_blends_all_the_way_out() {
+        let ground = |x: i32, z: i32| 88 + ((x.rem_euclid(211) + z.rem_euclid(173)) / 12);
+        let cell = city_cell(2024);
+        let here = (cell.0 * CELL + CELL / 2, cell.1 * CELL + CELL / 2);
+        let city = towns_near(2024, here, CELL, &ground)
+            .into_iter()
+            .find(|site| site.is_city())
+            .expect("no city");
+        let sites = [city];
+
+        // Flat inside.
+        for step in [-CITY_CORE_HALF, -40, 0, 40, CITY_CORE_HALF] {
+            let at = blend_height(&sites, city.centre.0 + step, city.centre.1, 0);
+            assert_eq!(at, city.ground, "the plot is not level at {step}");
+        }
+        // And monotone out to the far edge of the skirt, rather than a cliff
+        // at the core's own line.
+        let mut last = city.ground;
+        for out in CITY_CORE_HALF..CITY_CORE_HALF + CITY_SKIRT {
+            let x = city.centre.0 + out;
+            let natural = ground(x, city.centre.1);
+            let blended = blend_height(&sites, x, city.centre.1, natural);
+            assert!(
+                (blended - last).abs() <= 4,
+                "the skirt steps {} blocks at {out}",
+                blended - last
+            );
+            last = blended;
+        }
+        assert_eq!(
+            blend_height(
+                &sites,
+                city.centre.0 + CITY_CORE_HALF + CITY_SKIRT,
+                city.centre.1,
+                123
+            ),
+            123,
+            "the plateau never lets go of the country"
+        );
+    }
+
 }
