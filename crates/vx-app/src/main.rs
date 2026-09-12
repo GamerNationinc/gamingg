@@ -31,6 +31,7 @@
 //! | The command journal (the replay oracle) | `log.dat` |
 //! | Town books, shipments and tills | `economy.dat` |
 //! | Which sheds a prospering town has actually put up | `masonry.dat` |
+//! | Whether the Ruined City's gates have been paid for | `citizenship.dat` |
 //! | Machines owned | `garage.dat` |
 //! | The fleet's base pile, and goods held after a container broke | `pile.dat` |
 //! | The running dispatch: crew, board, claims, cargo | `dig.dat` |
@@ -97,6 +98,7 @@ mod audio;
 mod awareness;
 mod ballot;
 mod charter;
+mod citizenship;
 mod bank;
 mod beacon;
 mod belief;
@@ -151,6 +153,7 @@ mod pumps;
 mod rain;
 mod reputation;
 mod rig;
+mod rocket;
 mod salvage;
 mod gamepad;
 mod schedule;
@@ -356,6 +359,9 @@ struct Options {
     /// The Ruined City: the approach, the breach, the parade ground and the
     /// Outpost standing in the middle of it.
     city: bool,
+    /// Citizenship: the gate shut, the gate open, and the ship leaving with
+    /// what you sold at the Outpost.
+    enrol: bool,
     /// Durability: save, snapshot, tear, fall back — and the first timings
     /// this game has ever taken of its own save.
     keeping: bool,
@@ -461,6 +467,7 @@ fn parse_args() -> Result<Options, String> {
         wreck: false,
         grow: false,
         city: false,
+        enrol: false,
         keeping: false,
         terminal: false,
         people: false,
@@ -575,6 +582,7 @@ fn parse_args() -> Result<Options, String> {
             "--wreck" => options.wreck = true,
             "--grow" => options.grow = true,
             "--city" => options.city = true,
+            "--enrol" => options.enrol = true,
             "--keeping" => options.keeping = true,
             "--payroll" => options.payroll = true,
             "--terminal" => options.terminal = true,
@@ -702,6 +710,7 @@ fn parse_args() -> Result<Options, String> {
                      --town              the beacon console, with who runs the place\n  \
                      --grow              a town's square before and after it prospers\n  \
                      --city              the Ruined City, three kilometres out\n  \
+                     --enrol             the city's gate shut, paid open, and the rocket leaving\n  \
                      --warrant           the same console with a warrant standing\n  \
                      --ballot            the console's voting page, with a poll due\n  \
                      --elected           the voting page of a town that elected you\n  \
@@ -1050,6 +1059,11 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
     // Outpost in the middle of the parade ground.
     if options.city {
         return photograph_the_city(&context, &mut renderer, &mut camera, options, path);
+    }
+
+    // Citizenship: the gate shut, the gate paid open, and the ship leaving.
+    if options.enrol {
+        return photograph_the_enrolment(&context, &mut renderer, &mut camera, options, path);
     }
 
     // Durability: a save torn on purpose, and the world coming back from the
@@ -6002,13 +6016,187 @@ fn photograph_the_city(
         camera.position = *stand;
         look_at(camera, *look);
         renderer.update_camera(&context.queue, camera);
-        renderer.set_objects(&context.device, &context.queue, &[]);
+        // The ship on its pad, idle: since 59b it is a rig rather than a
+        // column of blocks, so the fixture has to draw it or the pad is bare.
+        let objects = ship_on_the_pad(renderer, &world, &city, None);
+        renderer.set_objects(&context.device, &context.queue, &objects);
 
         let out = format!("{stem}-{:02}-{name}.ppm", shot + 1);
         capture_frame(context, renderer, options.width, options.height)
             .write_ppm(&out)
             .map_err(|error| format!("could not write {out}: {error}"))?;
         println!("  shot {}: {name} -> {out}", shot + 1);
+    }
+
+    Ok(())
+}
+
+/// The rocket rig at the city's pad, `altitude` blocks up if it has left.
+/// What the app's draw pass does, for a fixture without an `Active`.
+fn ship_on_the_pad(
+    renderer: &Renderer,
+    world: &World,
+    city: &vx_world::town::TownSite,
+    altitude: Option<f64>,
+) -> Vec<vx_render::Object> {
+    let pad = vx_world::town::plan::pad_offset();
+    let (px, pz) = (city.centre.0 + pad.0, city.centre.1 + pad.1);
+    let base = world
+        .surface_y(px, pz)
+        .map_or(f64::from(city.ground) + 2.0, |top| f64::from(top + 1));
+    let origin = renderer.render_origin().as_dvec3();
+    let at = glam::DVec3::new(
+        f64::from(px) + 0.5,
+        base + altitude.unwrap_or(0.0),
+        f64::from(pz) + 0.5,
+    ) - origin;
+    Rig::rocket(altitude.is_some())
+        .objects(at.as_vec3(), 0.0, 0.0)
+        .into_iter()
+        .map(vx_render::Object::already_relative)
+        .collect()
+}
+
+/// Citizenship, in three beats: the gate shut, the gate paid open, and the
+/// ship leaving with what was sold at the Outpost.
+///
+/// A played session rather than a tableau: the payment goes through
+/// `Session::enrol`, which is the order the gate lock records, and the sale
+/// through the same counter path a player's Enter key takes.
+fn photograph_the_enrolment(
+    context: &GpuContext,
+    renderer: &mut Renderer,
+    camera: &mut Camera,
+    options: &Options,
+    path: &str,
+) -> Result<(), String> {
+    let stem = path.strip_suffix(".ppm").unwrap_or(path);
+
+    let mut session = session::Session::open(options.seed);
+    let city = session.world.city();
+    let fort = vx_world::fort::fort_for(&city);
+    // The east gate: the first gateway is on the +x axis.
+    let (gx, gz) = fort.gateways()[0];
+    let gate = glam::DVec3::new(
+        f64::from(gx) + 0.5,
+        f64::from(city.ground) + 1.0,
+        f64::from(gz) + 0.5,
+    );
+    println!(
+        "  {}{}: gate at {gx} {gz}, {} gate blocks, citizenship {} CR",
+        city.name.head(),
+        city.name.tail(),
+        fort.gate_cells().len(),
+        citizenship::PRICE
+    );
+
+    // Arrive outside the gate with a pile to sell, the way anybody would.
+    session.player.position = gate + glam::DVec3::new(10.0, 0.0, 0.0);
+    let here = vx_core::BlockPos::new(gx, city.ground, gz).chunk();
+    session.world.load_around(here, 5);
+    let pile_at = vx_core::BlockPos::new(gx + 12, city.ground + 1, gz + 4);
+    session.place_base(pile_at);
+    session
+        .mining
+        .fleet
+        .base
+        .as_mut()
+        .ok_or("no base pile")?
+        .stockpile
+        .add("engine:copper_ore", 40);
+
+    let pad = vx_world::town::plan::pad_offset();
+    let pad_at = glam::DVec3::new(
+        f64::from(city.centre.0 + pad.0) + 0.5,
+        f64::from(city.ground) + 2.0,
+        f64::from(city.centre.1 + pad.1) + 0.5,
+    );
+
+    // name, pay first, sell first.
+    let beats: [(&str, bool, bool); 3] =
+        [("shut", false, false), ("open", true, false), ("launch", true, true)];
+    let mut launch: Option<rocket::Launch> = None;
+
+    for (shot, (name, pay, sell)) in beats.iter().enumerate() {
+        if *pay && !session.citizen {
+            let before = session.wallet.credits();
+            session.wallet.earn(citizenship::PRICE);
+            if !session.enrol() {
+                return Err("the gate would not take the money".to_string());
+            }
+            println!("  paid {} CR; wallet {} -> {}", citizenship::PRICE, before, session.wallet.credits());
+        }
+        if *sell && launch.is_none() {
+            let depart = session.journal.tick();
+            let held = session.mining.fleet.held();
+            let earned = session.sell_everything_at(&city);
+            if earned == 0 {
+                return Err("the Outpost bought nothing".to_string());
+            }
+            let manifest = format!("{} COPPER ORE", held - session.mining.fleet.held());
+            println!("  sold {manifest} for {earned} CR; launch at tick {depart}");
+            launch = Some(rocket::Launch { depart, manifest });
+            // A quarter of the way up: clear of the gantry, with the pad
+            // still in the frame under it.
+            session.work((rocket::FLIGHT_TICKS / 4) as u32);
+        }
+        let altitude = launch
+            .as_ref()
+            .and_then(|launch| launch.altitude_at(session.journal.tick()));
+
+        // The gate is framed straight down its own axis: it sits in the
+        // re-entrant between two bastions, and the first framing of this
+        // stood off to one side and photographed a bastion's flank instead.
+        let (stand, look) = if *sell {
+            (
+                pad_at + glam::DVec3::new(-24.0, 3.0, 20.0),
+                pad_at + glam::DVec3::new(0.0, altitude.unwrap_or(0.0) * 0.5 + 3.0, 0.0),
+            )
+        } else {
+            (
+                gate + glam::DVec3::new(15.0, 4.5, 3.0),
+                gate + glam::DVec3::new(0.0, 1.5, 0.0),
+            )
+        };
+
+        let between = (stand + look) * 0.5;
+        let here = vx_core::BlockPos::new(
+            between.x.floor() as i32,
+            between.y.floor() as i32,
+            between.z.floor() as i32,
+        )
+        .chunk();
+        session.world.load_around(here, 5);
+        let dropped: Vec<vx_core::ChunkPos> = session
+            .world
+            .loaded_chunks()
+            .filter(|pos| (pos.x - here.x).abs() > 6 || (pos.z - here.z).abs() > 6)
+            .collect();
+        for pos in dropped {
+            renderer.remove_chunk(pos);
+        }
+        session.world.unload_beyond(here, 6);
+        remesh_all(context, renderer, &mut session.world);
+
+        camera.position = stand;
+        look_at(camera, look);
+        renderer.update_camera(&context.queue, camera);
+        let origin = renderer.render_origin().as_dvec3();
+        let mut objects: Vec<vx_render::Object> = session
+            .mining
+            .objects(|at: glam::DVec3| (at - origin).as_vec3(), None);
+        objects.extend(ship_on_the_pad(renderer, &session.world, &city, altitude));
+        renderer.set_objects(&context.device, &context.queue, &objects);
+
+        let out = format!("{stem}-{:02}-{name}.ppm", shot + 1);
+        capture_frame(context, renderer, options.width, options.height)
+            .write_ppm(&out)
+            .map_err(|error| format!("could not write {out}: {error}"))?;
+        println!(
+            "  shot {}: {name} -> {out}{}",
+            shot + 1,
+            altitude.map_or(String::new(), |up| format!(" (ship {up:.0} blocks up)"))
+        );
     }
 
     Ok(())
@@ -7249,6 +7437,19 @@ struct Active {
     /// `masonry.rs`: the books say what a town has earned, this says what is
     /// standing, and the two are deliberately different numbers.
     masonry: masonry::Masonry,
+    /// Whether the Ruined City's gates have been paid for. See
+    /// `citizenship.rs`.
+    citizen: bool,
+    /// The Ruined City, asked of the seed once. Pure in it, and the safe-zone
+    /// check wants it every frame.
+    city: vx_world::town::TownSite,
+    /// When the gate lock last offered citizenship, so the second use within
+    /// a few seconds is the payment. Ten thousand credits should not go on a
+    /// single mis-press.
+    offer: Option<Instant>,
+    /// The ship on the pad, if it is in the air. Presentation only: not
+    /// journalled, not saved — see `rocket.rs`.
+    rocket: Option<rocket::Launch>,
     /// The machines the player actually owns.
     garage: garage::Garage,
     /// The house: the chest, the mailbox, and what they hold.
@@ -7315,6 +7516,9 @@ struct Active {
     audio: audio::Audio,
     /// The launcher's viewmodel shape, built once.
     launcher_rig: Rig,
+    /// The ship on the city's pad, idle and lit. See `rocket.rs`.
+    rocket_rig: Rig,
+    rocket_lit_rig: Rig,
     /// Screen shake energy, 0..1. Decays; firing tops it up. Visual only —
     /// it offsets the camera pivot and never touches the simulation.
     shake: f32,
@@ -8005,6 +8209,13 @@ impl App {
             active.player.position.x.floor() as i32,
             active.player.position.z.floor() as i32,
         );
+        if active
+            .rocket
+            .as_ref()
+            .is_some_and(|launch| launch.altitude_at(now).is_none())
+        {
+            active.rocket = None;
+        }
         let landed = masonry::tick_the_network(
             &mut active.economy,
             &mut active.masonry,
@@ -8012,6 +8223,7 @@ impl App {
             &mut active.last_network,
             column,
             now,
+            active.citizen,
         );
         if !landed.is_empty() {
             let reachable = active.world.towns_near(column, RADIO_RANGE);
@@ -8201,6 +8413,36 @@ impl App {
             let heading = (load.to.1 - load.from.1) as f32;
             let yaw = ((load.to.0 - load.from.0) as f32).atan2(-heading);
             objects.extend(placed(active.trade_rig.objects(at, yaw, active.mining.spin())));
+        }
+
+        // The ship on the city's pad, and the ship leaving it. Idle it stands
+        // on the plinth; launched it is wherever `altitude_at` says, off the
+        // tick it left on, the way a caravan is.
+        {
+            let pad = vx_world::town::plan::pad_offset();
+            let (px, pz) = (active.city.centre.0 + pad.0, active.city.centre.1 + pad.1);
+            let (dx, dz) = (f64::from(px) + 0.5 - eye.x, f64::from(pz) + 0.5 - eye.z);
+            if dx * dx + dz * dz <= f64::from(CARAVAN_SIGHT * CARAVAN_SIGHT) {
+                let altitude = active
+                    .rocket
+                    .as_ref()
+                    .and_then(|launch| launch.altitude_at(now));
+                let base = active
+                    .world
+                    .surface_y(px, pz)
+                    .map_or(f64::from(active.city.ground) + 2.0, |top| f64::from(top + 1));
+                let at = relative(glam::DVec3::new(
+                    f64::from(px) + 0.5,
+                    base + altitude.unwrap_or(0.0),
+                    f64::from(pz) + 0.5,
+                ));
+                let rig = if altitude.is_some() {
+                    &active.rocket_lit_rig
+                } else {
+                    &active.rocket_rig
+                };
+                objects.extend(placed(rig.objects(at, 0.0, 0.0)));
+            }
         }
 
         // Slugs in the air: a small steel cube each, drawn where the last
@@ -8486,6 +8728,14 @@ impl App {
             return;
         }
 
+        if Self::in_sanctuary(active) {
+            // Refused before it is recorded: the replay never sees a shot
+            // that was never fired.
+            active.arsenal.cooldown = active.movement.tuning.slug_rate;
+            active.greeting = Some(("NO FIRING INSIDE THE CITY".into(), Instant::now()));
+            return;
+        }
+
         // Quantised exactly as movement quantises a look, so live fire and
         // replay dequantise to the same line.
         let quantised =
@@ -8669,7 +8919,16 @@ impl App {
             // side of the oracle needs telling it happened.
             Self::hold_the_polls(active, &town, tick);
             let wanted = active.warrants.granted_in(town.centre);
-            if wanted && !active.posse.called_out() {
+            // What the city's ten thousand buys: inside its core, a citizen
+            // is nobody's to arrest. A non-citizen who climbed the wall is.
+            let sanctuary = Self::in_sanctuary(active);
+            if sanctuary && active.posse.called_out() {
+                active.posse.stand_down();
+                let line = "THE CITY'S LAW IS ITS OWN. THE DEPUTIES TURN BACK".to_string();
+                active.terminal.say(terminal::Kind::Note, line.clone());
+                active.greeting = Some((line, Instant::now()));
+            }
+            if wanted && !sanctuary && !active.posse.called_out() {
                 let seed = active.journal.tick() ^ 0x51ed_5eed;
                 let at = active.player.position;
                 let ground = |x: f64, z: f64| {
@@ -9932,6 +10191,13 @@ impl App {
                         economy::MAX_GROWTH,
                         if standing < grown { " (ONE PENDING)" } else { "" }
                     ));
+                    if site.is_city() {
+                        lines.push(if active.citizen {
+                            "CITIZEN  YES - THE GATES ARE OPEN TO YOU".to_string()
+                        } else {
+                            format!("CITIZEN  NO - {} CREDITS AT THE GATE LOCK", citizenship::PRICE)
+                        });
+                    }
                 }
                 // And the freight in the air on this town's account, with
                 // what was paid for it.
@@ -10781,7 +11047,61 @@ impl App {
     /// townsfolk round built, because a search nobody can perceive may as
     /// well be a random walk — the note's own argument, and the reason the
     /// tells are not optional.
+    /// Is the player standing on ground the city's citizenship covers?
+    fn in_sanctuary(active: &Active) -> bool {
+        active.citizen
+            && citizenship::inside(
+                &active.city,
+                active.player.position.x.floor() as i32,
+                active.player.position.z.floor() as i32,
+            )
+    }
+
+    /// The city's gate lock: use it once for the offer, again to pay.
+    ///
+    /// Two presses rather than a panel, because the whole of the choice is
+    /// yes or no and ten thousand credits should not go on a mis-press.
+    fn use_the_gate_lock(active: &mut Active) {
+        const OFFER_WINDOW: f32 = 6.0;
+        let name = format!("{}{}", active.city.name.head(), active.city.name.tail());
+        let line = if active.citizen {
+            format!("YOU ARE A CITIZEN OF {name}. THE GATES ARE YOURS")
+        } else if active
+            .offer
+            .take()
+            .is_some_and(|since| since.elapsed().as_secs_f32() < OFFER_WINDOW)
+        {
+            if active.wallet.spend(citizenship::PRICE) {
+                active.citizen = true;
+                record_order(active, Command::Enrol);
+                let city = active.city;
+                let opened = citizenship::open_the_gates(&mut active.world, &city);
+                log::info!("enrolled: opened {opened} gate blocks");
+                format!("PAID. THE GATES ARE OPEN - WELCOME TO {name}")
+            } else {
+                format!(
+                    "YOU HAVE {} OF THE {} CREDITS",
+                    active.wallet.credits(),
+                    citizenship::PRICE
+                )
+            }
+        } else {
+            active.offer = Some(Instant::now());
+            format!(
+                "CITIZENSHIP OF {name} - {} CREDITS, ONCE. USE THE LOCK AGAIN TO PAY",
+                citizenship::PRICE
+            )
+        };
+        active.terminal.say(terminal::Kind::Note, line.clone());
+        active.greeting = Some((line, Instant::now()));
+    }
+
     fn advance_the_dark(active: &mut Active, dt: f32) {
+        // The deep does not come up into the city, for a citizen.
+        if Self::in_sanctuary(active) {
+            active.dark.stand_down();
+            return;
+        }
         let seed = active.world.seed() ^ active.journal.tick();
         let report = active
             .dark
@@ -12891,12 +13211,30 @@ impl App {
                     // a town's books, and since stage 58 a town's books move
                     // blocks. See `Command::Sell`.
                     if let Some(good) = selling {
-                        if active.mining.fleet.held() != held_before {
+                        let held_now = active.mining.fleet.held();
+                        if held_now != held_before {
                             active.journal.record(journal::Command::Sell {
                                 town: site.centre,
                                 good: good as u32,
                                 standing: active.reputation.compact().as_byte(),
                             });
+                            // At the city, what you sold leaves by rocket.
+                            // The station is the name on the manifest; the
+                            // ship is `rocket.rs`, and it is only a picture.
+                            if site.is_city() {
+                                let manifest = format!(
+                                    "{} {}",
+                                    held_before - held_now,
+                                    shop::display_name(economy::GOODS[good])
+                                );
+                                let line = format!("LAUNCH - {manifest} TO THE STATION");
+                                active.terminal.say(terminal::Kind::Note, line.clone());
+                                active.greeting = Some((line, Instant::now()));
+                                active.rocket = Some(rocket::Launch {
+                                    depart: now,
+                                    manifest,
+                                });
+                            }
                         }
                     }
                     // Honest trade is how a county comes to know you: a
@@ -13356,6 +13694,17 @@ impl App {
                     .next()
                 {
                     Some(site) => {
+                        // The Outpost trades with citizens. The gate lock is
+                        // where that gets settled, not the counter.
+                        if site.is_city() && !active.citizen {
+                            let line = format!(
+                                "THE OUTPOST TRADES WITH CITIZENS - {} CREDITS AT THE GATE LOCK",
+                                citizenship::PRICE
+                            );
+                            active.terminal.say(terminal::Kind::Note, line.clone());
+                            active.greeting = Some((line, Instant::now()));
+                            return;
+                        }
                         // Price the mail shelf while we are here: for each
                         // good, the cheapest other town in radio range with a
                         // parcel to spare. Nearest wins a tie — `towns_near`
@@ -13441,6 +13790,11 @@ impl App {
                 let claim = active.permits.borrow().claim_here(hit.block);
                 match claim {
                     Some(claim) => active.permit_panel.open_at(hit.block, claim),
+                    // A fort's gate lock has no claim behind it. The city's
+                    // is the one lock in the game you pay at.
+                    None if citizenship::inside(&active.city, hit.block.x, hit.block.z) => {
+                        Self::use_the_gate_lock(active);
+                    }
                     None => log::warn!("a lockbox at {:?} with no claim behind it", hit.block),
                 }
             }
@@ -15429,6 +15783,10 @@ impl App {
                 failed.push("what the towns have built");
             }
         }
+        if let Err(error) = citizenship::save(active.citizen, save.root()) {
+            log::error!("could not save the citizenship: {error}");
+            failed.push("the citizenship");
+        }
 
         // Last, and only last: the stamp that makes the thirty-six files one
         // save. A crash before this leaves a generation that never happened
@@ -15741,6 +16099,7 @@ impl ApplicationHandler for App {
             ..Camera::default()
         };
         let mut masonry = masonry::Masonry::new();
+        let mut citizen = false;
         renderer.update_camera(&context.queue, &camera);
 
         let mut map = MapState::new();
@@ -15787,6 +16146,7 @@ impl ApplicationHandler for App {
             journal = CommandLog::load(save.root());
             economy.load(save.root());
             masonry.load(save.root());
+            citizen = citizenship::load(save.root());
             garage.load(save.root());
             homestead.load(save.root());
             town_permits.load(save.root());
@@ -15919,6 +16279,7 @@ impl ApplicationHandler for App {
         // free one every time the world opens.
         mining.ensure_flier(camera.position);
 
+        let city = world.city();
         self.active = Some(Active {
             movement: movement::Movement::default(),
             move_ticks: movement::Ticker::default(),
@@ -15997,6 +16358,10 @@ impl ApplicationHandler for App {
             journal,
             economy,
             masonry,
+            citizen,
+            city,
+            offer: None,
+            rocket: None,
             garage,
             homestead,
             home_panel: homestead::HomePanel::default(),
@@ -16032,6 +16397,8 @@ impl ApplicationHandler for App {
             charters,
             audio: audio::Audio::open(),
             launcher_rig: Rig::launcher(),
+            rocket_rig: Rig::rocket(false),
+            rocket_lit_rig: Rig::rocket(true),
             shake: 0.0,
             shake_phase: 0.0,
             cut_rate: payroll::Rate::default(),

@@ -204,7 +204,11 @@ const MAGIC: &[u8; 4] = b"VXLG";
 // divergence in the till is now a divergence in the hash. `Sell` closes it,
 // and a log recorded under 33 replays a session in which nobody ever sold
 // anything.
-const VERSION: u32 = 34;
+// 35: citizenship (stage 59b). Paying the Ruined City's ten thousand opens
+// its gates, and a gate is blocks, so the payment is an order. `Enrol`
+// carries nothing: the price is a constant and the gate is derived from the
+// seed. A log recorded under 34 replays a session in which nobody ever paid.
+const VERSION: u32 = 35;
 
 /// How many entries may pile up before a keyframe is worth writing.
 ///
@@ -433,6 +437,14 @@ pub enum Command {
         /// [`crate::reputation::Standing`] as a byte.
         standing: u8,
     },
+    /// Citizenship of the Ruined City paid for. Tag 34.
+    ///
+    /// No payload: the price is [`crate::citizenship::PRICE`] and the gate it
+    /// opens is derived from the seed. Credits are not ground, so the replay
+    /// does not check the wallet — the same rule as `Sell`'s scratch wallet —
+    /// but the gate cells it writes air into are, which is why this is on the
+    /// wire at all.
+    Enrol,
     /// The pack tipped into a container.
     ///
     /// **No payload at all**, and that is the whole design. Replay carries its
@@ -919,6 +931,8 @@ pub struct Rebuilt {
     /// `Active` both keep the same field, and all three run the same
     /// function.
     last_network: u64,
+    /// Whether the city's gates have been paid for. See [`Command::Enrol`].
+    pub citizen: bool,
     /// What the player is carrying.
     ///
     /// New in stage 55, and it closes a hole that had been open since stage 6:
@@ -966,6 +980,7 @@ impl Default for Rebuilt {
             // network instead of deciding it already had. `Session` and
             // `Active` open on the same number for the same reason.
             last_network: u64::MAX,
+            citizen: false,
             pack: crate::pack::Pack::new(),
             drops: crate::drops::Drops::new(),
             // The stock frame, until a `Carry` says otherwise — which is
@@ -1035,6 +1050,11 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
         }
         Command::Stow => {
             crate::pack::tip(&mut state.pack, &mut state.mining.fleet);
+        }
+        Command::Enrol => {
+            state.citizen = true;
+            let city = world.city();
+            crate::citizenship::open_the_gates(world, &city);
         }
         Command::Carry { capacity } => state.capacity = u64::from(*capacity),
         Command::Place { at, block } => {
@@ -1166,6 +1186,12 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                 log::warn!("a sale at {town:?}, which is not a town");
                 return;
             };
+            // The Outpost trades with citizens. A log cannot sell there
+            // without having paid, any more than a player can.
+            if site.is_city() && !state.citizen {
+                log::warn!("a sale at the city by somebody who never paid");
+                return;
+            }
             let Some(pile) = mining.fleet.base.as_mut().map(|base| &mut base.stockpile) else {
                 return;
             };
@@ -1451,6 +1477,7 @@ fn apply(command: &Command, world: &mut World, events: &EventBus, state: &mut Re
                     &mut state.last_network,
                     column,
                     state.tick,
+                    state.citizen,
                 );
             }
         }
@@ -1757,6 +1784,7 @@ fn write_entry(file: &mut impl Write, entry: &Entry) -> std::io::Result<()> {
         }
         // One byte and nothing else — see the variant's own note.
         Command::Stow => file.write_all(&[30u8])?,
+        Command::Enrol => file.write_all(&[34u8])?,
         Command::Carry { capacity } => {
             file.write_all(&[31u8])?;
             file.write_all(&capacity.to_le_bytes())?;
@@ -2096,6 +2124,7 @@ fn read_entry(file: &mut impl Read) -> std::io::Result<Entry> {
             Command::Pilot { bits: bits[0] }
         }
         30 => Command::Stow,
+        34 => Command::Enrol,
         31 => Command::Carry {
             capacity: read_u32(file)?,
         },
@@ -2289,6 +2318,65 @@ mod tests {
             journal.record(Command::Break { at });
         }
         journal
+    }
+
+    /// `Enrol` round-trips through the file, and a sale at the city by
+    /// somebody who never paid moves nothing.
+    #[test]
+    fn enrolment_round_trips_and_the_outpost_refuses_the_unpaid() {
+        let mut journal = CommandLog::new();
+        journal.record(Command::Advance { ticks: 3 });
+        journal.record(Command::Enrol);
+        let directory = std::env::temp_dir()
+            .join(format!("vx-journal-enrol-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        journal.save(&directory).unwrap();
+        let back = CommandLog::load(&directory);
+        assert!(
+            back.entries().iter().any(|entry| entry.command == Command::Enrol),
+            "the enrolment did not survive the file"
+        );
+
+        // The replay: a fresh world with the city's gate resident, and the
+        // gate shut until the order arrives.
+        let mut world = World::new(2024);
+        let city = world.city();
+        world.load_around(BlockPos::new(city.centre.0, city.ground, city.centre.1).chunk(), 4);
+        let cells = vx_world::fort::fort_for(&city).gate_cells();
+        let events = EventBus::new();
+        let mut state = Rebuilt::default();
+        assert!(!state.citizen);
+
+        // A sale at the Outpost before paying: the books do not move.
+        let pile_at = BlockPos::new(city.centre.0, city.ground + 1, city.centre.1 + 30);
+        apply(
+            &Command::Place { at: pile_at, block: "engine:container".into() },
+            &mut world,
+            &events,
+            &mut state,
+        );
+        state
+            .mining
+            .fleet
+            .base
+            .as_mut()
+            .unwrap()
+            .stockpile
+            .add("engine:copper_ore", 40);
+        let books = state.economy.books_hash();
+        apply(
+            &Command::Sell { town: city.centre, good: 0, standing: 2 },
+            &mut world,
+            &events,
+            &mut state,
+        );
+        assert_eq!(state.economy.books_hash(), books, "the Outpost sold to a non-citizen");
+
+        apply(&Command::Enrol, &mut world, &events, &mut state);
+        assert!(state.citizen);
+        for at in &cells {
+            assert_eq!(world.block(*at), vx_core::BlockId::AIR, "the gate stayed shut at {at:?}");
+        }
     }
 
     /// Replay a log from a fresh world and report the ground it produced.

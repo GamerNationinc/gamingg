@@ -732,26 +732,21 @@ const OUTPOST_COUNTER: Blueprint = Blueprint {
 ///
 /// Everything sold at the counter leaves this way. In 59a it is a silhouette —
 /// a tapering stack of plate on a grated apron with the mast alongside — and
-/// what it is *for* arrives with the counter in 59b. Drawn tall on purpose:
-/// from outside the ancient wall, the rocket and the great star's points are
-/// the two things on the skyline, and they are the whole of the reason to walk
-/// three kilometres.
+/// what it is *for* arrived with the counter in 59b, and so did the ship: the
+/// pad and its gantry are blocks, and the rocket standing on the plinth is
+/// `Rig::rocket` in the app, drawn at [`pad_offset`], because a ship that
+/// launches cannot also be a column of blocks left behind on the pad.
 const ROCKET_PAD: Blueprint = Blueprint {
     role: Role::Outpost,
     min: (10, -6),
     layers: &[
         &["GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG", "GGGGGGG"],
         &["GGGGGGG", "G.MMM.G", "G.MMM.G", "GMMMMMG", "G.MMM.G", "G.MMM.G", "GGGGGGG"],
-        &["T.....T", "..MMM..", "..MMM..", ".MMMMM.", "..MMM..", "..MMM..", "T.....T"],
-        &["T.....T", "..MMM..", ".MMMMM.", ".MMMMM.", ".MMMMM.", "..MMM..", "T.....T"],
-        &["T.....T", "..MMM..", ".MMMMM.", ".MMMMM.", ".MMMMM.", "..MMM..", "T.....T"],
-        &["T.....T", "..MMM..", ".MMMMM.", ".MMMMM.", ".MMMMM.", "..MMM..", "T.....T"],
-        &["TGGGGGT", "..MMM..", ".MMMMM.", ".MMMMM.", ".MMMMM.", "..MMM..", "TGGGGGT"],
-        &[".......", "..MMM..", "..MMM..", ".MMMMM.", "..MMM..", "..MMM..", "......."],
-        &[".......", "..MMM..", "..MMM..", "..MMM..", "..MMM..", "..MMM..", "......."],
-        &[".......", "...M...", "..MMM..", "..MMM..", "..MMM..", "...M...", "......."],
-        &[".......", ".......", "...M...", "..MMM..", "...M...", ".......", "......."],
-        &[".......", ".......", ".......", "...M...", ".......", ".......", "......."],
+        &["T.....T", ".......", ".......", ".......", ".......", ".......", "T.....T"],
+        &["T.....T", ".......", ".......", ".......", ".......", ".......", "T.....T"],
+        &["T.....T", ".......", ".......", ".......", ".......", ".......", "T.....T"],
+        &["T.....T", ".......", ".......", ".......", ".......", ".......", "T.....T"],
+        &["TGGGGGT", ".......", ".......", ".......", ".......", ".......", "TGGGGGT"],
     ],
 };
 
@@ -1119,6 +1114,13 @@ pub fn shop_door_offset() -> (i32, i32) {
 /// side of the counter run, within arm's reach of it.
 pub fn counter_stand_offset() -> (i32, i32) {
     (0, 8)
+}
+
+/// Where the ship stands on the Outpost's pad, as an offset from the city's
+/// centre: the middle of `ROCKET_PAD`'s plinth. Meaningless for any other
+/// site — only the city has the pad.
+pub fn pad_offset() -> (i32, i32) {
+    (ROCKET_PAD.min.0 + 3, ROCKET_PAD.min.1 + 3)
 }
 
 /// Where this town's beacon console stands, as an offset from its centre:

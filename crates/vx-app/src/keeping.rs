@@ -142,8 +142,9 @@ pub fn begin(directory: &Path, name: &str) -> std::io::Result<Writing> {
 /// the loads bind to locals named `rads`, `sightings`, `bath`, `eyes`, `press`,
 /// `rack`, `cabinet`, `holes` and `vaults`, and matching those to their files
 /// was, until now, a job for whoever was reading.
-pub const FILES: [(&str, &str); 41] = [
+pub const FILES: [(&str, &str); 42] = [
     ("log.dat", "journal"),
+    ("citizenship.dat", "citizenship"),
     ("explored.dat", "map"),
     ("player.dat", "skills"),
     ("wallet.dat", "wallet"),
@@ -270,6 +271,9 @@ pub fn worth_saving_now(command: &crate::journal::Command) -> bool {
         // price moved for whoever sells next. Resenting doing that twice is
         // the whole of this list.
         | Command::Sell { .. }
+        // Ten thousand credits, and a gate you would not like to find shut
+        // again.
+        | Command::Enrol
         // Emptying the pack moves an afternoon's mining from your back into a
         // container. Doing that twice is exactly the kind of thing this list
         // is for.

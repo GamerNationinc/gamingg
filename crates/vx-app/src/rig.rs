@@ -375,6 +375,37 @@ impl Rig {
         }
     }
 
+    /// The ship on the Outpost's pad. Ten blocks of it, so it is one of the
+    /// two things on the city's skyline from outside the ancient wall.
+    ///
+    /// `lit` draws the exhaust under it — the launched ship and the idle one
+    /// are the same rig with and without a flame, not two models.
+    pub fn rocket(lit: bool) -> Self {
+        let mut parts = vec![
+            // The hull: a tall square-section body, sat on its engine bell.
+            Part::fixed(Vec3::new(0.0, 4.6, 0.0), Vec3::new(2.2, 7.2, 2.2), slot::HULL),
+            // The nose, stepped in twice rather than pointed, which is what a
+            // cone is in a world made of cubes.
+            Part::fixed(Vec3::new(0.0, 8.8, 0.0), Vec3::new(1.5, 1.2, 1.5), slot::STEEL),
+            Part::fixed(Vec3::new(0.0, 9.8, 0.0), Vec3::new(0.7, 0.8, 0.7), slot::STEEL),
+            // The bell.
+            Part::fixed(Vec3::new(0.0, 0.6, 0.0), Vec3::new(1.4, 1.2, 1.4), slot::RUSTED_METAL),
+            // Four fins, on the axes.
+            Part::fixed(Vec3::new(1.4, 1.4, 0.0), Vec3::new(0.8, 2.6, 0.2), slot::STEEL),
+            Part::fixed(Vec3::new(-1.4, 1.4, 0.0), Vec3::new(0.8, 2.6, 0.2), slot::STEEL),
+            Part::fixed(Vec3::new(0.0, 1.4, 1.4), Vec3::new(0.2, 2.6, 0.8), slot::STEEL),
+            Part::fixed(Vec3::new(0.0, 1.4, -1.4), Vec3::new(0.2, 2.6, 0.8), slot::STEEL),
+        ];
+        if lit {
+            parts.push(Part::fixed(
+                Vec3::new(0.0, -1.2, 0.0),
+                Vec3::new(1.0, 2.4, 1.0),
+                slot::EMBER,
+            ));
+        }
+        Rig { parts }
+    }
+
     /// The player, seen from behind in third person.
     ///
     /// Deliberately not a villager: same build, but a hi-vis work jacket, a

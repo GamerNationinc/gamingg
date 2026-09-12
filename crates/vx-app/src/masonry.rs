@@ -217,6 +217,10 @@ fn read(path: &Path) -> std::io::Result<Option<Masonry>> {
 /// Once a dispatch window, not once a tick: `window` is the last one run, and
 /// is updated here. Returns the player-owned loads that landed, so the caller
 /// can pay for them — this file knows nothing about wallets either.
+///
+/// `citizen` rides along for the same reason the sheds do: a paid-for gate
+/// is an edit that waits for its ground, and this is the one place both
+/// sides wait. See `citizenship.rs`.
 pub fn tick_the_network(
     economy: &mut crate::economy::Economy,
     masonry: &mut Masonry,
@@ -224,6 +228,7 @@ pub fn tick_the_network(
     window: &mut u64,
     column: (i32, i32),
     now: u64,
+    citizen: bool,
 ) -> Vec<crate::economy::Shipment> {
     let due = now / crate::economy::DISPATCH_EVERY;
     if due == *window {
@@ -247,6 +252,10 @@ pub fn tick_the_network(
             .position(|other| other.centre == site.centre)
             .map_or(0, |index| earned[index])
     });
+    if citizen {
+        let city = world.city();
+        crate::citizenship::open_the_gates(world, &city);
+    }
     landed
 }
 

@@ -185,6 +185,11 @@ const DITCH_WIDTH: f32 = 5.0;
 /// Half-width of a gateway, in blocks, measured along the wall.
 const GATE_HALF: f32 = 3.0;
 
+/// How many courses a gateway is open for, from the plateau up, before the
+/// wall carries on over it as an arch. `part_at` has always drawn the arch
+/// from this course; a sealed gate fills exactly what is under it.
+const GATE_ARCH: i32 = 4;
+
 /// The radius of the city's modern retrofit: a ring round the compound, well
 /// inside the ancient wall it shelters under.
 const MODERN_RADIUS: f32 = 30.0;
@@ -241,6 +246,16 @@ pub struct Fort {
     pub phase: f32,
     /// Has this one been let go?
     pub ruined: bool,
+    /// Are its gateways shut?
+    ///
+    /// Only the Ruined City's modern retrofit: the one wall in the game with
+    /// somebody on the other side of it deciding who comes in. Shut by
+    /// worldgen as a gate block under each arch, and opened by an *edit* —
+    /// `citizenship::open_the_gates` in the app writes air into
+    /// [`Fort::gate_cells`] when you have paid — so the ground stays pure in
+    /// the seed and paying is an order on the journal like everything else
+    /// that moves a block.
+    pub sealed: bool,
     /// The site's own hash stream, for the ruin pass.
     seed: u64,
     centre: (i32, i32),
@@ -278,6 +293,7 @@ pub fn fort_for(site: &TownSite) -> Fort {
             radius: MODERN_RADIUS,
             phase: hash01(site.seed, 0x0f_02) * std::f32::consts::TAU,
             ruined: false,
+            sealed: true,
             seed: site.seed,
             centre: site.centre,
             ground: site.ground,
@@ -330,6 +346,7 @@ pub fn fort_for(site: &TownSite) -> Fort {
             } else {
                 0.25
             },
+        sealed: false,
         seed: site.seed,
         centre: site.centre,
         ground: site.ground,
@@ -354,6 +371,7 @@ pub fn forts_for(site: &TownSite) -> impl Iterator<Item = Fort> {
         phase: hash01(site.seed, 0x0f_04) * std::f32::consts::TAU,
         // Not a roll. Nobody has held this wall in a very long time.
         ruined: true,
+        sealed: false,
         seed: site.seed,
         centre: site.centre,
         ground: site.ground,
@@ -374,6 +392,9 @@ pub enum Part {
     Ditch,
     /// The lockbox beside a gateway.
     GateLock,
+    /// The gate itself, filling the arch of a sealed trace. See
+    /// [`Fort::sealed`].
+    Gate,
     /// The footing the curtain stands on, below grade.
     ///
     /// Poured under the whole trace including the gateways and the fallen
@@ -501,12 +522,17 @@ impl Fort {
                 if at_edge && y == ground + 1 && self.trace.locked() {
                     return Some(Part::GateLock);
                 }
+                // A sealed gate fills the opening under the arch. The lock
+                // above keeps its place: it is what you pay at.
+                if self.sealed && y >= ground && y < ground + GATE_ARCH {
+                    return Some(Part::Gate);
+                }
                 // Above the opening the wall carries on, so a gate reads as
                 // an arch rather than a missing tooth.
                 // Above the opening the wall carries on, so a gate reads as
                 // an arch rather than a missing tooth — one course of it on
                 // a mini star, three on a full trace.
-                return (y >= ground + 4 && y <= ground + height).then_some(Part::Rampart);
+                return (y >= ground + GATE_ARCH && y <= ground + height).then_some(Part::Rampart);
             }
             if y == ground + height {
                 // The outermost course of the top is the parapet; the rest is
@@ -540,6 +566,32 @@ impl Fort {
                 )
             })
             .collect()
+    }
+
+    /// Every block a sealed gate is made of, on the plateau. Empty for a fort
+    /// that is not sealed. What opening the gate writes air into.
+    ///
+    /// Asked at the fort's own `ground` rather than each column's: the only
+    /// sealed trace stands wholly on the city's levelled plot, where the two
+    /// are the same number.
+    pub fn gate_cells(&self) -> Vec<vx_core::BlockPos> {
+        if !self.sealed {
+            return Vec::new();
+        }
+        let span = (GATE_HALF + self.trace.half()).ceil() as i32 + 1;
+        let mut cells = Vec::new();
+        for (gx, gz) in self.gateways() {
+            for z in gz - span..=gz + span {
+                for x in gx - span..=gx + span {
+                    for y in self.ground..self.ground + GATE_ARCH {
+                        if self.part_at(x, y, z, self.ground) == Some(Part::Gate) {
+                            cells.push(vx_core::BlockPos::new(x, y, z));
+                        }
+                    }
+                }
+            }
+        }
+        cells
     }
 }
 
@@ -587,6 +639,7 @@ pub fn stamp(
                             Part::Parapet => blocks.metal_wall,
                             Part::Ditch => vx_core::BlockId::AIR,
                             Part::GateLock => blocks.permit_box_ii,
+                            Part::Gate => blocks.metal_wall,
                         };
                         if let Some(local) = vx_core::LocalPos::new(local_x, y, local_z) {
                             chunk.set(local, block);
@@ -826,10 +879,13 @@ mod tests {
                     fort.in_gateway(angle, distance),
                     "a listed gateway is not in one"
                 );
-                // And the wall is open there: no rampart at head height.
+                // And the wall is open there: no rampart at head height. The
+                // city's is shut by a *gate*, which is a different thing from
+                // being bricked up — it opens.
+                let expected = site.is_city().then_some(Part::Gate);
                 assert_eq!(
                     fort.part_at(x, site.ground + 2, z, site.ground),
-                    None,
+                    expected,
                     "the gateway at ({x}, {z}) is bricked up"
                 );
             }
@@ -1006,6 +1062,42 @@ mod tests {
         }
         assert_eq!(locks, 0, "somebody is still keeping the great star's keys");
         assert!(modern_locks > 0, "the retrofit has no lock on its gate");
+    }
+
+    /// The city's modern gates are shut and nobody else's are.
+    #[test]
+    fn only_the_citys_modern_gates_are_sealed() {
+        let ground = |_: i32, _: i32| 100;
+        let city = town::city(2024, &ground);
+        let modern = fort_for(&city);
+        let cells = modern.gate_cells();
+        assert!(!cells.is_empty(), "the retrofit's gates are open");
+        // Four gates, each a few blocks wide and four courses tall.
+        assert!(cells.len() >= 4 * 4 * 3, "only {} gate blocks", cells.len());
+        for at in &cells {
+            assert_eq!(modern.part_at(at.x, at.y, at.z, city.ground), Some(Part::Gate));
+            assert!(
+                (at.x - city.centre.0).abs() <= town::CITY_CORE_HALF
+                    && (at.z - city.centre.1).abs() <= town::CITY_CORE_HALF,
+                "a gate block off the plateau at {at:?}"
+            );
+            assert!(at.y >= city.ground && at.y < city.ground + GATE_ARCH);
+        }
+        // And the lock is still there to pay at: the gate fills the courses
+        // around it, and the lock keeps its own.
+        let lock_kept = cells.iter().any(|at| {
+            modern.part_at(at.x, city.ground + 1, at.z, city.ground) == Some(Part::GateLock)
+        });
+        assert!(lock_kept, "the lock was lost under the gate");
+        assert!(
+            forts_for(&city).next().unwrap().gate_cells().is_empty(),
+            "the ruin has a gate"
+        );
+        for site in sample() {
+            if !site.is_city() {
+                assert!(fort_for(&site).gate_cells().is_empty(), "a town sealed its gate");
+            }
+        }
     }
 
 }

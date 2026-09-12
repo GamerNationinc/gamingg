@@ -126,6 +126,8 @@ pub struct Session {
     /// window rather than once a tick. `Active` keeps the same field for the
     /// same reason.
     last_network: u64,
+    /// Whether the city's gates have been paid for. See `citizenship.rs`.
+    pub citizen: bool,
     pub shop: Shop,
     /// The machines the player actually owns. A `Session` had none until
     /// stage 52, which is why nothing had ever played the loop this round is
@@ -204,6 +206,7 @@ impl Session {
             // `MAX_VALUE` rather than zero, so the first advance runs the
             // network instead of deciding it already had.
             last_network: u64::MAX,
+            citizen: false,
             shop: Shop::new(),
             garage: crate::garage::Garage::new(),
             journal: CommandLog::new(),
@@ -239,6 +242,7 @@ impl Session {
         self.skills.save(root)?;
         self.economy.save(root)?;
         self.masonry.save(root)?;
+        crate::citizenship::save(self.citizen, root)?;
         self.mining.tank.save(root)?;
         self.mining.wear.save(root)?;
         self.mining.integrity.save(root)?;
@@ -335,6 +339,7 @@ impl Session {
         session.skills.load(root);
         session.economy.load(root);
         session.masonry.load(root);
+        session.citizen = crate::citizenship::load(root);
         session.mining.tank.load(root);
         session.mining.wear.load(root);
         session.mining.integrity.load(root);
@@ -507,6 +512,7 @@ impl Session {
             &mut self.last_network,
             column,
             now,
+            self.citizen,
         );
         for load in landed {
             // A load of the player's that has arrived, paid at the far town's
@@ -1232,6 +1238,19 @@ impl Session {
         self.mining.fleet.set_base(at);
     }
 
+    /// Pay the city's ten thousand, if the wallet holds it, and open its
+    /// gates. What the gate lock does when a player uses it twice.
+    pub fn enrol(&mut self) -> bool {
+        if self.citizen || !self.wallet.spend(crate::citizenship::PRICE) {
+            return false;
+        }
+        self.citizen = true;
+        self.journal.record(Command::Enrol);
+        let city = self.world.city();
+        crate::citizenship::open_the_gates(&mut self.world, &city);
+        true
+    }
+
     /// Buy one machine of a kind, if the wallet can stand it.
     ///
     /// Straight through [`crate::garage::Garage::buy`], which is where the
@@ -1646,7 +1665,9 @@ impl Session {
                 &[],
                 None,
                 crate::reputation::Standing::Neutral,
-                true,
+                // The Outpost trades with citizens; every other counter with
+                // anybody the session brings to it.
+                !site.is_city() || self.citizen,
             );
             *self.economy.market_mut(&site, now) = market;
             // On the wire, and only if it actually sold. See `Command::Sell`:
@@ -1958,6 +1979,87 @@ mod tests {
             Some(stacked),
             "the replay stacked a different number of blocks"
         );
+    }
+
+    /// **The oracle, for the gate.**
+    ///
+    /// Paying the city's ten thousand is an order, and the gate it opens is
+    /// ground. A replay that did not know about the payment would walk up to
+    /// a shut gate the live game had opened, and report a different hash —
+    /// correctly. The control half proves the gate is shut for everybody who
+    /// has not paid, on both sides.
+    #[test]
+    fn paying_your_way_into_the_city_replays_to_the_same_gate() {
+        let mut session = ready();
+        let city = session.world.city();
+        let cells = vx_world::fort::fort_for(&city).gate_cells();
+        assert!(!cells.is_empty(), "the city has no gate to pay at");
+
+        // Stand at the city's east gate. Nothing walks three kilometres in a
+        // unit test; the point is the order and the ground, not the trip.
+        let (gx, gz) = vx_world::fort::fort_for(&city).gateways()[0];
+        let start =
+            DVec3::new(f64::from(gx) + 0.5, f64::from(city.ground) + 1.0, f64::from(gz) + 0.5);
+        // The whole ring of gates resident, not just the one you stand at:
+        // an unloaded chunk reads as air, which is not the same as open.
+        let ring = BlockPos::new(city.centre.0, city.ground, city.centre.1).chunk();
+        // And the ground the session opened on: `Session::open` loads the
+        // spawn and nothing here unloads it, so the replay must hold it too.
+        let spawn = vx_world::town::spawn_position(&vx_world::town::home_site()).chunk();
+        let same_chunks = |world: &mut vx_world::World| {
+            world.load_around(spawn, KEEP_LOADED);
+            world.load_around(
+                BlockPos::new(
+                    start.x.floor() as i32,
+                    start.y.floor() as i32,
+                    start.z.floor() as i32,
+                )
+                .chunk(),
+                KEEP_LOADED,
+            );
+            world.load_around(ring, 4);
+        };
+        session.player.position = start;
+        session.keep_chunks_loaded();
+        same_chunks(&mut session.world);
+        for at in &cells {
+            assert_ne!(session.world.block(*at), vx_core::BlockId::AIR, "the gate was open");
+        }
+
+        // Too poor, then paid. The wallet is seeded: earning ten thousand is
+        // a whole play, and it is the gate under test.
+        assert!(!session.enrol(), "the gate opened for nothing");
+        session.wallet.earn(crate::citizenship::PRICE);
+        assert!(session.enrol(), "the gate would not take the money");
+        assert!(!session.enrol(), "the city charged twice");
+        assert_eq!(session.wallet.credits(), 0);
+        for at in &cells {
+            assert_eq!(session.world.block(*at), vx_core::BlockId::AIR, "still shut at {at:?}");
+        }
+        session.work(64);
+        let ground = vx_world::world_hash(&session.world);
+
+        let mut fresh = vx_world::World::new(session.world.seed());
+        same_chunks(&mut fresh);
+        let events = vx_core::EventBus::new();
+        let rebuilt = crate::journal::replay_from(&session.journal, &mut fresh, &events, start);
+        assert!(rebuilt.citizen, "the replay never paid");
+        assert_eq!(vx_world::world_hash(&fresh), ground, "the replay met a different gate");
+
+        // The control: a session that never paid replays to a shut gate too.
+        let mut poor = ready();
+        poor.player.position = start;
+        poor.keep_chunks_loaded();
+        same_chunks(&mut poor.world);
+        poor.work(64);
+        let mut fresh = vx_world::World::new(poor.world.seed());
+        same_chunks(&mut fresh);
+        let rebuilt = crate::journal::replay_from(&poor.journal, &mut fresh, &events, start);
+        assert!(!rebuilt.citizen);
+        assert_eq!(vx_world::world_hash(&fresh), vx_world::world_hash(&poor.world));
+        for at in &cells {
+            assert_ne!(fresh.block(*at), vx_core::BlockId::AIR, "a shut gate opened for free");
+        }
     }
 
     /// **The oracle, for a town that got rich.**
@@ -3119,8 +3221,9 @@ mod tests {
     /// module docs is the human-readable half of the same promise.
     #[test]
     fn the_census_covers_every_saved_subsystem() {
-        const EXPECTED: [&str; 19] = [
+        const EXPECTED: [&str; 20] = [
             "log.dat",
+            "citizenship.dat",
             "wallet.dat",
             "player.dat",
             "economy.dat",

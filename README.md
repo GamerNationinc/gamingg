@@ -175,11 +175,10 @@ build in it, and it survives quitting — skills included.
 
 ### Known rough edges
 
-- **You cannot get into the Ruined City yet, because there is nothing to get
-  into it *for*.** The place is there, the walls are there and the counter is
-  standing in the compound — but citizenship, the gate that opens when you pay
-  it, the rocket and the safe zone are 59b. Until then the Outpost is a counter
-  like any other, and the compound's gates are open.
+- **A gate you paid for can be shut for half a minute.** Paying opens every
+  gate whose chunk is resident; one that was not opens on the next dispatch
+  window after you arrive at it, because the gate is an edit and there is
+  deliberately no ledger of which ones are done. Nobody has waited at one yet.
 - **Nobody is in the city.** It has three trades on its roster like every other
   settlement, so the villagers walk its compound and sleep in buildings it does
   not have. A city with its own population, or honestly with none, is its own
@@ -784,6 +783,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo run --release -p vx-app          # opens a window
 ```
 
+`CLAUDE.md` at the root is the working method for changes to this tree — think
+before coding, the minimum that solves it, touch only what you must, verify —
+with the house rules it is applied under listed at the bottom of it.
+
 Every building in a town carries a lockbox saying who may edit it, ranked
 sheriff over mayor over owner over guest. Your own house is yours; the streets
 are the town's; past the town line you build where you like. Getting into
@@ -812,9 +815,16 @@ that, small, there is a modern compound — a six-point wall somebody *is*
 maintaining, a counter under a roof, a radio mast, and a rocket standing on a
 grated pad.
 
-That is the whole of the place for now. What it is *for* — the ten thousand
-credits, the gate that opens when you pay them, everything you sell leaving on
-the rocket, and the safe zone inside the walls — is the next round.
+The compound's gates are shut. Use the lock beside one and it names the price:
+**ten thousand credits, once, for ever.** Use it again and it takes the money
+and the gates open — every one of them, and they stay open, because paying is
+an order on the journal and the gate is ground. Inside, the Outpost's counter
+buys from citizens and nobody else, and everything you sell there leaves on the
+rocket for a station you will never see; the manifest is the line on your
+screen. Inside the walls a citizen is nobody's to arrest: deputies turn back,
+the deep stays down, and the trigger does not work. Somebody who climbed the
+wall gets none of that. And citizenship buys no better price anywhere — the
+city is a place you earn your way into, not a discount card.
 
 It is one city per world and its position is a function of the seed, so it is
 never in the same place twice and it is always in the same place for you. It is

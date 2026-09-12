@@ -136,6 +136,7 @@ Written down because they are easy to forget and expensive to get wrong.
 | 57 | `843a8c9` | The drone you can lose. Task #221, on the board since stage 49 split in two, and the roadmap stated the gap in one line: **a machine cannot collide with anything, so it cannot crash.** From stage 10a to here `garage.rs` had `grant` and no opposite, and `wear.rs` modelled a machine grinding down to `Seized` and then stopping it for ever, recoverably, for two spare parts — so every machine a player ever bought was permanent. A fleet you cannot lose is not capital. `integrity.rs` sits beside `wear.rs` and is deliberately its shape: the same `wear::key` so a machine cannot be one thing to one ledger and another to the other, four graded states, a bench repair, and a tolerant `integrity.dat`. Four ways to die, and **three of them were nearly free** because the vocabulary already existed: a falling trunk has drawn a `Sweep` since stage 36 and `main.rs` already ran it against the posse, the garrisons, the stalker and the player's own box, so gunfire and getting flattened are the same three lines and one shared hull test; and a shot-down caravan has left an `arsenal::Crash` on the ground since stage 13, which is what a wreck is with a longer life and a verb on it. The fourth is the crash proper: `Flier::pilot_step` enforced the *autonomous* rule — never enter a column below its safe altitude, climb instead — under manual control as well, and that single line is why a machine could not be flown into a hillside. It is off for a hand-flown machine and untouched for one flying itself, with a test on each half, and the dive it reports is charged quadratically so a scrape is a scratch and a four-block dive is most of a hull. **The expensive part was indices.** `MachineRef::Digger(i)` is a vector position and 127 sites index those vectors; the wear ledger, the roster, the route caches and `Operation::controlled` are all keyed on it, so `drones.remove(index)` would hand machine three's history to machine two. A lost machine leaves a **tombstone** — `DroneState::Lost` (byte 7, `Stacking` took 6) and `FlierState::Lost` — and the tick steps over it exactly as it already stepped over a piloted one. **No new journal tag and no `VERSION` bump**: every way a machine dies is a consequence of `Pilot`, `Fire` or `Advance`, all already recorded, and salvage reuses `Command::Salvage`, whose own doc has said "a haul derived from a position" since stage 19. Two real bugs on the way: the hit test reached for `machine_eye`, which interpolates by the frame accumulator and adds a *drawn* gimbal — presentation used as a lever, exactly what stage 53's own test was written against — so the replay killed the machine a cell from where the session did and the salvage order then carved air out of the wrong place; and replay's `Advance` arm **dropped shot and fall sweeps** on the honest argument that craters are the part the hash checks, which stopped being true the moment a sweep could destroy a machine that would otherwise keep cutting. `wrecks.dat` (`VXWK`), `integrity.dat` (`VXIT`), `keeping::FILES` 38 → 40, tile 68 for the scorched skin, key `K`, a `WRECK` verb, and `garage::lose` — the first mutator this game has ever had that subtracts |
 | 58 | `a10a2d4` | The towns that grow, and the money that moves between them. Asked to *"work the economy — real towns that grow in size based on economy, and local towns that buy and trade with each other."* Both halves were half-built since 9b and both stopped in the same place. The network moved goods and **nobody paid for them**: `Market::till` moved for exactly one reason, `TILL_REFILL` ticking up against how full the shelves were, so a town on a busy corner of the map and a town nobody shipped to ended up with the same money — and `dispatch` placed **one** load a window across the entire frontier, which is a map with freight drawn on it rather than a network. And a town's size was fixed at worldgen: `core_half` is one of three values assigned by a hash, it feeds the *terrain plateau* through `blend_height`, so it feeds the world hash and cannot move at runtime. The buyer now draws `price x amount` from its own till at dispatch and the seller takes it — a town that cannot cover a load does not order one, so a poor town stays short, its prices stay high, and the first thing it can afford is the thing it needs most — up to four loads a window, never twice from one source. `Market` gains what it has **earned selling on for its life**, deliberately not the same number as the till, because a till is spent and a place that is doing well is a place money moves *through*; crossing `GROWTH_AT` puts a building up, and a ratchet, so a town that has a good decade and then a bad year keeps what it built. **The buildings are edits, not worldgen.** `stamp` lays down the authored plan and nothing else and is pure in `(seed, pos, sites)`, which is what lets `save.rs` write only modified chunks and is what the world hash is a hash *of*; a growth shed reaches the world the way a founded town's chunks do — blocks written into loaded chunks, which mark themselves modified and save. Which means it has to be **deferred**: `masonry.dat` records what is *standing*, which is not the same number as what a town has *earned*, and a town three thousand blocks out grows on its books and builds when you arrive. Two real holes had to close at once. `Economy::run` had exactly one caller, `main.rs`, so a headless `Session` had **never run the freight network** and no test had watched it end to end; and selling had never been written down, which was harmless for eight stages and stopped being harmless the moment a town's books could move a block — `Command::Sell` (tag 33), journal `VERSION` 34, with the reputation band stated on the wire for the same reason a shot's muzzle is. Two bugs found by the oracle, both about *when*: `CommandLog` coalesces consecutive `Advance`s, so a whole afternoon arrived as one order and the crew dug through ground a town had already built on — merging now stops at a dispatch window; and `Session::run_the_network` read `journal.tick()`, which is already at the far end of the order before the loop that works through it has started. `economy.dat` 6, `keeping::FILES` 40 -> 41, `Role::Works`, three pockets of bare plateau inside even the smallest core, and `books_hash` over the money as well as the goods |
 | 59a | `d9abb6e` | The Ruined City: the place. Asked for *"a large city called the Ruined City — a retrofitted modern outpost built upon the ruins of an ancient giant star fort, exactly like the Rust outpost, where citizenship costs 10 000 credits and everything you sell goes up by rocket to an orbital station."* Split at the seam the work has: **this half is the place**, and 59b is what you do there — the citizenship, the gate, the counter and the rocket, which need a journal tag and a sidecar that this half does not. Two decisions taken: **three to four kilometres out**, pinned on the map from the first frame but a trip you plan; and **ruins first, compound second** — the story is the fallen star fort, with a small modern Outpost bolted into the middle of it. The design finding is that **the city should be a `TownSite`**: every piece of machinery it needs already keys on one — the plateau through `blend_height`, the wall through `fort_for`, the buildings through `plan_for`, the market through `Economy`'s centre key, the counter through the raycast that finds the site behind an `engine:counter`, the map, the beacon and the permits — so a bespoke `CitySite` would have re-plumbed all of it while a fourth `Speciality` and a much larger `core_half` gets every one for free, across exactly ten match sites. One cell on a **round** ring seven cells out, short-circuited before the presence hash the way the hometown's cell is, so there is exactly one city, no ordinary town can share it and nothing is written down; nine jittered candidates inside that cell against a relaxed `CITY_RELIEF`, because a plot a hundred and ninety-two blocks across is a far harder thing to find than a forty-block one. **Two walls on one site**: `forts_for` yields the ancient `GreatStar` — eight points, always ruined, two thirds down, no gate locks, because nobody has kept its keys — and the modern six-point retrofit drawn tight round the compound inside it, and `stamp` walks the iterator. The parade ground is derived rather than drawn, because a hundred and fifty metres of cracked paving is a field and not a blueprint; the bastion stumps cost nothing at all, because the ruin pass has left a fallen segment's footing in the ground since stage 21. Two real findings on the way. **The gather margin was a comment rather than a contract**: `REACH` came off `MAX_CORE_HALF`, and a six-point trace has always reached about six blocks further than `core_half + SKIRT` with only `flora::CANOPY_REACH`, folded in for an unrelated reason, covering the difference — it is sized off the widest wall now and asserted against `forts_for`. And **a wall has to fit on the ground it stands on**: the first cut put the great star fifty-eight blocks past the city's own core, and because `part_at` rides each column's own surface it followed the hillside and read as a fragment stuck on a slope; the whole trace — curtain, bastion, thickness and ditch, ninety-five blocks all told — now stands inside the ninety-six block plot. `CITY_SKIRT` is double the usual so a plot that big eases into the country instead of ending in a step, and the skirt is taken from the site rather than the constant |
+| 59b | _this_ | The Ruined City: what you do there. The second half of the ask: *"in order to enter city you have to pay for citizenship — 10 000 credits, something ridiculous — at this outpost all goods sold get sent via rocket ship to an orbit station."* **Citizenship is a gate.** The city's modern trace is stamped with its four gateways shut — `Part::Gate`, a `metal_wall` block under each arch, `Fort::sealed` true for exactly one wall in the game — and paying writes air into them. That makes enrolling an *order*: `Command::Enrol`, tag 34, journal `VERSION` 35, no payload, because the price is a constant and the gate is derived from the seed; `citizenship.dat` (`VXCZ`, one byte) beside it, `keeping::FILES` 41 -> 42, and `worth_saving_now` true because ten thousand credits is exactly the list. **No second ledger.** The round's note had planned a `masonry`-style deferred queue for the gate and it was not needed: `open_the_gates` is idempotent and costs a few hundred block reads, so it runs when you pay and once a dispatch window after that from the one-copy network tick, which now takes the citizen flag. A gate chunk that was not resident when you paid opens within a window of your arriving at it. **You pay at the lock.** A fort's gate lock has never had a permit claim behind it — using one logged a warning — and at the city it is now the one lock in the game you pay at: use it once for the offer, again within six seconds to pay. No panel, no verb, no new block. **The counter refuses a non-citizen** on both sides: the app before the shelf opens, `Session::sell_everything_at` through `confirm`'s existing `open` flag, and the replay's `Sell` arm — a log cannot sell at the Outpost without an `Enrol` before it. **Every Outpost sale launches.** `Rig::rocket`, drawn on the pad idle and lit and rising after a sale off a departure tick the way a caravan is; the manifest is the toast and the station is a name. The blueprint's block rocket came off the pad for it — a ship that lifts off cannot also be a column of blocks left standing behind. **The safe zone is the core, for a citizen**: deputies stand down, the deep stands down, and the trigger is refused before `Fire` is recorded, so the replay never sees a shot that was never fired. A non-citizen inside the walls gets none of it, and citizenship buys no price advantage anywhere. Two oracle tests: paying replays to the same open gate, and never paying replays to the same shut one. The Karpathy `CLAUDE.md` is in the tree from this round, and this is the first stage written under it — which is why the round is smaller than its own note |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -4141,6 +4142,94 @@ the city can always pay — which is the point of having built 58 first.
 `--city` plays it in five beats on the shipped seed: FARGATE, 3 999 blocks out,
 plateau at y 112.
 
+## Shipped — Stage 59b: the Ruined City — what you do there
+
+The second half of the ask from the economy round: *"in order to enter city you
+have to pay for citizenship — 10 000 credits, something ridiculous — at this
+outpost all goods sold get sent via rocket ship to an orbit station."* 59a built
+the place. This is what the money buys: the gate, the counter and its rocket,
+and the safe zone — and, decided with the user in the economy round, **not** a
+price advantage.
+
+### Written under `CLAUDE.md`
+
+The Karpathy guidelines went into the tree at the start of this round, and the
+round was planned under them. The visible effect is that it is *smaller* than
+its own note from 59a. Six assumptions were stated up front and the plan was
+held to them; the one that changed the design is below.
+
+### Citizenship is a gate
+
+The modern trace is stamped with its four gateways **shut**: `Part::Gate`, a
+`metal_wall` block filling the four courses under each arch, and `Fort::sealed`
+true for exactly one wall in the game — the city's retrofit. The lock keeps its
+course above the gate, because it is what you pay at.
+
+Paying writes air into those cells. Which makes enrolling an *order*:
+`Command::Enrol`, tag 34, journal `VERSION` 35, carrying nothing, because the
+price is a constant and the gate is derived from the seed. `citizenship.dat`
+beside it — `VXCZ`, one byte — `keeping::FILES` 42, the census 20, and
+`worth_saving_now` true, since ten thousand credits is precisely the list that
+function exists for. Credits are not ground, so the replay does not check the
+wallet, the same rule `Sell`'s scratch wallet follows; the gate cells are
+ground, which is why this is on the wire at all.
+
+### No second ledger
+
+The 59a note had planned a `masonry`-style deferred queue for the gate — "the
+same machinery, second use". Stated as an assumption and looked at properly,
+it was not needed: `citizenship::open_the_gates` is idempotent and costs a few
+hundred block reads, so it simply runs when you pay and once a dispatch window
+after that from `masonry::tick_the_network`, which now takes the citizen flag
+on all three of its callers. A gate chunk that was not resident when you paid
+opens within a window of your arriving at it. That is the whole of the
+deferral, and it is stateless.
+
+### You pay at the lock
+
+A fort's gate lock has never had a permit claim behind it — using one logged
+*"a lockbox with no claim behind it"*. At the city that lock is now the one in
+the game you pay at: use it once and it names the price, use it again within
+six seconds and it takes the money, opens the gates and says so. Two presses
+rather than a panel, because the whole of the choice is yes or no and ten
+thousand credits should not go on a mis-press. No new panel, no new verb, no
+new block.
+
+### The counter, the rocket, the safe zone
+
+The Outpost's counter refuses a non-citizen on every side there is: the app
+before the shelf opens, `Session::sell_everything_at` through `Shop::confirm`'s
+existing `open` flag, and the replay's `Sell` arm — a log cannot sell at the
+Outpost without an `Enrol` before it.
+
+Every sale that moves goods at the city launches. `Rig::rocket` stands on the
+pad idle, and lit and rising after a sale, drawn off a departure tick the way
+a caravan is drawn off a lerp — `rocket.rs` is forty lines and journals
+nothing. The manifest is the toast and the station is the name on it. The
+blueprint's block rocket came off the pad for this: a ship that lifts off
+cannot also be a column of blocks left standing behind, and that is the one
+worldgen change the round makes.
+
+Inside the core, for a citizen: deputies stand down, the deep stands down, and
+the trigger is refused *before* `Fire` is recorded, so the replay never sees a
+shot that was never fired. A non-citizen who climbed the wall gets none of it,
+which is the honest reading of what the money bought.
+
+### The oracle, twice
+
+`paying_your_way_into_the_city_replays_to_the_same_gate`: a session at the
+east gate, refused while poor, paid, refused a second time, its 370 gate blocks
+air; replayed from a fresh world onto the same chunks to the same hash and a
+`citizen` flag. And the control: a session that never paid replays to the same
+*shut* gate. The first cut of it failed for a reason worth writing down —
+`World::block` reads an unloaded chunk as air, which is not the same as open,
+so both sides hold the whole gate ring resident and the spawn the session
+opened on.
+
+`--enrol` plays it in three beats on the shipped seed: FARGATE's east gate shut,
+the same gate after 10 000 credits, and 40 copper ore sold for 480 credits
+leaving on the rocket.
+
 ## Planned — the hunt: how hostiles will search, shoot and stalk
 
 A design note arrived extending the combat half of the people note, and it
@@ -4530,7 +4619,10 @@ constant it could never outgrow, and that a headless session had never run the
 freight network at all. Next was the city, and 59a is the half of it that is a place: a `TownSite`
 with a fourth speciality and a plot nine times a town's, one cell on a round
 ring three to four kilometres out, and two walls on it — an ancient eight-point
-ruin and the modern retrofit inside it. 59b is what you do there.
+ruin and the modern retrofit inside it. 59b is what you do there, and it is
+shipped too: the ten thousand, the gate it opens, the counter that refuses
+anybody who has not paid, the rocket, and the safe zone — the first round
+written under `CLAUDE.md`, and smaller than its own note for it.
 
 | Stage | What | Why here |
 |---|---|---|
@@ -4538,7 +4630,7 @@ ruin and the modern retrofit inside it. 59b is what you do there.
 | ~~56~~ | ~~The spoil heap~~ — **shipped** | You mark a spot, pick a shape — square-base pyramid, spiral tower, straight shaft — and the crew hauls spoil there and stacks it, reusing the mark / choose-a-method / dispatch flow and the job board. The expensive one, and honestly so: **nothing in `vx-agent` can place a block.** Not a missing function, a missing concept — `JobKind` has two behaviourless variants, a `Job` carries only a region with nowhere to say *what to put there*, `DroneState` has no build state, and `REACH_OFFSETS` is shaped entirely by the rules of cutting. Stacked blocks are ground and ground is the hash, so it is a journal order and `VERSION` 33 — 32 went to the pack |
 | ~~58~~ | ~~The towns that grow~~ — **shipped** | Real towns that grow in size on the strength of their economy, and local towns that buy and trade with each other. The buyer pays out of its own till, four loads a window, and what a town earns selling on is a ratchet that puts buildings up. The buildings are **edits**, not worldgen, so the terrain and the world hash do not move — and they are deferred, so a town grows wherever it is and builds when you arrive |
 | ~~59a~~ | ~~The Ruined City: the place~~ — **shipped** | The city on the map, the ancient great star and its breaches, the parade ground and the Outpost standing in it. A `TownSite` with a fourth speciality and a much larger core, on a round ring seven cells out, with two walls on one site |
-| 59b | The Ruined City: what you do there | Citizenship at 10 000 credits, once and for ever — `citizenship.dat` and `Command::Enrol`, tag 34, journal `VERSION` 35, because paying opens the gates and that is ground. The modern trace's gateways are stamped shut and enrolling writes air into them as an *edit*, through the deferred-stamping machinery `masonry.rs` built in 58: a persisted decision that reaches the world as blocks when the ground is resident, second use. The counter refuses a non-citizen and every sale launches the rocket — `Rig::rocket` on the pad, a timed arc out of frame, the manifest on the HUD, drawn off a departure tick the way `Shipment::position_at` already is. And the safe zone: inside the core, for a citizen, `Posse::stand_down`, the stalker sleeps and `Command::Fire` is refused. A non-citizen who climbed the wall gets none of it |
+| ~~59b~~ | ~~The Ruined City: what you do there~~ — **shipped** | Citizenship at 10 000 credits, once and for ever: `Command::Enrol` (tag 34, journal `VERSION` 35) and `citizenship.dat`, a gate stamped shut by worldgen and opened by an edit with no second ledger, the counter that refuses the unpaid on every side, the rocket every Outpost sale leaves on, and the safe zone inside the core for a citizen |
 | ~~49b~~ | ~~The drone you can lose~~ — **shipped as 57** | A machine cannot collide with anything, so it cannot crash. Integrity beside `wear.rs` and on the oracle for the same reason wear is; the flier's auto-climb off under manual control so it can be flown into a cliff, while the digger keeps the standability rule that stops a hand-driven drone stranding itself; gunfire through `segment_hits_box`; a persistent, mapped wreck you walk out to and salvage or rebuild; and `garage.rs`'s first `lose` mutator, since `grant` only ever added |
 
 Beyond those the board holds the outstanding engineering below, and whatever
@@ -4546,7 +4638,7 @@ the next note says.
 
 ## The feature map
 
-The whole game at a glance, as of stage 59a.
+The whole game at a glance, as of stage 59b.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -4764,6 +4856,13 @@ on the oracle for the same reason, gunfire and falling trunks settled by the
 one hull test, a seized machine that eventually grinds itself to scrap, a
 tombstone instead of a removal so no index ever moves, and a scorched hulk you
 walk out to, strip and lose the roster row for);
+the Ruined City (one per world, three to four kilometres out on a round ring,
+an ancient eight-point ruin two thirds down with a modern six-point Outpost
+inside it, a terminal's books with a till twelve times a town's, and pinned
+on the map from the first frame) and citizenship of it (ten thousand credits
+paid at the gate lock, `Command::Enrol` opening a gate that worldgen stamps
+shut, the counter refusing the unpaid on every side, a rocket every sale
+leaves on, and a safe zone inside the core for a citizen);
 a Steam Deck dist build every round.
 
 **Planned, in arc order:** nothing is named. Every design note this project
