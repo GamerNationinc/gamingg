@@ -346,6 +346,9 @@ struct Options {
     /// The drill mod, in five beats: the cage, the cut, the ping, the dark
     /// and the same frame with both switches down.
     drillmod: bool,
+    /// Sealed rooms: a hut with its doorway open and then shut, the F3 line
+    /// and the room's bars, with the relabel timed.
+    rooms: bool,
     pack: bool,
     /// The spoil heap: a crew stacking what came out of the hole into a
     /// pyramid, a spiral tower and a straight shaft.
@@ -462,6 +465,7 @@ fn parse_args() -> Result<Options, String> {
         gimbal: false,
         haul: false,
         drillmod: false,
+        rooms: false,
         pack: false,
         heap: false,
         wreck: false,
@@ -577,6 +581,7 @@ fn parse_args() -> Result<Options, String> {
             "--gimbal" => options.gimbal = true,
             "--haul" => options.haul = true,
             "--drillmod" => options.drillmod = true,
+            "--rooms" => options.rooms = true,
             "--pack" => options.pack = true,
             "--heap" => options.heap = true,
             "--wreck" => options.wreck = true,
@@ -711,6 +716,7 @@ fn parse_args() -> Result<Options, String> {
                      --grow              a town's square before and after it prospers\n  \
                      --city              the Ruined City, three kilometres out\n  \
                      --enrol             the city's gate shut, paid open, and the rocket leaving\n  \
+                     --rooms             a hut with its door open and shut, as the air sees it\n  \
                      --warrant           the same console with a warrant standing\n  \
                      --ballot            the console's voting page, with a poll due\n  \
                      --elected           the voting page of a town that elected you\n  \
@@ -1032,6 +1038,11 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
         return photograph_the_drill_mod(&context, &mut renderer, &mut camera, options, path);
     }
 
+    // Sealed rooms: the same hut with its doorway open and then shut.
+    if options.rooms {
+        return photograph_the_rooms(&context, &mut renderer, &mut camera, options, path);
+    }
+
     // The pack: what you cut on your back, and what would not fit on the floor.
     if options.pack {
         return photograph_the_pack(&context, &mut renderer, &mut camera, options, path);
@@ -1327,6 +1338,7 @@ fn run_screenshot(options: &Options, path: &str) -> Result<(), String> {
             yaw: 195.0,
             pitch: -9.0,
             aimed: Some("ENGINE:STONE".into()),
+            room: "OUTDOORS".into(),
             chunks_loaded: world.loaded_chunk_count(),
             chunks_drawn: renderer.visible_chunk_count(),
             triangles: renderer.triangle_count(),
@@ -6202,6 +6214,183 @@ fn photograph_the_enrolment(
     Ok(())
 }
 
+/// The bars round a room's bounds, a shade off the walls so they do not
+/// z-fight the faces they trace.
+fn room_bars(room: &vx_world::atmos::Room) -> Vec<vx_render::Object> {
+    let inset = 0.08;
+    let low = glam::Vec3::new(
+        room.min.x as f32 + inset,
+        room.min.y as f32 + inset,
+        room.min.z as f32 + inset,
+    );
+    let high = glam::Vec3::new(
+        room.max.x as f32 + 1.0 - inset,
+        room.max.y as f32 + 1.0 - inset,
+        room.max.z as f32 + 1.0 - inset,
+    );
+    hologram::bars_between(low, high, 1.2)
+}
+
+/// Sealed rooms, in two beats: a hut with its doorway open, and the same hut
+/// shut. The F3 panel says which, and the bars appear when the air agrees.
+///
+/// The honest experiment `ATMOSPHERE.md` asks for: the fixture times the
+/// relabel-and-walk that closing the door costs, and prints it.
+fn photograph_the_rooms(
+    context: &GpuContext,
+    renderer: &mut Renderer,
+    camera: &mut Camera,
+    options: &Options,
+    path: &str,
+) -> Result<(), String> {
+    let stem = path.strip_suffix(".ppm").unwrap_or(path);
+
+    let mut world = World::new(options.seed);
+    let home = vx_world::town::home_site();
+    // On the bare plateau pocket south-west of the square, where a town
+    // that prospers would put its bunkhouse. Seven by five by seven of metal
+    // wall, floor on the plateau, five by three by five inside.
+    let min = vx_core::BlockPos::new(home.centre.0 - 9, home.ground, home.centre.1 - 9);
+    let max = min.offset([6, 4, 6]);
+    world.load_around(min.chunk(), 3);
+    let metal = world
+        .registry()
+        .id_of("engine:metal_wall")
+        .ok_or("no metal wall in the registry")?;
+    for y in min.y..=max.y {
+        for z in min.z..=max.z {
+            for x in min.x..=max.x {
+                let wall = x == min.x
+                    || x == max.x
+                    || y == min.y
+                    || y == max.y
+                    || z == min.z
+                    || z == max.z;
+                world.set_block(
+                    vx_core::BlockPos::new(x, y, z),
+                    if wall { metal } else { vx_core::BlockId::AIR },
+                );
+            }
+        }
+    }
+    // The doorway: one block out of the east wall at head height.
+    let doorway = vx_core::BlockPos::new(max.x, min.y + 2, min.z + 3);
+    world.set_block(doorway, vx_core::BlockId::AIR);
+
+    // Inside, in the far corner, looking at the doorway.
+    let inside = glam::DVec3::new(
+        f64::from(min.x) + 1.6,
+        f64::from(min.y) + 2.4,
+        f64::from(min.z) + 1.6,
+    );
+    let feet = vx_core::BlockPos::new(min.x + 1, min.y + 1, min.z + 1);
+    camera.position = inside;
+    look_at(
+        camera,
+        glam::DVec3::new(
+            f64::from(doorway.x),
+            f64::from(doorway.y) + 0.5,
+            f64::from(doorway.z) + 0.5,
+        ),
+    );
+    let day = clock::sun_uniform(clock::sky_at(TimeOfDay::new(0.42)));
+    renderer.set_sun(&context.queue, day);
+
+    let mut rooms = vx_world::atmos::Rooms::new(world.registry());
+    let (width, height) = (options.width as f32, options.height as f32);
+
+    for (shot, beat) in ["doorway", "sealed"].iter().enumerate() {
+        if *beat == "sealed" {
+            world.set_block(doorway, metal);
+        }
+        // The cost the round exists to measure: catching up with the edit
+        // and answering for the room, in one go.
+        let started = Instant::now();
+        rooms.refresh(&mut world);
+        let verdict = rooms.room_at(&world, feet);
+        let took = started.elapsed();
+        let (line, bars) = match verdict {
+            vx_world::atmos::Verdict::Sealed(room) => (
+                format!("{} BLOCKS SEALED", room.volume),
+                room_bars(room),
+            ),
+            vx_world::atmos::Verdict::Outdoors => ("OUTDOORS".to_string(), Vec::new()),
+            vx_world::atmos::Verdict::Solid => ("-".to_string(), Vec::new()),
+        };
+        println!(
+            "  {beat}: {line} - refresh and walk took {} us ({} sections labelled)",
+            took.as_micros(),
+            rooms.labelled()
+        );
+
+        remesh_all(context, renderer, &mut world);
+        renderer.update_camera(&context.queue, camera);
+        renderer.set_objects(&context.device, &context.queue, &bars);
+
+        let content = debug::DebugContent {
+            fps: 60.0,
+            position: (inside.x as f32, inside.y as f32, inside.z as f32),
+            chunk: (feet.chunk().x, feet.chunk().z),
+            yaw: camera.yaw.to_degrees(),
+            pitch: camera.pitch.to_degrees(),
+            aimed: Some("ENGINE:METAL_WALL".into()),
+            room: line,
+            chunks_loaded: world.loaded_chunk_count(),
+            chunks_drawn: renderer.visible_chunk_count(),
+            triangles: renderer.triangle_count(),
+            edits: world.edit_count(),
+            composites: world.composite_count(),
+            tick: 0,
+            log_entries: 0,
+            day: 1,
+            hhmm: (10, 5),
+            burners: 0,
+            fuel_cells: 0,
+            worst_machine: "SOUND",
+            panicking: 0,
+            marks: 0,
+            shots: 0,
+            deputies: 0,
+            squads: 0,
+            hunting: 0,
+            belief: None,
+            hits: (0, 6),
+            bounty: 0,
+            compact: "NEUTRAL",
+            holdouts: "NEUTRAL",
+            wells: (0, 0),
+            rads: (0.0, 0.0),
+            dark: (0.0, "ASLEEP"),
+            medkits: 0,
+        };
+        let pixels = debug::render_debug(&content);
+        let panel_width = debug::DEBUG_WIDTH as f32 * shop::SHOP_SCALE;
+        let panel_height = debug::DEBUG_HEIGHT as f32 * shop::SHOP_SCALE;
+        renderer.set_overlay(
+            DEBUG_SLOT,
+            &context.device,
+            &context.queue,
+            (debug::DEBUG_WIDTH, debug::DEBUG_HEIGHT),
+            &pixels,
+            vx_render::OverlayRect {
+                x: width - panel_width - 12.0,
+                y: 12.0,
+                width: panel_width,
+                height: panel_height,
+            },
+        );
+        let _ = height;
+
+        let out = format!("{stem}-{:02}-{beat}.ppm", shot + 1);
+        capture_frame(context, renderer, options.width, options.height)
+            .write_ppm(&out)
+            .map_err(|error| format!("could not write {out}: {error}"))?;
+        println!("  shot {}: {beat} -> {out}", shot + 1);
+    }
+
+    Ok(())
+}
+
 fn photograph_the_growth(
     context: &GpuContext,
     renderer: &mut Renderer,
@@ -7554,6 +7743,9 @@ struct Active {
     /// reads the world, spends health and says things, and never writes a
     /// block or touches the pile.
     dark: stalker::TheDark,
+    /// The room graph: which open space is enclosed. Derived from the
+    /// blocks and kept nowhere — see `vx_world::atmos`.
+    rooms: vx_world::atmos::Rooms,
     /// What the deep ore has done to you. Live-only, like the health it
     /// spends: no journal ever hears about a dose.
     dose: dose::Dose,
@@ -8078,6 +8270,9 @@ impl App {
         // trunk sweeps through is ground, and ground is the hash.
         Self::advance_felling(active, active.mining.last_ticks());
         Self::advance_water(active, active.mining.last_ticks());
+        // The room graph catches up with whatever the frame edited. Cheap
+        // when nothing did, which is nearly every frame.
+        active.rooms.refresh(&mut active.world);
         Self::advance_weather(active, active.mining.last_ticks());
         Self::collect_crashes(active);
         Self::collect_drops(active);
@@ -8606,6 +8801,21 @@ impl App {
                 let phase = active.started.elapsed().as_secs_f32() * 3.0;
                 objects.extend(hologram::cage(hit.block, progress, phase));
                 objects.extend(hologram::scan_plane(hit.block, progress));
+            }
+        }
+        // The room you are standing in, while the F3 panel is up: twelve
+        // bars round its bounds. Stage 60a's debug overlay, and after the
+        // lighting loop for the same reason the cage is.
+        if active.debug_open {
+            let feet = vx_core::BlockPos::new(
+                active.player.position.x.floor() as i32,
+                active.player.position.y.floor() as i32,
+                active.player.position.z.floor() as i32,
+            );
+            if let vx_world::atmos::Verdict::Sealed(room) =
+                active.rooms.room_at(&active.world, feet)
+            {
+                objects.extend(room_bars(room));
             }
         }
         // What you dropped, turning on the spot on the floor. After the
@@ -11047,6 +11257,16 @@ impl App {
     /// townsfolk round built, because a search nobody can perceive may as
     /// well be a random walk — the note's own argument, and the reason the
     /// tells are not optional.
+    /// The F3 panel's room line: what the air knows about the block the
+    /// feet are in.
+    fn room_line(active: &mut Active, feet: vx_core::BlockPos) -> String {
+        match active.rooms.room_at(&active.world, feet) {
+            vx_world::atmos::Verdict::Sealed(room) => format!("{} BLOCKS SEALED", room.volume),
+            vx_world::atmos::Verdict::Outdoors => "OUTDOORS".into(),
+            vx_world::atmos::Verdict::Solid => "-".into(),
+        }
+    }
+
     /// Is the player standing on ground the city's citizenship covers?
     fn in_sanctuary(active: &Active) -> bool {
         active.citizen
@@ -15134,8 +15354,10 @@ impl App {
             .map_or(0, |base| base.stockpile.count(fuel::CELL));
         let now = active.journal.tick();
 
+        let room = Self::room_line(active, feet);
         let content = debug::DebugContent {
             fps,
+            room,
             position: (at.x as f32, at.y as f32, at.z as f32),
             chunk: {
                 let chunk = feet.chunk();
@@ -16280,6 +16502,7 @@ impl ApplicationHandler for App {
         mining.ensure_flier(camera.position);
 
         let city = world.city();
+        let rooms = vx_world::atmos::Rooms::new(world.registry());
         self.active = Some(Active {
             movement: movement::Movement::default(),
             move_ticks: movement::Ticker::default(),
@@ -16411,6 +16634,7 @@ impl ApplicationHandler for App {
             clinic: clinic::Clinic::default(),
             arcade: cabinet,
             dark: stalker::TheDark::default(),
+            rooms,
             dose: rads,
             dose_check: 0.0,
             last_rads: 0.0,

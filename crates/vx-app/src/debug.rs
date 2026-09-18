@@ -41,6 +41,9 @@ pub struct DebugContent {
     pub pitch: f32,
     /// The block under the crosshair, by name, if any.
     pub aimed: Option<String>,
+    /// The room the feet are in, as `atmos` sees it: its sealed volume, or
+    /// that it is outdoors.
+    pub room: String,
     /// World: chunks loaded / drawn, triangles, player edits, wounds.
     pub chunks_loaded: usize,
     pub chunks_drawn: usize,
@@ -103,7 +106,7 @@ impl Rows {
 /// Rows the panel always draws, plus one optional belief row. The height
 /// is derived, not typed — the fabricator panel's overflow taught that
 /// lesson for everybody.
-const FIXED_ROWS: u32 = 17;
+const FIXED_ROWS: u32 = 18;
 pub const DEBUG_HEIGHT: u32 = 12 + (FIXED_ROWS + 1) * LINE_HEIGHT + 4 * 3 + 8;
 
 /// Draw the readout. Pure in its inputs.
@@ -150,6 +153,7 @@ pub fn render_debug(content: &DebugContent) -> Vec<u8> {
         content.aimed.as_deref().unwrap_or("-"),
         TEXT,
     );
+    rows.line("ROOM", &content.room, TEXT);
     rows.gap();
 
     rows.line(
@@ -293,6 +297,7 @@ mod tests {
             rads: (18.4, 132.0),
             dark: (0.8, "HUNTING"),
             medkits: 3,
+            room: "75 BLOCKS SEALED".into(),
         }
     }
 

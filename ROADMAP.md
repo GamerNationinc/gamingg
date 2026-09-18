@@ -137,6 +137,7 @@ Written down because they are easy to forget and expensive to get wrong.
 | 58 | `a10a2d4` | The towns that grow, and the money that moves between them. Asked to *"work the economy — real towns that grow in size based on economy, and local towns that buy and trade with each other."* Both halves were half-built since 9b and both stopped in the same place. The network moved goods and **nobody paid for them**: `Market::till` moved for exactly one reason, `TILL_REFILL` ticking up against how full the shelves were, so a town on a busy corner of the map and a town nobody shipped to ended up with the same money — and `dispatch` placed **one** load a window across the entire frontier, which is a map with freight drawn on it rather than a network. And a town's size was fixed at worldgen: `core_half` is one of three values assigned by a hash, it feeds the *terrain plateau* through `blend_height`, so it feeds the world hash and cannot move at runtime. The buyer now draws `price x amount` from its own till at dispatch and the seller takes it — a town that cannot cover a load does not order one, so a poor town stays short, its prices stay high, and the first thing it can afford is the thing it needs most — up to four loads a window, never twice from one source. `Market` gains what it has **earned selling on for its life**, deliberately not the same number as the till, because a till is spent and a place that is doing well is a place money moves *through*; crossing `GROWTH_AT` puts a building up, and a ratchet, so a town that has a good decade and then a bad year keeps what it built. **The buildings are edits, not worldgen.** `stamp` lays down the authored plan and nothing else and is pure in `(seed, pos, sites)`, which is what lets `save.rs` write only modified chunks and is what the world hash is a hash *of*; a growth shed reaches the world the way a founded town's chunks do — blocks written into loaded chunks, which mark themselves modified and save. Which means it has to be **deferred**: `masonry.dat` records what is *standing*, which is not the same number as what a town has *earned*, and a town three thousand blocks out grows on its books and builds when you arrive. Two real holes had to close at once. `Economy::run` had exactly one caller, `main.rs`, so a headless `Session` had **never run the freight network** and no test had watched it end to end; and selling had never been written down, which was harmless for eight stages and stopped being harmless the moment a town's books could move a block — `Command::Sell` (tag 33), journal `VERSION` 34, with the reputation band stated on the wire for the same reason a shot's muzzle is. Two bugs found by the oracle, both about *when*: `CommandLog` coalesces consecutive `Advance`s, so a whole afternoon arrived as one order and the crew dug through ground a town had already built on — merging now stops at a dispatch window; and `Session::run_the_network` read `journal.tick()`, which is already at the far end of the order before the loop that works through it has started. `economy.dat` 6, `keeping::FILES` 40 -> 41, `Role::Works`, three pockets of bare plateau inside even the smallest core, and `books_hash` over the money as well as the goods |
 | 59a | `d9abb6e` | The Ruined City: the place. Asked for *"a large city called the Ruined City — a retrofitted modern outpost built upon the ruins of an ancient giant star fort, exactly like the Rust outpost, where citizenship costs 10 000 credits and everything you sell goes up by rocket to an orbital station."* Split at the seam the work has: **this half is the place**, and 59b is what you do there — the citizenship, the gate, the counter and the rocket, which need a journal tag and a sidecar that this half does not. Two decisions taken: **three to four kilometres out**, pinned on the map from the first frame but a trip you plan; and **ruins first, compound second** — the story is the fallen star fort, with a small modern Outpost bolted into the middle of it. The design finding is that **the city should be a `TownSite`**: every piece of machinery it needs already keys on one — the plateau through `blend_height`, the wall through `fort_for`, the buildings through `plan_for`, the market through `Economy`'s centre key, the counter through the raycast that finds the site behind an `engine:counter`, the map, the beacon and the permits — so a bespoke `CitySite` would have re-plumbed all of it while a fourth `Speciality` and a much larger `core_half` gets every one for free, across exactly ten match sites. One cell on a **round** ring seven cells out, short-circuited before the presence hash the way the hometown's cell is, so there is exactly one city, no ordinary town can share it and nothing is written down; nine jittered candidates inside that cell against a relaxed `CITY_RELIEF`, because a plot a hundred and ninety-two blocks across is a far harder thing to find than a forty-block one. **Two walls on one site**: `forts_for` yields the ancient `GreatStar` — eight points, always ruined, two thirds down, no gate locks, because nobody has kept its keys — and the modern six-point retrofit drawn tight round the compound inside it, and `stamp` walks the iterator. The parade ground is derived rather than drawn, because a hundred and fifty metres of cracked paving is a field and not a blueprint; the bastion stumps cost nothing at all, because the ruin pass has left a fallen segment's footing in the ground since stage 21. Two real findings on the way. **The gather margin was a comment rather than a contract**: `REACH` came off `MAX_CORE_HALF`, and a six-point trace has always reached about six blocks further than `core_half + SKIRT` with only `flora::CANOPY_REACH`, folded in for an unrelated reason, covering the difference — it is sized off the widest wall now and asserted against `forts_for`. And **a wall has to fit on the ground it stands on**: the first cut put the great star fifty-eight blocks past the city's own core, and because `part_at` rides each column's own surface it followed the hillside and read as a fragment stuck on a slope; the whole trace — curtain, bastion, thickness and ditch, ninety-five blocks all told — now stands inside the ninety-six block plot. `CITY_SKIRT` is double the usual so a plot that big eases into the country instead of ending in a step, and the skirt is taken from the site rather than the constant |
 | 59b | `45a0640` | The Ruined City: what you do there. The second half of the ask: *"in order to enter city you have to pay for citizenship — 10 000 credits, something ridiculous — at this outpost all goods sold get sent via rocket ship to an orbit station."* **Citizenship is a gate.** The city's modern trace is stamped with its four gateways shut — `Part::Gate`, a `metal_wall` block under each arch, `Fort::sealed` true for exactly one wall in the game — and paying writes air into them. That makes enrolling an *order*: `Command::Enrol`, tag 34, journal `VERSION` 35, no payload, because the price is a constant and the gate is derived from the seed; `citizenship.dat` (`VXCZ`, one byte) beside it, `keeping::FILES` 41 -> 42, and `worth_saving_now` true because ten thousand credits is exactly the list. **No second ledger.** The round's note had planned a `masonry`-style deferred queue for the gate and it was not needed: `open_the_gates` is idempotent and costs a few hundred block reads, so it runs when you pay and once a dispatch window after that from the one-copy network tick, which now takes the citizen flag. A gate chunk that was not resident when you paid opens within a window of your arriving at it. **You pay at the lock.** A fort's gate lock has never had a permit claim behind it — using one logged a warning — and at the city it is now the one lock in the game you pay at: use it once for the offer, again within six seconds to pay. No panel, no verb, no new block. **The counter refuses a non-citizen** on both sides: the app before the shelf opens, `Session::sell_everything_at` through `confirm`'s existing `open` flag, and the replay's `Sell` arm — a log cannot sell at the Outpost without an `Enrol` before it. **Every Outpost sale launches.** `Rig::rocket`, drawn on the pad idle and lit and rising after a sale off a departure tick the way a caravan is; the manifest is the toast and the station is a name. The blueprint's block rocket came off the pad for it — a ship that lifts off cannot also be a column of blocks left standing behind. **The safe zone is the core, for a citizen**: deputies stand down, the deep stands down, and the trigger is refused before `Fire` is recorded, so the replay never sees a shot that was never fired. A non-citizen inside the walls gets none of it, and citizenship buys no price advantage anywhere. Two oracle tests: paying replays to the same open gate, and never paying replays to the same shut one. The Karpathy `CLAUDE.md` is in the tree from this round, and this is the first stage written under it — which is why the round is smaller than its own note |
+| 60a | _this_ | The air, part A: sealed rooms as a graph. `ATMOSPHERE.md` arrived — a design for pressurised air that takes four ideas from the Starship EVO devlog and rejects its particle emulation, because this game still has the grid and a stochastic emitter would put an asterisk on the replay oracle — and it stages the work A to E with *"stage A alone is the honest experiment."* This is stage A: `atmos::label` labels open space per sixteen-block section (a flood fill over 4 096 voxels, pure in the section's blocks, with the six face arrays the neighbours read and nothing else), and `atmos::Rooms` stitches sections across faces on demand under `SEALED_VOLUME_MAX` — a walk over face arrays from the section-label you asked about, `Outdoors` the instant it passes the budget, reaches an unloaded chunk or the top of the column. **Not the union-find the note sketched**: splits are the awkward half of union-find and a walk has none, so a sealed room is kept keyed by its lowest open block until an edit touches one of its sections or their neighbours, and an outdoors verdict is never kept at all, because the budget makes that walk cheap and forgetting it removes every invalidation case that involves chunk loading. `BlockDef::sealed` beside `solid` and `opaque` — a grate is solid and does not hold air, water is not solid and does — and `World::take_edits`, three lines, so the graph rebuilds only what changed. Derived, never stored: no journal tag, no save file, the oracle untouched. The debug overlay is the F3 `ROOM` line and twelve `hologram` bars round the room you stand in. **The number the round was run for**: closing the hut's doorway and asking again costs 128 microseconds, relabel and walk together; the cold start that labels thirty-nine sections costs 3.2 milliseconds once. Two findings pinned as tests: a wounded block still seals until B reads the mask, and a bunker is *outdoors* through its own entry stair until B gives it a hatch block |
 
 **1 — Core scaffold.** Block registry, palette-compressed chunk storage,
 worldgen, greedy meshing. A chunk is 65 536 blocks; storing a `BlockId` each
@@ -4517,6 +4518,94 @@ into stage 19 (factions).
 
 ---
 
+## Shipped — Stage 60a: the air, part A — sealed rooms as a graph
+
+`ATMOSPHERE.md` is in the tree from this round: a design for pressurised air
+that takes four ideas from the Starship EVO devlog — a room is an object, leak
+detection is the primitive, smoothing goes on the output, keep a bounds box —
+and rejects the particle emulation the talk ends up at, because this game
+still has the grid and a five-particle random walk deciding whether your base
+holds air would put an asterisk on the replay oracle. It stages the work A to
+E, and says *"stage A alone is the honest experiment: build it, drill a wall,
+watch the tint change, and measure the rebuild."* This is A.
+
+**Decided with the user**: stage A only; an anchor-keyed lazy walk rather
+than the note's union-find; the doc checked in verbatim.
+
+### Sealing is a block property
+
+`BlockDef::sealed` sits beside `solid` and `opaque`. It follows `solid`
+unless a block says otherwise, and two do: the catwalk is a grate you stand on
+and air goes through, and water is not solid and holds no atmosphere. Nothing
+else in the registry changed. A wounded block still seals in A — the note
+wants a damage mask to open a face and to size a leak, and both are B's
+business; it is written down here so B does not discover it.
+
+### Label per section, walk on demand
+
+`atmos::label::label_section` is a flood fill over one 16³ section — 4 096
+voxels, an explicit stack, pure in the section's blocks — that produces the
+label per voxel, the size, bounds and lowest voxel per component, and the six
+face arrays. **The face arrays are the only part a neighbour ever reads.**
+Labels are sixteen bits rather than the note's eight: a section can in
+principle hold two thousand one-voxel pockets, and a labeller that silently
+merged the two hundred and fifty-sixth into the last is the bug that only
+shows up in a checkerboard somebody built on purpose.
+
+`atmos::Rooms` caches labels per `(chunk, section)` and builds a room only
+when asked: a breadth-first walk over `(section, label)` pairs, crossing a
+face wherever the two hundred and fifty-six cells agree, summing sizes and
+tracking bounds and the lowest open block. It stops `Outdoors` the instant the
+sum passes `SEALED_VOLUME_MAX`, a neighbour section's chunk is not loaded, or
+the walk reaches the top of the column — eight sections of open air trip the
+budget, which is what makes the expensive case the one that stops early.
+
+### Why not the union-find
+
+The note sketches a global union-find over section-labels with incremental
+merges, and admits that splits — you cannot un-union — need a drop-and-rewalk
+anyway. So this does only the rewalk, with the same cost bound: a sealed room
+is kept, keyed by its lowest open block, until `Rooms::refresh` sees an edit in
+one of its sections *or their six neighbours* — the neighbour rule because a
+room next door may now extend into the edited section and its members would
+not say so. An outdoors verdict is never kept. That last choice removes every
+invalidation case that involves chunk loading: a sealed room cannot depend on
+an unloaded chunk, or it would have been outdoors.
+
+`World::take_edits` is the whole of the plumbing: three lines beside
+`edit_count`, drained once a frame. Nothing is journalled and nothing is saved.
+The rooms are derived from the ground the way a chunk's mesh is, so a world
+that hashes the same has the same rooms and the oracle has no opinion.
+
+### The honest experiment
+
+`--rooms` builds a seven-by-five-by-seven hut of metal wall on the plateau
+beside the house, stands the camera inside it, and photographs it twice: with
+one block out of the east wall, and with it back. The F3 panel's new `ROOM`
+line reads `OUTDOORS` and then `75 BLOCKS SEALED`, and twelve `hologram` bars
+appear round the room's bounds on the second frame — the note's "tint",
+without a mesher change.
+
+And it times the thing the round was run for. Closing the doorway and asking
+again — one section relabelled, the neighbours' rooms forgotten, the walk —
+costs **128 microseconds**. The cold start, labelling all thirty-nine sections
+the first walk touched, costs 3.2 milliseconds once. Both inside a frame, and
+the second by a factor of a hundred.
+
+### Two findings, pinned
+
+- `a_bunker_is_outdoors_through_its_own_stair`: the game has no door or hatch
+  block, so a bunker's entry stair is open to the sky and the whole works is
+  weather. That is what stage B's hatch block buys, and it is a test so B
+  starts from it rather than finding it.
+- `a_grate_does_not_seal_and_water_does`: the two overrides, and a flooded
+  block inside a room is not room air — seventy-four, not seventy-five.
+
+Also written to fail first: the sealed hut, opening and closing it, a hut
+straddling two chunks and two sections, labelling purity, the incremental
+graph against a full rebuild after a partition and a hole, and the
+thirty-three-cube hall that is past the budget.
+
 ## Planned — the world below: caves and bunkers
 
 From concept art supplied for the project: a small civilian bunker interior
@@ -4559,6 +4648,25 @@ against real sessions for a while.
 **A real min-cost flow.** Trade routing is greedy nearest-deficit matching. At a
 few dozen towns it picks the runs a proper solver would; worth revisiting only
 if the traffic it produces reads as dull.
+
+## Planned — the air: sealed rooms, gas and leaks
+
+The design is `ATMOSPHERE.md`, verbatim as it arrived. Stage A shipped in
+60a; the rest is staged there and repeated here so the board has it:
+
+| Stage | Ships | Proves |
+|---|---|---|
+| ~~A~~ | ~~`label.rs` + the room graph + a debug overlay~~ — **shipped as 60a** | the graph is correct and the incremental rebuild is cheap: 128 µs |
+| B | `gas.rs`, integer pressure per room, leaks sized by damage masks, vent audio — and the hatch block A found it needs | pressure is a thing; holes have sizes |
+| C | player breath in `health.rs`, the HUD's exponential filter, fog, vent particles | it is a mechanic |
+| D | `electrolysis` fills, `fuel` draws, `fire` consumes, `frost` shares edges | the room graph pays for itself |
+| E | the leak-patch job in `vx-agent` | the swarm has a reason to fly indoors |
+
+What A settled for the rest: rooms are anchor-keyed and derived, so `atmos.sav`
+in B stores `(anchor, gas, volume)` and claims rooms by containment on load;
+there is no union-find to split, so §3.3's mass fix-up runs on the forgotten
+room's members when the walk next rebuilds it; and a wounded block seals until
+B reads its mask.
 
 ## The arc beyond
 
@@ -4622,7 +4730,10 @@ ring three to four kilometres out, and two walls on it — an ancient eight-poin
 ruin and the modern retrofit inside it. 59b is what you do there, and it is
 shipped too: the ten thousand, the gate it opens, the counter that refuses
 anybody who has not paid, the rocket, and the safe zone — the first round
-written under `CLAUDE.md`, and smaller than its own note for it.
+written under `CLAUDE.md`, and smaller than its own note for it. Then a new
+note arrived, `ATMOSPHERE.md`, and 60a shipped its stage A: sealed rooms as a
+graph, derived from the blocks and kept nowhere, with the rebuild measured at
+a hundred and twenty-eight microseconds.
 
 | Stage | What | Why here |
 |---|---|---|
@@ -4631,6 +4742,8 @@ written under `CLAUDE.md`, and smaller than its own note for it.
 | ~~58~~ | ~~The towns that grow~~ — **shipped** | Real towns that grow in size on the strength of their economy, and local towns that buy and trade with each other. The buyer pays out of its own till, four loads a window, and what a town earns selling on is a ratchet that puts buildings up. The buildings are **edits**, not worldgen, so the terrain and the world hash do not move — and they are deferred, so a town grows wherever it is and builds when you arrive |
 | ~~59a~~ | ~~The Ruined City: the place~~ — **shipped** | The city on the map, the ancient great star and its breaches, the parade ground and the Outpost standing in it. A `TownSite` with a fourth speciality and a much larger core, on a round ring seven cells out, with two walls on one site |
 | ~~59b~~ | ~~The Ruined City: what you do there~~ — **shipped** | Citizenship at 10 000 credits, once and for ever: `Command::Enrol` (tag 34, journal `VERSION` 35) and `citizenship.dat`, a gate stamped shut by worldgen and opened by an edit with no second ledger, the counter that refuses the unpaid on every side, the rocket every Outpost sale leaves on, and the safe zone inside the core for a citizen |
+| ~~60a~~ | ~~The air, part A: sealed rooms~~ — **shipped** | `atmos::label` and `atmos::Rooms`: open space labelled per section, rooms walked on demand under a volume budget and kept by anchor, `BlockDef::sealed`, the F3 `ROOM` line and the bars. Derived, never stored. 128 µs to close a door and know it |
+| 60b | The air, part B: gas and leaks | `gas.rs` — integer pressure per room, leaks sized by the damage mask's missing cells, venting, `atmos.sav` by anchor — and the hatch block A found a bunker needs before it can be anything but weather. See `ATMOSPHERE.md` |
 | ~~49b~~ | ~~The drone you can lose~~ — **shipped as 57** | A machine cannot collide with anything, so it cannot crash. Integrity beside `wear.rs` and on the oracle for the same reason wear is; the flier's auto-climb off under manual control so it can be flown into a cliff, while the digger keeps the standability rule that stops a hand-driven drone stranding itself; gunfire through `segment_hits_box`; a persistent, mapped wreck you walk out to and salvage or rebuild; and `garage.rs`'s first `lose` mutator, since `grant` only ever added |
 
 Beyond those the board holds the outstanding engineering below, and whatever
@@ -4638,7 +4751,7 @@ the next note says.
 
 ## The feature map
 
-The whole game at a glance, as of stage 59b.
+The whole game at a glance, as of stage 60a.
 
 **Shipped:** core scaffold; wgpu renderer + headless capture; block editing
 through cancellable events; AABB physics; region saves (name-keyed, cached);
@@ -4863,6 +4976,9 @@ on the map from the first frame) and citizenship of it (ten thousand credits
 paid at the gate lock, `Command::Enrol` opening a gate that worldgen stamps
 shut, the counter refusing the unpaid on every side, a rocket every sale
 leaves on, and a safe zone inside the core for a citizen);
+sealed rooms (open space labelled per sixteen-block section, stitched across
+faces on demand under a volume budget, anchor-keyed and derived from the
+blocks alone — the F3 `ROOM` line and the bars round the one you stand in);
 a Steam Deck dist build every round.
 
 **Planned, in arc order:** nothing is named. Every design note this project

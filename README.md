@@ -175,6 +175,10 @@ build in it, and it survives quitting — skills included.
 
 ### Known rough edges
 
+- **A bunker is outdoors.** Its entry stair is open to the sky and there is
+  no hatch block, so the room graph reads the whole works as weather. The
+  hatch is the first thing stage B of the air builds, and there is a test
+  pinning the finding until it does.
 - **A gate you paid for can be shut for half a minute.** Paying opens every
   gate whose chunk is resident; one that was not opens on the next dispatch
   window after you arrive at it, because the gate is an edit and there is
@@ -799,6 +803,19 @@ storage chest, a mailbox for mail orders, and a one-time welcome panel whose
 changelog is parsed straight out of `ROADMAP.md` (`--changelog` prints it).
 The spawn area is pregenerated before the first frame and the hometown is held
 resident permanently; `--view-distance <n>` (4–16) picks the streaming radius.
+
+### The rooms know they are rooms
+
+Stand in a hut with the door shut, press F3, and the panel says `ROOM  75
+BLOCKS SEALED` with a wireframe of light round the space you are in. Open the
+door and it says `OUTDOORS`. That is all it does this round, and it is the
+first stage of `ATMOSPHERE.md`: the game now knows which open space is
+enclosed, by labelling sixteen-block sections and stitching them across their
+faces on demand, with a volume budget past which a room is weather. Nothing is
+saved and nothing is journalled — a room is derived from the blocks the way a
+chunk's mesh is — and closing a door and asking again costs a hundred and
+twenty-eight microseconds. Gas, pressure, leaks the size of the hole, and air
+you can run out of are the stages after it.
 
 ### There is a city, and it is a ruin
 

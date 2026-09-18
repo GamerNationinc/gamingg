@@ -54,6 +54,11 @@ pub struct BlockDef {
     /// Fully hides the neighbouring face, letting the mesher cull it. Glass is
     /// solid but not opaque; air is neither.
     pub opaque: bool,
+    /// True when the block holds pressure. Independent of `solid`: glass and a
+    /// closed hatch are sealing, a grate and a ladder are not, and a wounded
+    /// block is sealing only while its damage mask still covers the face.
+    /// See `ATMOSPHERE.md`.
+    pub sealed: bool,
     /// Atlas tile index per face, indexed by `Face as usize`.
     pub textures: [u16; 6],
     /// Time multiplier to break. `None` means unbreakable.
@@ -72,6 +77,7 @@ impl BlockDef {
             display_name,
             solid: true,
             opaque: true,
+            sealed: true,
             textures: [texture; 6],
             hardness: Some(1.0),
             shape: Shape::Cube,
@@ -102,9 +108,18 @@ impl BlockDef {
         self
     }
 
-    /// Mark as passable: no collision.
+    /// Mark as passable: no collision. Air passes too, unless
+    /// [`BlockDef::sealed`] says otherwise afterwards.
     pub fn non_solid(mut self) -> Self {
         self.solid = false;
+        self.sealed = false;
+        self
+    }
+
+    /// Say outright whether the block holds pressure, where `solid` gets it
+    /// wrong: a grate is solid and does not, water is not solid and does.
+    pub fn sealed(mut self, sealed: bool) -> Self {
+        self.sealed = sealed;
         self
     }
 
@@ -169,6 +184,7 @@ impl BlockRegistry {
             display_name: "Air".to_string(),
             solid: false,
             opaque: false,
+            sealed: false,
             textures: [0; 6],
             hardness: None,
             shape: Shape::Cube,

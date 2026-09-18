@@ -21,6 +21,10 @@ pub struct World {
     /// anything derived from world contents — a consumer stores the count it
     /// built against and rebuilds when it moves. Monotonic, never reset.
     edit_count: u64,
+    /// Where every effective block change since the last [`World::take_edits`]
+    /// landed, for a consumer that wants to rebuild *only* what changed —
+    /// the room graph. Wounds are not listed: a chipped wall still seals.
+    edits: Vec<BlockPos>,
     /// Chunks something is actively working in, and how many things.
     ///
     /// A drone reads the world through [`World::block`], which reports
@@ -56,6 +60,7 @@ impl World {
             generator: TerrainGenerator::new(seed, blocks),
             chunks: HashMap::new(),
             edit_count: 0,
+            edits: Vec::new(),
             pinned: HashMap::new(),
             charters: Vec::new(),
         }
@@ -187,6 +192,11 @@ impl World {
 
     pub fn edit_count(&self) -> u64 {
         self.edit_count
+    }
+
+    /// The block positions changed since this was last called. Drains.
+    pub fn take_edits(&mut self) -> Vec<BlockPos> {
+        std::mem::take(&mut self.edits)
     }
 
     pub fn generator(&self) -> &TerrainGenerator {
@@ -352,6 +362,7 @@ impl World {
         if previous != block {
             self.dirty_touching_neighbours(pos);
             self.edit_count += 1;
+            self.edits.push(pos);
         }
         Some(previous)
     }
@@ -392,6 +403,7 @@ impl World {
             let previous = chunk.set(local, BlockId::AIR);
             self.dirty_touching_neighbours(pos);
             self.edit_count += 1;
+            self.edits.push(pos);
             return Carved::Broke(previous);
         }
         chunk.set_mask(local, after);

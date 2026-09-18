@@ -99,6 +99,14 @@ pub fn cage(block: BlockPos, progress: f32, phase: f32) -> Vec<Object> {
     let light = glow(progress, phase);
     let low = Vec3::new(block.x as f32, block.y as f32, block.z as f32) - Vec3::splat(SWELL);
     let high = low + Vec3::splat(1.0 + SWELL * 2.0);
+    bars_between(low, high, light)
+}
+
+/// The twelve bars of a box from `low` to `high`, drawn at `light`.
+///
+/// The cage is one of these round one block; the room overlay is one round
+/// a whole room. Same bars, same reasons for bars — see the module note.
+pub fn bars_between(low: Vec3, high: Vec3, light: f32) -> Vec<Object> {
     let mut bars = Vec::with_capacity(12);
 
     // Four bars along each axis, one down each edge of the box. Written as a

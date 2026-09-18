@@ -180,6 +180,9 @@ impl TerrainBlocks {
                 BlockDef::uniform("engine:water", 5)
                     .translucent()
                     .non_solid()
+                    // Not solid, but not room air either: a flooded block
+                    // holds no atmosphere.
+                    .sealed(true)
                     .with_hardness(None),
             ),
             bedrock: register(BlockDef::uniform("engine:bedrock", 6).with_hardness(None)),
@@ -258,7 +261,12 @@ impl TerrainBlocks {
             rusted_metal: register(
                 BlockDef::uniform("engine:rusted_metal", 23).with_hardness(Some(1.6)),
             ),
-            catwalk: register(BlockDef::uniform("engine:catwalk", 24).with_hardness(Some(1.0))),
+            // A grate: you stand on it and air goes through it.
+            catwalk: register(
+                BlockDef::uniform("engine:catwalk", 24)
+                    .with_hardness(Some(1.0))
+                    .sealed(false),
+            ),
             mast: register(BlockDef::uniform("engine:mast", 25).with_hardness(Some(2.0))),
             // The beacon is the town's link to the network, and like the shop
             // counter it is not something a drill or a drone gets to dismantle.
